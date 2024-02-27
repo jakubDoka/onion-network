@@ -49,12 +49,16 @@ rebuild_workspace() {
 		|| exit 1
 }
 
-forked/substrate-node-template/target/release/node-template --dev > /dev/null 2>&1 &
-sleep 10
+test -d utils/falcon/falcon || (cd utils/falcon && sh transpile.sh || exit 1)
+
+
+CHAIN_PATH="forked/substrate-node-template/target/release/node-template"
+test -e $CHAIN_PATH || (cd forked/substrate-node-template && cargo build --release)
+$CHAIN_PATH --dev > /dev/null 2>&1 &
+sleep 3
 subxt metadata > core/chain-types/metadata.scale
 
 (cd nodes/client/wallet-integration && npm i || exit 1)
-(cd forked/substrate-node-template && cargo build --release || exit 1)
 (cd contracts/node_staker && cargo contract build $WASM_FLAGS || exit 1)
 (cd contracts/user_manager && cargo contract build $WASM_FLAGS || exit 1)
 rebuild_workspace

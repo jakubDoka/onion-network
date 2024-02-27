@@ -1,0 +1,13 @@
+
+[book]
+authors = ["jakubDoka"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Orion Network Whitepaper"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]

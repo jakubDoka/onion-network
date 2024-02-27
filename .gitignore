@@ -1,0 +1,10 @@
+/target
+/nodes/client/dist
+Cargo.lock
+/node_keys
+/node_logs
+/whitepaper/*.min.js
+**/dist/
+**/node_modules/
+**/package-lock.json
+**/metadata.scale

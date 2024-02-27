@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta name="viewport" content="minimum-scale=0.5, initial-scale=1">
+	<link data-trunk rel="rust" data-wasm-opt="z" />
+	<link data-trunk rel="css" href="/assets/style.css" />
+	<link data-trunk rel="css" href="/assets/hask-font/web/hack-subset.css" />
+	<link data-trunk rel="copy-dir" href="/assets/hask-font/web/fonts" dist="/fonts" />
+</head>
+
+<body class="pc flx bp fdc">
+	<script data-trunk src="/assets/script.js"></script>
+	<script data-trunk src="wallet-integration/node_modules/@polkadot/util/bundle-polkadot-util.js"></script>
+	<script data-trunk src="wallet-integration/node_modules/@polkadot/types/bundle-polkadot-types.js"></script>
+	<script data-trunk
+		src="wallet-integration/node_modules/@polkadot/util-crypto/bundle-polkadot-util-crypto.js"></script>
+	<script data-trunk
+		src="wallet-integration/node_modules/@polkadot/wasm-crypto/bundle-polkadot-wasm-crypto.js"></script>
+	<script data-trunk src="wallet-integration/node_modules/@polkadot/keyring/bundle-polkadot-keyring.js"></script>
+	<script data-trunk src="wallet-integration/node_modules/@polkadot/api/bundle-polkadot-api.js"></script>
+	<script data-trunk
+		src="wallet-integration/node_modules/@polkadot/extension-dapp/bundle-polkadot-extension-dapp.js"></script>
+	<script data-trunk src="wallet-integration/integration.js"></script>
+</body>

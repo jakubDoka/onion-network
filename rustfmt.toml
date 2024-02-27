@@ -1,0 +1,7 @@
+imports_granularity = "One"
+group_imports = "One"
+reorder_impl_items = true
+unstable_features = false
+overflow_delimited_expr = true
+use_small_heuristics = "Max"
+use_field_init_shorthand = true

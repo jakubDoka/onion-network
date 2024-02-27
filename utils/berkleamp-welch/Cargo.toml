@@ -1,0 +1,21 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "berkleamp-welch"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+
+[dev-dependencies]
+getrandom = "0.2.12"
+
+[features]
+simd = []
+
+[lints]
+workspace = true

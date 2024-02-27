@@ -1,0 +1,25 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "chat-spec"
+version = "0.1.0"
+edition = "2021"
+description = "common declarations that client and server share"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+chain-api = { version = "0.1.0", path = "../chain-api" }
+component-utils = { version = "0.1.0", path = "../../utils/component-utils" }
+crypto = { version = "0.1.0", path = "../crypto" }
+libp2p = { version = "0.53.1" }
+log = "0.4.20"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+rpc = { version = "0.1.0", path = "../rpc" }
+thiserror = "1.0.50"
+
+[lints]
+workspace = true

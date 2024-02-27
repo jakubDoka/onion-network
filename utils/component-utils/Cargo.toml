@@ -1,0 +1,24 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "component-utils"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+arrayvec = { version = "0.7.4", features = ["serde"] }
+codec-derive = { version = "0.0.0", path = "../codec-derive" }
+futures = { version = "0.3.28" }
+thiserror = { version = "1.0.50" }
+crypto = { version = "0.1.0", path = "../../core/crypto", optional = true }
+
+[features]
+default = ["crypto"]
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "storage"
+version = "0.1.0"
+edition = "2021"
+description = "node that stores data requested by satelites"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+storage-spec = { version = "0.1.0", path = "../../core/storage-spec" }
+
+[lints]
+workspace = true

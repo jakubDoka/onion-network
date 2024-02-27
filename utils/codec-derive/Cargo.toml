@@ -1,0 +1,23 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "codec-derive"
+version = "0.0.0"
+authors = ["mlokr <jdoka@crownsterling.io>"]
+description = "proc macro for generating codec impls"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+proc-macro2 = "1"
+syn = "2"
+
+
+[lints]
+workspace = true

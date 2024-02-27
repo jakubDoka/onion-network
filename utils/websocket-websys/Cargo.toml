@@ -1,0 +1,34 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "websocket-websys"
+version = "0.1.0"
+edition = "2021"
+description = "minimal websocket transport for libp2p"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "0.3.28"
+js-sys = "0.3.64"
+libp2p-core = "0.41.0"
+wasm-bindgen = "0.2.87"
+
+[dependencies.web-sys]
+version = "0.3.22"
+features = [
+  "BinaryType",
+  "Blob",
+  "ErrorEvent",
+  "FileReader",
+  "MessageEvent",
+  "ProgressEvent",
+  "CloseEvent",
+  "WebSocket",
+]
+
+[lints]
+workspace = true

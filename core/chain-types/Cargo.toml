@@ -1,0 +1,25 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "chain-types"
+version = "0.1.0"
+edition = "2021"
+description = "isolated macros generating loads of code"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+contract-macro = { version = "0.1.0", path = "../../utils/contract_macro" }
+parity-scale-codec = "3.6.9"
+subxt = { version = "0.33.0", default-features = false }
+subxt-signer = { version = "0.33.0", default-features = false }
+
+[features]
+native = ["subxt/default", "subxt-signer/default"]
+web = ["subxt/web", "subxt-signer/web", "subxt/jsonrpsee"]
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "dht"
+version = "0.1.0"
+edition = "2021"
+description = "a trivial network topology algotithm for libp2p"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+blake3 = "1.5.0"
+libp2p = "0.53.2"
+primitive-types = "0.12.2"
+
+[lints]
+workspace = true

@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+	"nodes/*",
+	"utils/*",
+	"tests/*",
+	"contracts/*",
+	"core/*",
+	"utils/falcon/falcon"
+]
+exclude = [
+	"forked/node-template",
+	"utils/falcon",
+]
+
+[workspace.lints.clippy]
+all = "warn"
+unnecessary_wraps = "warn"
+needless_return = "allow"
+
+[workspace.package]
+repository = "https://github.com/jakubDoka/orion-network"
+readme = "README.md"
+keywords = ["network", "decentralized", "polkadot", "pqc"]
+categories = ["networking", "cryptography", "blockchain"]
+license = "MIT"
+
+[profile.native-optimized]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.wasm-optimized]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev.package.falcon]
+overflow-checks = false
+
+[profile.dev.package.argon2]
+opt-level = 3
+

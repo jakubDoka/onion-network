@@ -1,0 +1,350 @@
+:root {
+	--primary-color: #000000;
+	--secondary-color: #333333;
+	--highlight-color: #ffffff;
+	--font-color: #ffffff;
+	--error-color: #ff0000;
+
+	--color-transition: 0.3s;
+	--sidebar-width: 250px;
+
+	--small-margin: 5px;
+	--big-margin: 10px;
+
+	--small-padding: 5px;
+	--big-padding: 10px;
+
+	--small-font-size: 18px;
+	--big-font-size: 25px;
+}
+
+.flx:not([hidden]) {
+	display: flex;
+}
+
+.pea {
+	pointer-events: auto;
+}
+
+.pen {
+	pointer-events: none;
+}
+
+.fdc {
+	flex-direction: column;
+}
+
+.bsha {
+	box-shadow: 0px 0px 5px black;
+}
+
+.blr {
+	backdrop-filter: blur(5px);
+}
+
+.jcsb {
+	justify-content: space-between;
+}
+
+.jcfe {
+	justify-content: flex-end;
+}
+
+.fg0 {
+	flex-grow: 0;
+}
+
+.fg1 {
+	flex-grow: 1;
+}
+
+.bf {
+	font-size: var(--big-font-size);
+}
+
+.sf {
+	font-size: var(--small-font-size);
+}
+
+.sp {
+	padding: var(--small-padding);
+}
+
+.bp {
+	padding: var(--big-padding);
+}
+
+.lsp {
+	padding-left: var(--small-padding);
+}
+
+.lbp {
+	padding-left: var(--big-padding);
+}
+
+.rsp {
+	padding-right: var(--small-padding);
+}
+
+.rbp {
+	padding-right: var(--big-padding);
+}
+
+.sm {
+	margin: var(--small-margin);
+}
+
+.bm {
+	margin: var(--big-margin);
+}
+
+.lsm {
+	margin-left: var(--small-margin);
+}
+
+.lbm {
+	margin-left: var(--big-margin);
+}
+
+.rsm {
+	margin-right: var(--small-margin);
+}
+
+.rbm {
+	margin-right: var(--big-margin);
+}
+
+.tsm {
+	margin-top: var(--small-margin);
+}
+
+.tbm {
+	margin-top: var(--big-margin);
+}
+
+.pc {
+	background-color: var(--primary-color);
+	color: var(--font-color);
+}
+
+.pc .hov:hover:not(:active) {
+	background-color: var(--highlight-color);
+	color: var(--primary-color);
+}
+
+.sc {
+	background-color: var(--secondary-color);
+	color: var(--font-color);
+}
+
+.sc.hov:hover:not(:active) {
+	background-color: var(--highlight-color);
+	color: var(--secondary-color);
+}
+
+.hc {
+	background-color: var(--highlight-color);
+	color: var(--primary-color);
+}
+
+.hc.hov:hover:not(:active) {
+	background-color: var(--primary-color);
+	color: var(--highlight-color);
+	fill: var(--highlight-color);
+}
+
+.ec {
+	background-color: var(--error-color);
+	color: var(--primary-color);
+}
+
+.ec.hov:hover:not(:active) {
+	background-color: var(--primary-color);
+	color: var(--error-color);
+}
+
+.lsb {
+	border-top-left-radius: 0px;
+	border-bottom-left-radius: 0px;
+}
+
+.rsb {
+	border-top-right-radius: 0px;
+	border-bottom-right-radius: 0px;
+}
+
+.bsb {
+	border-bottom-left-radius: 0px;
+	border-bottom-right-radius: 0px;
+}
+
+.tsb {
+	border-top-left-radius: 0px;
+	border-top-right-radius: 0px;
+}
+
+::-webkit-scrollbar {
+	display: none;
+}
+
+.sb {
+	border-radius: 0px;
+}
+
+.tac {
+	text-align: center;
+}
+
+.oxh {
+	overflow-x: hidden;
+}
+
+.oys {
+	overflow-y: scroll;
+}
+
+.pr {
+	position: relative;
+}
+
+.pa {
+	position: absolute;
+}
+
+.ma {
+	margin: auto;
+}
+
+.w100 {
+	width: 100%;
+}
+
+.dig {
+	display: inline-grid;
+}
+
+* {
+	color: var(--font-color);
+	font-family: Hack, monospace;
+	border-radius: 5px;
+	font-size: var(--small-font-size);
+	transition: color var(--color-transition), background-color var(--color-transition);
+}
+
+#sidebar {
+	border: 2px solid var(--secondary-color);
+}
+
+.toe {
+	text-overflow: ellipsis;
+	overflow: hidden;
+	white-space: nowrap;
+}
+
+.fy {
+	transform: scale(1, -1);
+}
+
+.bar-unloaded {
+	opacity: 0.1;
+}
+.bar-loading {
+	animation: pulse 0.5s infinite;
+}
+.bar-loaded {
+	opacity: 1.0;
+}
+
+@keyframes pulse {
+	from { opacity: 0.6; }
+	to { opacity: 0.4; }
+}
+
+::file-selector-button {
+	display: none;
+}
+
+body,
+html {
+	margin: 0px;
+}
+
+html {
+	width: 100vw;
+	height: 100vh;
+}
+
+body, .fsc {
+	position: absolute;
+	top: 0px;
+	right: 0px;
+	bottom: 0px;
+	left: 0px;
+}
+
+.boa {
+	bottom: auto;
+}
+
+a {
+	text-decoration: none;
+}
+
+textarea {
+	resize: none;
+	border: none;
+}
+
+input, button {
+	border: none;
+	font-size: var(--big-font-size);
+}
+
+input[type="text"] {
+	width: 250px;
+}
+
+input[disabled] {
+	opacity: 0.5;
+}
+
+input:invalid {
+	background-color: var(--error-color) !important;
+}
+
+:focus {
+	outline: none;
+}
+
+@media (min-width: 600px) {
+	.phone-only {
+		display: none !important;
+	}
+
+	#sidebar {
+		width: var(--sidebar-width);
+	}
+}
+
+@media (max-width: 600px) {
+	.desktop-only {
+		display: none !important;
+	}
+
+	#sidebar {
+		flex-grow: 1;
+		margin-right: 0px;
+	}
+
+	.off-screen {
+		display: none !important;
+	}
+}
+
+.notification-text {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 7;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}

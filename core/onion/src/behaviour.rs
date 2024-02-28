@@ -1,9 +1,7 @@
 use {
     crate::{
-        handler::{self, Handler},
-        packet::{self, ASOC_DATA, MISSING_PEER},
-        IncomingOrRequest, IncomingOrResponse, IncomingStream, KeyPair, OUpgradeError, PublicKey,
-        SharedSecret, StreamRequest,
+        packet::{self, ASOC_DATA, CONFIRM_PACKET_SIZE, MISSING_PEER},
+        KeyPair, PublicKey, SharedSecret,
     },
     aes_gcm::{
         aead::{generic_array::GenericArray, OsRng},
@@ -13,34 +11,34 @@ use {
         encode_len, ClosingStream, Codec, FindAndRemove, PacketReader, PacketWriter, Reminder,
         PACKET_LEN_WIDTH,
     },
-    core::fmt,
+    core::{fmt, slice},
+    crypto::enc::Keypair,
     futures::{
         stream::{FusedStream, FuturesUnordered},
-        AsyncRead, AsyncWrite, StreamExt,
+        AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future, FutureExt, StreamExt,
     },
     instant::Duration,
     libp2p::{
         identity::PeerId,
-        swarm::{
-            dial_opts::DialOpts, ConnectionId, DialError, NetworkBehaviour, NotifyHandler,
-            StreamUpgradeError, ToSwarm as TS,
-        },
+        swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError, ToSwarm as TS},
     },
     std::{
         collections::VecDeque, convert::Infallible, io, mem, ops::DerefMut, pin::Pin, sync::Arc,
         task::Poll,
     },
+    thiserror::Error,
 };
 
 pub struct Behaviour {
     config: Config,
     router: FuturesUnordered<Channel>,
-    peer_to_connection: component_utils::LinearMap<PeerId, ConnectionId>,
-    dialing_peers: component_utils::LinearMap<ConnectionId, PeerId>,
-    events: VecDeque<TS<Event, handler::FromBehaviour>>,
-    pending_connections: Vec<IncomingStream>,
-    pending_requests: Vec<Arc<StreamRequest>>,
     error_streams: FuturesUnordered<component_utils::ClosingStream<libp2p::swarm::Stream>>,
+    inbound: FuturesUnordered<IUpgrade>,
+    outbound: FuturesUnordered<OUpgrade>,
+    streams: streaming::Behaviour,
+    events: VecDeque<TS<Event, ()>>,
+    pending_connections: Vec<IncomingStream>,
+    pending_requests: Vec<StreamRequest>,
     buffer: Arc<spin::Mutex<[u8; 1 << 16]>>,
 }
 
@@ -50,8 +48,10 @@ impl Behaviour {
         Self {
             config,
             router: Default::default(),
-            peer_to_connection: Default::default(),
-            dialing_peers: Default::default(),
+            streams: Default::default(),
+            inbound: Default::default(),
+            outbound: Default::default(),
+
             events: Default::default(),
             pending_connections: Default::default(),
             pending_requests: Default::default(),
@@ -93,91 +93,8 @@ impl Behaviour {
             return;
         }
 
-        let sr = Arc::new(sr);
-        self.pending_requests.push(sr.clone());
-        let Some(&conn_id) = self.peer_to_connection.get(&sr.to) else {
-            log::debug!("queueing connection to {} from {}", sr.to, self.config.current_peer_id);
-            self.handle_missing_connection(sr.to);
-            return;
-        };
-
-        self.events.push_back(TS::NotifyHandler {
-            peer_id: sr.to,
-            handler: NotifyHandler::One(conn_id),
-            event: handler::FromBehaviour::InitPacket(IncomingOrRequest::Request(sr)),
-        });
-    }
-
-    fn push_incoming_stream(&mut self, is: IncomingStream) {
-        log::debug!("incoming stream from");
-        let valid_stream_count = self
-            .router
-            .iter_mut()
-            .filter_map(|c| c.is_valid(self.config.keep_alive_interval).then_some(()))
-            .count();
-        if valid_stream_count + self.pending_connections.len() > self.config.max_streams {
-            log::info!("too many streams");
-            if self.error_streams.len() > self.config.max_error_streams {
-                log::warn!("too many erroring streams");
-                return;
-            }
-
-            self.error_streams.push(ClosingStream::new(is.stream, packet::OCCUPIED_PEER));
-            return;
-        }
-
-        if is.meta.to == self.config.current_peer_id {
-            // most likely melisious since we check this in open_path
-            log::warn!("melacious stream or self connection");
-            return;
-        }
-
-        let meta = is.meta.clone();
-        self.pending_connections.push(is);
-        let Some(&conn_id) = self.peer_to_connection.get(&meta.to) else {
-            log::debug!("queueing connection to {} from {}", meta.to, self.config.current_peer_id);
-            self.handle_missing_connection(meta.to);
-            return;
-        };
-
-        self.events.push_back(TS::NotifyHandler {
-            peer_id: meta.to,
-            handler: NotifyHandler::One(conn_id),
-            event: handler::FromBehaviour::InitPacket(IncomingOrRequest::Incoming(meta)),
-        });
-    }
-
-    fn add_connection(&mut self, to: PeerId, to_id: ConnectionId) {
-        if self.peer_to_connection.get(&to).is_some() {
-            log::debug!("connection to {} already exists", to);
-            return;
-        }
-
-        self.peer_to_connection.insert(to, to_id);
-
-        let incoming = self
-            .pending_connections
-            .iter()
-            .filter(|p| p.meta.to == to)
-            .map(|p| p.meta.clone())
-            .map(IncomingOrRequest::Incoming);
-        let requests = self
-            .pending_requests
-            .iter()
-            .filter(|p| p.to == to)
-            .cloned()
-            .map(IncomingOrRequest::Request);
-
-        log::debug!("adding connection to {to} from {}", self.config.current_peer_id);
-
-        for p in incoming.chain(requests) {
-            log::debug!("sending pending stream to {to}");
-            self.events.push_back(TS::NotifyHandler {
-                peer_id: to,
-                handler: NotifyHandler::One(to_id),
-                event: handler::FromBehaviour::InitPacket(p),
-            });
-        }
+        self.streams.create_stream(sr.to);
+        self.pending_requests.push(sr);
     }
 
     /// Must be called when a peer cannot be found, otherwise a pending connection information is
@@ -194,107 +111,41 @@ impl Behaviour {
             )));
         }
     }
-
-    fn handle_missing_connection(&mut self, to: PeerId) {
-        if self.config.dial {
-            self.dial(to);
-        } else {
-            self.events.push_back(TS::GenerateEvent(Event::ConnectRequest(to)));
-        }
-    }
-
-    fn dial(&mut self, peer: PeerId) {
-        let opts = DialOpts::from(peer);
-        self.dialing_peers.insert(opts.connection_id(), peer);
-        self.events.push_back(TS::Dial { opts });
-    }
-
-    fn create_handler(&mut self, peer: PeerId, connection_id: ConnectionId) -> Handler {
-        self.add_connection(peer, connection_id);
-        Handler::new(self.config.secret.clone(), self.config.buffer_cap)
-    }
 }
 
 impl NetworkBehaviour for Behaviour {
-    type ConnectionHandler = Handler;
+    type ConnectionHandler = streaming::Handler;
     type ToSwarm = Event;
 
     fn handle_established_inbound_connection(
         &mut self,
-        connection_id: ConnectionId,
-        peer: libp2p::identity::PeerId,
+        _connection_id: ConnectionId,
+        _peer: libp2p::identity::PeerId,
         _local_addr: &libp2p::core::Multiaddr,
         _remote_addr: &libp2p::core::Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(self.create_handler(peer, connection_id))
+        Ok(streaming::Handler::new(|| crate::handler::ROUTING_PROTOCOL))
     }
 
     fn handle_established_outbound_connection(
         &mut self,
-        connection_id: ConnectionId,
-        peer: libp2p::identity::PeerId,
+        _connection_id: ConnectionId,
+        _peer: libp2p::identity::PeerId,
         _addr: &libp2p::core::Multiaddr,
         _role_override: libp2p::core::Endpoint,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(self.create_handler(peer, connection_id))
+        Ok(streaming::Handler::new(|| crate::handler::ROUTING_PROTOCOL))
     }
 
-    fn on_swarm_event(&mut self, event: libp2p::swarm::FromSwarm) {
-        if let libp2p::swarm::FromSwarm::ConnectionClosed(c) = event {
-            if self.pending_requests.iter().any(|p| p.to == c.peer_id)
-                || self.pending_connections.iter().any(|p| p.meta.to == c.peer_id)
-            {
-                self.events.push_back(TS::GenerateEvent(Event::ConnectRequest(c.peer_id)));
-            }
-            log::debug!("connection closed to {}", c.peer_id);
-            self.peer_to_connection.remove(&c.peer_id);
-        }
-
-        if let libp2p::swarm::FromSwarm::DialFailure(e) = event
-            && let Some(peer) = self.dialing_peers.remove(&e.connection_id)
-            && !matches!(e.error, DialError::DialPeerConditionFalse(_))
-        {
-            self.report_unreachable(peer);
-        }
-    }
+    fn on_swarm_event(&mut self, _: libp2p::swarm::FromSwarm) {}
 
     fn on_connection_handler_event(
         &mut self,
         peer_id: libp2p::identity::PeerId,
-        _connection_id: ConnectionId,
+        connection_id: ConnectionId,
         event: libp2p::swarm::THandlerOutEvent<Self>,
     ) {
-        use crate::handler::ToBehaviour as HTB;
-        match event {
-            HTB::NewChannel(to, path_id) => {
-                let Some(from) =
-                    self.pending_connections.find_and_remove(|p| p.meta.path_id == path_id)
-                else {
-                    log::error!("no pending connection for path id {}", peer_id);
-                    return;
-                };
-                self.router.push(Channel::new(
-                    from.stream,
-                    to,
-                    self.config.buffer_cap,
-                    self.buffer.clone(),
-                ));
-            }
-            HTB::IncomingStream(IncomingOrResponse::Incoming(s)) => self.push_incoming_stream(s),
-            HTB::IncomingStream(IncomingOrResponse::Response(s)) => {
-                self.events.push_back(TS::GenerateEvent(Event::InboundStream(s, PathId::new())));
-            }
-            HTB::OutboundStream { to, id, from } => {
-                if self.pending_requests.find_and_remove(|p| p.path_id == id).is_none() {
-                    log::error!("no pending request for path id {:?}", id);
-                    return;
-                }
-                self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
-                    to.map(|to| (to, from)),
-                    id,
-                )));
-            }
-        }
+        self.streams.on_connection_handler_event(peer_id, connection_id, event);
     }
 
     fn poll(
@@ -303,6 +154,127 @@ impl NetworkBehaviour for Behaviour {
     ) -> Poll<TS<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>> {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
+        }
+
+        while let Poll::Ready(event) = self.streams.poll(cx) {
+            let e = match event {
+                TS::GenerateEvent(e) => e,
+                e => return Poll::Ready(e.map_out(|_| unreachable!())),
+            };
+
+            match e {
+                streaming::Event::IncomingStream(peer, stream)
+                    if let Some(key_pair) = self.config.secret.as_ref() =>
+                {
+                    self.inbound.push(upgrade_inbound(
+                        peer,
+                        key_pair.clone(),
+                        self.config.buffer_cap,
+                        stream,
+                    ))
+                }
+                streaming::Event::OutgoingStream(peer, Ok(stream)) => 'b: {
+                    let key_pair =
+                        self.config.secret.as_ref().cloned().unwrap_or_else(|| Keypair::new(OsRng));
+
+                    let Some(request) = self.pending_requests.find_and_remove(|r| r.to == peer)
+                    else {
+                        log::warn!("received unexpected stream");
+                        break 'b;
+                    };
+
+                    self.outbound.push(upgrade_outbound(
+                        key_pair,
+                        IncomingOrRequest::Request(request),
+                        stream,
+                    ));
+                }
+                streaming::Event::OutgoingStream(peer, Err(err)) => 'b: {
+                    let Some(request) = self.pending_requests.find_and_remove(|r| r.to == peer)
+                    else {
+                        log::warn!("received unexpected stream");
+                        break 'b;
+                    };
+                    self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
+                        Err(err.map_upgrade_err(|v| void::unreachable(v))),
+                        request.path_id,
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        while let Poll::Ready(Some((peer, res))) = self.inbound.poll_next_unpin(cx) {
+            let res = match res {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!("inbound error: {}", e);
+                    continue;
+                }
+            };
+
+            match res {
+                IncomingOrResponse::Incoming(is) => {
+                    self.streams.create_stream(peer);
+                    self.pending_connections.push(is);
+                }
+                IncomingOrResponse::Response(stream) => {
+                    self.events
+                        .push_back(TS::GenerateEvent(Event::InboundStream(stream, PathId::new())));
+                }
+            }
+        }
+
+        while let Poll::Ready(Some(res)) = self.outbound.poll_next_unpin(cx) {
+            let ChannelMeta { from, to } = match res {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!("outbound error: {}", e);
+                    continue;
+                }
+            };
+
+            match from {
+                ChannelSource::Relay(path_id) => 'b: {
+                    let Some(request) =
+                        self.pending_connections.find_and_remove(|r| r.meta.path_id == path_id)
+                    else {
+                        log::warn!("received unexpected stream");
+                        break 'b;
+                    };
+
+                    let valid_stream_count = self
+                        .router
+                        .iter_mut()
+                        .filter_map(|c| c.is_valid(self.config.keep_alive_interval).then_some(()))
+                        .count();
+                    if valid_stream_count + self.pending_connections.len() > self.config.max_streams
+                    {
+                        log::info!("too many streams");
+                        if self.error_streams.len() > self.config.max_error_streams {
+                            log::warn!("too many erroring streams");
+                            break 'b;
+                        }
+
+                        self.error_streams
+                            .push(ClosingStream::new(request.stream, packet::OCCUPIED_PEER));
+                        break 'b;
+                    }
+
+                    self.router.push(Channel::new(
+                        request.stream,
+                        to,
+                        self.config.buffer_cap,
+                        self.buffer.clone(),
+                    ));
+                }
+                ChannelSource::ThisNode(secret, path_id, peer_id) => {
+                    self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
+                        Ok((EncryptedStream::new(to, secret, self.config.buffer_cap), peer_id)),
+                        path_id,
+                    )));
+                }
+            }
         }
 
         if let Poll::Ready(Some(Err(e))) = self.router.poll_next_unpin(cx) {
@@ -550,4 +522,202 @@ impl std::future::Future for Channel {
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         self.deref_mut().poll(cx)
     }
+}
+
+type OUpgrade = impl Future<Output = Result<ChannelMeta, OUpgradeError>>;
+
+fn upgrade_outbound(
+    keypair: KeyPair,
+    incoming: IncomingOrRequest,
+    stream: libp2p::swarm::Stream,
+) -> OUpgrade {
+    upgrade_outbound_low(keypair, incoming, stream)
+}
+
+async fn upgrade_outbound_low(
+    keypair: KeyPair,
+    incoming: IncomingOrRequest,
+    mut stream: libp2p::swarm::Stream,
+) -> Result<ChannelMeta, OUpgradeError> {
+    let mut written_packet = vec![];
+    let mut ss = [0; 32];
+    let (buffer, peer_id) = match &incoming {
+        IncomingOrRequest::Request(r) => {
+            ss = packet::new_initial(&r.recipient, r.path, &keypair, &mut written_packet);
+            (&written_packet, r.path[0].1)
+        }
+        IncomingOrRequest::Incoming(i) => (&i.buffer, i.to), // the peer id is arbitrary in
+                                                             // this case
+    };
+
+    stream.write_all(&encode_len(buffer.len())).await.map_err(OUpgradeError::WritePacketLength)?;
+    log::debug!("wrote packet length: {}", buffer.len());
+    stream.write_all(buffer).await.map_err(OUpgradeError::WritePacket)?;
+    log::debug!("wrote packet");
+
+    let request = match incoming {
+        IncomingOrRequest::Incoming(i) => {
+            log::debug!("received incoming routable stream");
+            return Ok(ChannelMeta { from: ChannelSource::Relay(i.path_id), to: stream });
+        }
+        IncomingOrRequest::Request(r) => r,
+    };
+
+    let mut kind = 0;
+    stream.read_exact(slice::from_mut(&mut kind)).await.map_err(OUpgradeError::ReadPacketKind)?;
+    log::debug!("read packet kind: {}", kind);
+
+    match kind {
+        crate::packet::OK => {
+            log::debug!("received auth packet");
+            let mut buffer = written_packet;
+            buffer.resize(CONFIRM_PACKET_SIZE, 0);
+            stream.read(&mut buffer).await.map_err(OUpgradeError::ReadPacket)?;
+
+            if !packet::verify_confirm(&ss, &mut buffer) {
+                Err(OUpgradeError::AuthenticationFailed)
+            } else {
+                Ok(ChannelMeta {
+                    from: ChannelSource::ThisNode(ss, request.path_id, peer_id),
+                    to: stream,
+                })
+            }
+        }
+        crate::packet::MISSING_PEER => Err(OUpgradeError::MissingPeer),
+        crate::packet::OCCUPIED_PEER => Err(OUpgradeError::OccupiedPeer),
+        _ => Err(OUpgradeError::UnknownPacketKind(kind)),
+    }
+}
+
+type IUpgrade = impl Future<Output = (PeerId, Result<IncomingOrResponse, IUpgradeError>)>;
+
+fn upgrade_inbound(
+    peer: PeerId,
+    keypair: KeyPair,
+    buffer_cap: usize,
+    stream: libp2p::swarm::Stream,
+) -> IUpgrade {
+    upgrade_inbound_low(keypair, buffer_cap, stream).map(move |r| (peer, r))
+}
+
+async fn upgrade_inbound_low(
+    keypair: KeyPair,
+    buffer_cap: usize,
+    mut stream: libp2p::swarm::Stream,
+) -> Result<IncomingOrResponse, IUpgradeError> {
+    log::debug!("received inbound stream");
+    let mut len = [0; 2];
+    stream.read_exact(&mut len).await.map_err(IUpgradeError::ReadPacketLength)?;
+
+    let len = u16::from_be_bytes(len) as usize;
+    let mut buffer = vec![0; len];
+
+    stream.read_exact(&mut buffer).await.map_err(IUpgradeError::ReadPacket)?;
+
+    log::debug!("peeling packet: {}", len);
+    let (to, ss, new_len) =
+        crate::packet::peel_initial(&keypair, &mut buffer).ok_or(IUpgradeError::MalformedPacket)?;
+
+    log::debug!("peeled packet to: {:?}", to);
+
+    log::debug!("received init packet");
+    let Some(to) = to else {
+        log::debug!("received incoming stream");
+        buffer.resize(CONFIRM_PACKET_SIZE + 1, 0);
+        packet::write_confirm(&ss, &mut buffer[1..]);
+        buffer[0] = packet::OK;
+        stream.write_all(&buffer).await.map_err(IUpgradeError::WriteAuthPacket)?;
+
+        return Ok(IncomingOrResponse::Response(EncryptedStream::new(stream, ss, buffer_cap)));
+    };
+
+    Ok(IncomingOrResponse::Incoming(IncomingStream {
+        stream,
+        meta: IncomingStreamMeta { to, buffer: buffer[..new_len].to_vec(), path_id: PathId::new() },
+    }))
+}
+
+component_utils::decl_stream_protocol!(ROUTING_PROTOCOL = "rot");
+
+#[derive(Debug)]
+pub struct IncomingStream {
+    stream: libp2p::Stream,
+    meta: IncomingStreamMeta,
+}
+
+#[derive(Debug, Clone)]
+pub struct IncomingStreamMeta {
+    to: PeerId,
+    buffer: Vec<u8>,
+    path_id: PathId,
+}
+
+#[derive(Debug)]
+pub struct StreamRequest {
+    to: PeerId,
+    path_id: PathId,
+    recipient: PublicKey,
+    path: [(PublicKey, PeerId); crate::packet::PATH_LEN],
+}
+
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum IncomingOrRequest {
+    Incoming(IncomingStreamMeta),
+    Request(StreamRequest),
+}
+
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum IncomingOrResponse {
+    Incoming(IncomingStream),
+    Response(EncryptedStream),
+}
+
+#[derive(Debug, Error)]
+pub enum IUpgradeError {
+    #[error("malformed init packet")]
+    MalformedPacket,
+    #[error("failed to write packet: {0}")]
+    WriteKeyPacket(io::Error),
+    #[error("failed to read packet length: {0}")]
+    ReadPacketLength(io::Error),
+    #[error("failed to read packet: {0}")]
+    ReadPacket(io::Error),
+    #[error("failed to write auth packet: {0}")]
+    WriteAuthPacket(io::Error),
+}
+
+#[derive(Debug)]
+pub enum ChannelSource {
+    Relay(PathId),
+    ThisNode(SharedSecret, PathId, PeerId),
+}
+
+#[derive(Debug)]
+pub struct ChannelMeta {
+    from: ChannelSource,
+    to: libp2p::Stream,
+}
+
+#[derive(Debug, Error)]
+pub enum OUpgradeError {
+    #[error("missing peer")]
+    MissingPeer,
+    #[error("occupied peer")]
+    OccupiedPeer,
+    #[error("malformed init packet")]
+    MalformedPacket,
+    #[error("failed to authenticate")]
+    AuthenticationFailed,
+    #[error("paket kind not recognized: {0}")]
+    UnknownPacketKind(u8),
+    #[error("failed to write packet length: {0}")]
+    WritePacketLength(io::Error),
+    #[error("failed to write packet: {0}")]
+    WritePacket(io::Error),
+    #[error("failed to read packet kind: {0}")]
+    ReadPacketKind(io::Error),
+    #[error("failed to read packet: {0}")]
+    ReadPacket(io::Error),
 }

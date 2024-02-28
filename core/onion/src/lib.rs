@@ -1,4 +1,6 @@
 #![feature(iter_map_windows)]
+#![feature(if_let_guard)]
+#![feature(type_alias_impl_trait)]
 #![feature(array_windows)]
 #![feature(let_chains)]
 #![feature(array_chunks)]
@@ -7,7 +9,6 @@
 #![feature(extract_if)]
 
 mod behaviour;
-mod handler;
 pub mod key_share;
 mod packet;
 
@@ -16,6 +17,5 @@ mod tests;
 
 pub use {
     behaviour::*,
-    handler::*,
     packet::{KeyPair, PublicKey, SharedSecret},
 };

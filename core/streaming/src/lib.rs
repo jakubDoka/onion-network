@@ -24,6 +24,7 @@ component_utils::decl_stream_protocol!(PROTOCOL_NAME = "streaming");
 
 #[derive(Default)]
 pub struct Behaviour {
+    emmit_search_requests: bool,
     stream_requests: Vec<(PeerId, ConnectionId)>,
     dial_requests: Vec<(PeerId, Option<ConnectionId>, usize)>,
     connected_peers: LinearMap<PeerId, ConnectionId>,
@@ -31,6 +32,10 @@ pub struct Behaviour {
 }
 
 impl Behaviour {
+    pub fn new(emmit_search_requests: bool) -> Self {
+        Self { emmit_search_requests, ..Default::default() }
+    }
+
     pub fn is_resolving_stream_for(&self, peer: PeerId) -> bool {
         self.stream_requests.iter().any(|(p, ..)| *p == peer)
             || self.dial_requests.iter().any(|(p, ..)| *p == peer)
@@ -44,6 +49,19 @@ impl Behaviour {
             *count += 1;
         } else {
             self.dial_requests.push((with, None, 0));
+        }
+    }
+
+    pub fn report_unreachable(&mut self, peer: PeerId) {
+        let Some((.., count)) = self.dial_requests.find_and_remove(|(p, ..)| *p == peer) else {
+            return;
+        };
+
+        for _ in 0..=count {
+            self.events.push(Event::OutgoingStream(
+                peer,
+                Err(StreamUpgradeError::Io(io::Error::other("peer is unreachable"))),
+            ));
         }
     }
 }
@@ -91,6 +109,8 @@ impl NetworkBehaviour for Behaviour {
                 .find(|(p, c, _)| *c == Some(connection_id) || Some(*p) == peer_id) =>
             {
                 if let DialError::DialPeerConditionFalse(_) = error {
+                } else if self.emmit_search_requests {
+                    self.events.push(Event::SearchRequest(peer));
                 } else {
                     for _ in 0..=count {
                         self.events.push(Event::OutgoingStream(
@@ -98,6 +118,8 @@ impl NetworkBehaviour for Behaviour {
                             Err(StreamUpgradeError::Io(io::Error::other(error.to_string()))),
                         ));
                     }
+                    self.dial_requests
+                        .find_and_remove(|(p, c, _)| *p == peer && *c == Some(connection_id));
                 }
             }
             libp2p::swarm::FromSwarm::ConnectionClosed(c) => {

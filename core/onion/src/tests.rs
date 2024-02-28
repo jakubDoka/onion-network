@@ -41,7 +41,7 @@ fn setup_nodes<const COUNT: usize>(
             ),
             peer_id,
             libp2p::swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(CONNECTION_TIMEOUT * 5),
+                .with_idle_connection_timeout(CONNECTION_TIMEOUT),
         );
         swarm.add_external_address(
             libp2p::core::Multiaddr::empty()
@@ -141,7 +141,7 @@ async fn test_timeout() {
     input.write(b"hello").unwrap();
 
     let mut disconnected = 0;
-    let mut timeout = Box::pin(tokio::time::sleep(CONNECTION_TIMEOUT * 10));
+    let mut timeout = Box::pin(tokio::time::sleep(CONNECTION_TIMEOUT * 1));
 
     while disconnected != 6 {
         let events = futures::future::select_all(swarms.iter_mut().map(|s| s.next()));
@@ -156,7 +156,7 @@ async fn test_timeout() {
         };
 
         match e.unwrap() {
-            SwarmEvent::Behaviour(crate::Event::ConnectRequest(to)) => {
+            SwarmEvent::Behaviour(crate::Event::SearchRequest(to)) => {
                 swarms[i].behaviour_mut().report_unreachable(to);
             }
             SwarmEvent::ConnectionClosed { .. } => disconnected += 1,
@@ -188,7 +188,7 @@ async fn test_missing_route() {
             let (e, id, ..) =
                 futures::future::select_all(swarms.iter_mut().map(|s| s.next())).await;
             match e.unwrap() {
-                SwarmEvent::Behaviour(crate::Event::ConnectRequest(to)) => {
+                SwarmEvent::Behaviour(crate::Event::SearchRequest(to)) => {
                     swarms[id].behaviour_mut().report_unreachable(to);
                 }
                 SwarmEvent::Behaviour(crate::Event::OutboundStream(r, ..)) => {

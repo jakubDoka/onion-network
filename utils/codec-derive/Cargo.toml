@@ -8,7 +8,7 @@ name = "codec-derive"
 version = "0.0.0"
 authors = ["mlokr <jdoka@crownsterling.io>"]
 description = "proc macro for generating codec impls"
-edition = "2021"
+edition = { workspace = true }
 
 [lib]
 proc-macro = true

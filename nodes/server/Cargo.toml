@@ -6,7 +6,7 @@ categories = { workspace = true }
 keywords = { workspace = true }
 name = "server"
 version = "0.1.0"
-edition = "2021"
+edition = { workspace = true }
 description = "node serving users of a chat, storing latest messages and finalizing message blocks"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -20,8 +20,8 @@ component-utils = { version = "0.1.0", path = "../../utils/component-utils" }
 config = { version = "0.1.0", path = "../../utils/config" }
 crypto = { version = "0.1.0", path = "../../core/crypto" }
 env_logger = "0.11.0"
-libp2p = { version = "0.53.0", features = ["tcp", "noise", "macros", "tokio", "yamux", "websocket", "dns"] }
-log = "0.4.20"
+libp2p = { workspace = true, features = ["tcp", "noise", "macros", "tokio", "yamux", "websocket", "dns"] }
+log = { workspace = true }
 dht = { version = "0.1.0", path = "../../core/dht" }
 onion = { version = "0.1.0", path = "../../core/onion" }
 rand_core = { version = "0.6.4", features = ["getrandom"] }

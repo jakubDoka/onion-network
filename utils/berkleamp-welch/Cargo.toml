@@ -6,7 +6,7 @@ categories = { workspace = true }
 keywords = { workspace = true }
 name = "berkleamp-welch"
 version = "0.1.0"
-edition = "2021"
+edition = { workspace = true }
 build = "build.rs"
 
 [dependencies]

@@ -6,7 +6,7 @@ categories = { workspace = true }
 keywords = { workspace = true }
 name = "chain-api"
 version = "0.1.0"
-edition = "2021"
+edition = { workspace = true }
 description = "interface for interacting with chain"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,7 +18,7 @@ contract-macro = { version = "0.1.0", path = "../../utils/contract_macro" }
 crypto = { version = "0.1.0", path = "../crypto" }
 futures = { version = "0.3.29", features = ["executor"] }
 hex = "0.4.3"
-log = "0.4.20"
+log = { workspace = true }
 parity-scale-codec = "3.6.5"
 scale-encode = "0.5.0"
 serde = { version = "1.0.190", features = ["derive"] }

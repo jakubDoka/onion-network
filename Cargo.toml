@@ -24,6 +24,11 @@ readme = "README.md"
 keywords = ["network", "decentralized", "polkadot", "pqc"]
 categories = ["networking", "cryptography", "blockchain"]
 license = "MIT"
+edition = "2021"
+
+[workspace.dependencies]
+libp2p = "0.53.2"
+log = "0.4.20"
 
 [profile.native-optimized]
 inherits = "release"

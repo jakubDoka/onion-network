@@ -6,7 +6,7 @@ categories = { workspace = true }
 keywords = { workspace = true }
 name = "client"
 version = "0.1.0"
-edition = "2021"
+edition = { workspace = true }
 description = "minimal frontend for the chat application"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -22,8 +22,8 @@ crypto = { version = "0.1.0", path = "../../core/crypto" }
 hex = "0.4.3"
 leptos = { version = "0.5.1", default-features = false, features = ["nightly", "csr"] }
 leptos_router = { version = "0.5.2", features = ["nightly", "csr"] }
-libp2p = { version = "0.53.0", features = ["noise", "macros", "yamux", "wasm-bindgen"] }
-log = "0.4.20"
+libp2p = { workspace = true, features = ["noise", "macros", "yamux", "wasm-bindgen"] }
+log = { workspace = true }
 dht = { version = "0.1.0", path = "../../core/dht" }
 onion = { version = "0.1.0", path = "../../core/onion", features = ["wasm"] }
 rand = "0.8.5"

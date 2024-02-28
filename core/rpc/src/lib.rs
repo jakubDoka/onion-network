@@ -101,6 +101,14 @@ pub struct Behaviour {
 }
 
 impl Behaviour {
+    pub fn new(config: Config) -> Self {
+        Self {
+            streaming: streaming::Behaviour::new(config.emmit_search_requests),
+            config,
+            ..Default::default()
+        }
+    }
+
     pub fn request(
         &mut self,
         peer: PeerId,
@@ -142,6 +150,10 @@ impl Behaviour {
             )
             .map(|(c, p)| Event::Response(p, c, Err(error.clone())))
             .collect_into(&mut self.events);
+    }
+
+    pub fn report_unreachable(&mut self, peer: PeerId) {
+        self.streaming.report_unreachable(peer);
     }
 }
 
@@ -215,6 +227,10 @@ impl NetworkBehaviour for Behaviour {
         }
 
         loop {
+            if let Some(ev) = self.events.pop() {
+                return Poll::Ready(libp2p::swarm::ToSwarm::GenerateEvent(ev));
+            }
+
             let ev = std::task::ready!(self.streaming.poll(cx));
 
             let libp2p::swarm::ToSwarm::GenerateEvent(ev) = ev else {
@@ -253,7 +269,9 @@ impl NetworkBehaviour for Behaviour {
                         self.events.push(Event::Response(peer, call, Err(err.clone())));
                     }
                 }
-                streaming::Event::SearchRequest(p) => todo!(),
+                streaming::Event::SearchRequest(p) => {
+                    self.events.push(Event::SearchRequest(p));
+                }
             }
         }
     }
@@ -261,6 +279,7 @@ impl NetworkBehaviour for Behaviour {
 
 component_utils::gen_config! {
     ;;
+    emmit_search_requests: bool = false,
     max_cached_connections: usize = 10,
     buffer_size: usize = 1 << 14,
     request_timeout: std::time::Duration = std::time::Duration::from_secs(10),
@@ -280,6 +299,7 @@ component_utils::gen_unique_id!(pub CallId);
 pub enum Event {
     Response(PeerId, CallId, Result<(Vec<u8>, Duration), Arc<streaming::Error>>),
     Request(PeerId, CallId, Vec<u8>),
+    SearchRequest(PeerId),
 }
 
 pub struct Response {

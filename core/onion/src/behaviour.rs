@@ -46,9 +46,8 @@ impl Behaviour {
     #[must_use]
     pub fn new(config: Config) -> Self {
         Self {
-            config,
             router: Default::default(),
-            streams: Default::default(),
+            streams: streaming::Behaviour::new(!config.dial),
             inbound: Default::default(),
             outbound: Default::default(),
 
@@ -57,6 +56,8 @@ impl Behaviour {
             pending_requests: Default::default(),
             error_streams: Default::default(),
             buffer: Arc::new(spin::Mutex::new([0; 1 << 16])),
+
+            config,
         }
     }
 
@@ -111,6 +112,150 @@ impl Behaviour {
             )));
         }
     }
+
+    pub fn poll_inbound(&mut self, cx: &mut std::task::Context<'_>) {
+        while let Poll::Ready(Some((_, res))) = self.inbound.poll_next_unpin(cx) {
+            let res = match res {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!("inbound error: {}", e);
+                    continue;
+                }
+            };
+
+            match res {
+                IncomingOrResponse::Incoming(is) => {
+                    log::debug!("creating new stream for route continuation");
+                    self.streams.create_stream(is.meta.to);
+                    self.pending_connections.push(is);
+                    self.poll_streams(cx);
+                }
+                IncomingOrResponse::Response(stream) => {
+                    self.events
+                        .push_back(TS::GenerateEvent(Event::InboundStream(stream, PathId::new())));
+                }
+            }
+        }
+    }
+
+    pub fn poll_outbound(&mut self, cx: &mut std::task::Context<'_>) {
+        while let Poll::Ready(Some(res)) = self.outbound.poll_next_unpin(cx) {
+            let ChannelMeta { from, to } = match res {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!("outbound error: {}", e);
+                    continue;
+                }
+            };
+
+            match from {
+                ChannelSource::Relay(from) => 'b: {
+                    let valid_stream_count = self
+                        .router
+                        .iter_mut()
+                        .filter_map(|c| c.is_valid(self.config.keep_alive_interval).then_some(()))
+                        .count();
+                    if valid_stream_count + self.pending_connections.len() > self.config.max_streams
+                    {
+                        log::info!("too many streams");
+                        if self.error_streams.len() > self.config.max_error_streams {
+                            log::warn!("too many erroring streams");
+                            break 'b;
+                        }
+
+                        self.error_streams.push(ClosingStream::new(from, packet::OCCUPIED_PEER));
+                        break 'b;
+                    }
+
+                    log::debug!("received valid relay channel");
+                    self.router.push(Channel::new(
+                        from,
+                        to,
+                        self.config.buffer_cap,
+                        self.buffer.clone(),
+                    ));
+                }
+                ChannelSource::ThisNode(secret, path_id, peer_id) => {
+                    self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
+                        Ok((EncryptedStream::new(to, secret, self.config.buffer_cap), peer_id)),
+                        path_id,
+                    )));
+                }
+            }
+        }
+    }
+
+    fn poll_streams(&mut self, cx: &mut std::task::Context<'_>) {
+        while let Poll::Ready(event) = self.streams.poll(cx) {
+            let e = match event {
+                TS::GenerateEvent(e) => e,
+                e => {
+                    self.events.push_back(e.map_out(|_| unreachable!()));
+                    return;
+                }
+            };
+
+            match e {
+                streaming::Event::IncomingStream(peer, stream)
+                    if let Some(key_pair) = self.config.secret.as_ref() =>
+                {
+                    log::debug!("received valid incoming stream");
+                    self.inbound.push(upgrade_inbound(
+                        peer,
+                        key_pair.clone(),
+                        self.config.buffer_cap,
+                        stream,
+                    ));
+                    self.poll_inbound(cx);
+                }
+                streaming::Event::OutgoingStream(peer, Ok(stream)) => 'b: {
+                    let key_pair =
+                        self.config.secret.as_ref().cloned().unwrap_or_else(|| Keypair::new(OsRng));
+
+                    if let Some(request) = self.pending_requests.find_and_remove(|r| r.to == peer) {
+                        log::debug!("received valid request stream");
+                        self.outbound.push(upgrade_outbound(
+                            key_pair,
+                            IncomingOrRequest::Request(request),
+                            stream,
+                        ));
+                        self.poll_outbound(cx);
+                        break 'b;
+                    };
+
+                    if let Some(incoming) =
+                        self.pending_connections.find_and_remove(|r| r.meta.to == peer)
+                    {
+                        log::debug!("received valid incoming continuation stream");
+                        self.outbound.push(upgrade_outbound(
+                            key_pair,
+                            IncomingOrRequest::Incoming(incoming),
+                            stream,
+                        ));
+                        self.poll_outbound(cx);
+                        break 'b;
+                    }
+
+                    log::warn!("received unexpected valid stream");
+                }
+                streaming::Event::OutgoingStream(peer, Err(err)) => 'b: {
+                    let Some(request) = self.pending_requests.find_and_remove(|r| r.to == peer)
+                    else {
+                        log::warn!("received unexpected invalid stream");
+                        break 'b;
+                    };
+                    self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
+                        Err(err.map_upgrade_err(|v| void::unreachable(v))),
+                        request.path_id,
+                    )));
+                }
+                streaming::Event::SearchRequest(peer) => {
+                    self.events.push_back(TS::GenerateEvent(Event::SearchRequest(peer)));
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl NetworkBehaviour for Behaviour {
@@ -124,7 +269,7 @@ impl NetworkBehaviour for Behaviour {
         _local_addr: &libp2p::core::Multiaddr,
         _remote_addr: &libp2p::core::Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(streaming::Handler::new(|| crate::handler::ROUTING_PROTOCOL))
+        Ok(streaming::Handler::new(|| crate::ROUTING_PROTOCOL))
     }
 
     fn handle_established_outbound_connection(
@@ -134,10 +279,12 @@ impl NetworkBehaviour for Behaviour {
         _addr: &libp2p::core::Multiaddr,
         _role_override: libp2p::core::Endpoint,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(streaming::Handler::new(|| crate::handler::ROUTING_PROTOCOL))
+        Ok(streaming::Handler::new(|| crate::ROUTING_PROTOCOL))
     }
 
-    fn on_swarm_event(&mut self, _: libp2p::swarm::FromSwarm) {}
+    fn on_swarm_event(&mut self, se: libp2p::swarm::FromSwarm) {
+        self.streams.on_swarm_event(se);
+    }
 
     fn on_connection_handler_event(
         &mut self,
@@ -156,126 +303,9 @@ impl NetworkBehaviour for Behaviour {
             return Poll::Ready(event);
         }
 
-        while let Poll::Ready(event) = self.streams.poll(cx) {
-            let e = match event {
-                TS::GenerateEvent(e) => e,
-                e => return Poll::Ready(e.map_out(|_| unreachable!())),
-            };
-
-            match e {
-                streaming::Event::IncomingStream(peer, stream)
-                    if let Some(key_pair) = self.config.secret.as_ref() =>
-                {
-                    self.inbound.push(upgrade_inbound(
-                        peer,
-                        key_pair.clone(),
-                        self.config.buffer_cap,
-                        stream,
-                    ))
-                }
-                streaming::Event::OutgoingStream(peer, Ok(stream)) => 'b: {
-                    let key_pair =
-                        self.config.secret.as_ref().cloned().unwrap_or_else(|| Keypair::new(OsRng));
-
-                    let Some(request) = self.pending_requests.find_and_remove(|r| r.to == peer)
-                    else {
-                        log::warn!("received unexpected stream");
-                        break 'b;
-                    };
-
-                    self.outbound.push(upgrade_outbound(
-                        key_pair,
-                        IncomingOrRequest::Request(request),
-                        stream,
-                    ));
-                }
-                streaming::Event::OutgoingStream(peer, Err(err)) => 'b: {
-                    let Some(request) = self.pending_requests.find_and_remove(|r| r.to == peer)
-                    else {
-                        log::warn!("received unexpected stream");
-                        break 'b;
-                    };
-                    self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
-                        Err(err.map_upgrade_err(|v| void::unreachable(v))),
-                        request.path_id,
-                    )));
-                }
-                _ => {}
-            }
-        }
-
-        while let Poll::Ready(Some((peer, res))) = self.inbound.poll_next_unpin(cx) {
-            let res = match res {
-                Ok(r) => r,
-                Err(e) => {
-                    log::debug!("inbound error: {}", e);
-                    continue;
-                }
-            };
-
-            match res {
-                IncomingOrResponse::Incoming(is) => {
-                    self.streams.create_stream(peer);
-                    self.pending_connections.push(is);
-                }
-                IncomingOrResponse::Response(stream) => {
-                    self.events
-                        .push_back(TS::GenerateEvent(Event::InboundStream(stream, PathId::new())));
-                }
-            }
-        }
-
-        while let Poll::Ready(Some(res)) = self.outbound.poll_next_unpin(cx) {
-            let ChannelMeta { from, to } = match res {
-                Ok(r) => r,
-                Err(e) => {
-                    log::debug!("outbound error: {}", e);
-                    continue;
-                }
-            };
-
-            match from {
-                ChannelSource::Relay(path_id) => 'b: {
-                    let Some(request) =
-                        self.pending_connections.find_and_remove(|r| r.meta.path_id == path_id)
-                    else {
-                        log::warn!("received unexpected stream");
-                        break 'b;
-                    };
-
-                    let valid_stream_count = self
-                        .router
-                        .iter_mut()
-                        .filter_map(|c| c.is_valid(self.config.keep_alive_interval).then_some(()))
-                        .count();
-                    if valid_stream_count + self.pending_connections.len() > self.config.max_streams
-                    {
-                        log::info!("too many streams");
-                        if self.error_streams.len() > self.config.max_error_streams {
-                            log::warn!("too many erroring streams");
-                            break 'b;
-                        }
-
-                        self.error_streams
-                            .push(ClosingStream::new(request.stream, packet::OCCUPIED_PEER));
-                        break 'b;
-                    }
-
-                    self.router.push(Channel::new(
-                        request.stream,
-                        to,
-                        self.config.buffer_cap,
-                        self.buffer.clone(),
-                    ));
-                }
-                ChannelSource::ThisNode(secret, path_id, peer_id) => {
-                    self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
-                        Ok((EncryptedStream::new(to, secret, self.config.buffer_cap), peer_id)),
-                        path_id,
-                    )));
-                }
-            }
-        }
+        self.poll_inbound(cx);
+        self.poll_outbound(cx);
+        self.poll_streams(cx);
 
         if let Poll::Ready(Some(Err(e))) = self.router.poll_next_unpin(cx) {
             log::debug!("router error: {}", e);
@@ -283,6 +313,10 @@ impl NetworkBehaviour for Behaviour {
 
         if let Poll::Ready(Some(Err(e))) = self.error_streams.poll_next_unpin(cx) {
             log::debug!("error stream error: {}", e);
+        }
+
+        if let Some(event) = self.events.pop_front() {
+            return Poll::Ready(event);
         }
 
         Poll::Pending
@@ -310,7 +344,7 @@ component_utils::gen_config! {
 
 #[derive(Debug)]
 pub enum Event {
-    ConnectRequest(PeerId),
+    SearchRequest(PeerId),
     InboundStream(EncryptedStream, PathId),
     OutboundStream(Result<(EncryptedStream, PeerId), StreamUpgradeError<OUpgradeError>>, PathId),
 }
@@ -546,8 +580,8 @@ async fn upgrade_outbound_low(
             ss = packet::new_initial(&r.recipient, r.path, &keypair, &mut written_packet);
             (&written_packet, r.path[0].1)
         }
-        IncomingOrRequest::Incoming(i) => (&i.buffer, i.to), // the peer id is arbitrary in
-                                                             // this case
+        IncomingOrRequest::Incoming(i) => (&i.meta.buffer, i.meta.to), // the peer id is arbitrary in
+                                                                       // this case
     };
 
     stream.write_all(&encode_len(buffer.len())).await.map_err(OUpgradeError::WritePacketLength)?;
@@ -558,7 +592,7 @@ async fn upgrade_outbound_low(
     let request = match incoming {
         IncomingOrRequest::Incoming(i) => {
             log::debug!("received incoming routable stream");
-            return Ok(ChannelMeta { from: ChannelSource::Relay(i.path_id), to: stream });
+            return Ok(ChannelMeta { from: ChannelSource::Relay(i.stream), to: stream });
         }
         IncomingOrRequest::Request(r) => r,
     };
@@ -633,7 +667,7 @@ async fn upgrade_inbound_low(
 
     Ok(IncomingOrResponse::Incoming(IncomingStream {
         stream,
-        meta: IncomingStreamMeta { to, buffer: buffer[..new_len].to_vec(), path_id: PathId::new() },
+        meta: IncomingStreamMeta { to, buffer: buffer[..new_len].to_vec() },
     }))
 }
 
@@ -649,7 +683,6 @@ pub struct IncomingStream {
 pub struct IncomingStreamMeta {
     to: PeerId,
     buffer: Vec<u8>,
-    path_id: PathId,
 }
 
 #[derive(Debug)]
@@ -663,7 +696,7 @@ pub struct StreamRequest {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum IncomingOrRequest {
-    Incoming(IncomingStreamMeta),
+    Incoming(IncomingStream),
     Request(StreamRequest),
 }
 
@@ -690,7 +723,7 @@ pub enum IUpgradeError {
 
 #[derive(Debug)]
 pub enum ChannelSource {
-    Relay(PathId),
+    Relay(libp2p::Stream),
     ThisNode(SharedSecret, PathId, PeerId),
 }
 

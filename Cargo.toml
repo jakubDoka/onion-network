@@ -29,6 +29,37 @@ edition = "2021"
 [workspace.dependencies]
 libp2p = "0.53.2"
 log = "0.4.20"
+futures = "0.3.30"
+anyhow = "1.0.80"
+
+chain-api = { path = "core/chain-api" }
+node_staker = { path = "contracts/node_staker" }
+user_manager = { path = "contracts/user_manager" }
+chain-types = { path = "core/chain-types" }
+chat-spec = { path = "core/chat-spec" }
+crypto = { path = "core/crypto" }
+dht = { path = "core/dht" }
+onion = { path = "core/onion" }
+rpc = { path = "core/rpc" }
+storage-spec = { path = "core/storage-spec" }
+streaming = { path = "core/streaming" }
+client = { path = "nodes/client" }
+satelite = { path = "nodes/satelite" }
+server = { path = "nodes/server" }
+storage = { path = "nodes/storage" }
+topology-vis = { path = "nodes/topology-vis" }
+init-transfer = { path = "tests/init-transfer" }
+runner = { path = "tests/runner" }
+berkleamp-welch = { path = "utils/berkleamp-welch", features = ["simd"] }
+codec-derive = { path = "utils/codec-derive" }
+component-utils = { path = "utils/component-utils" }
+config = { path = "utils/config" }
+contract-macro = { path = "utils/contract_macro" }
+kyber = { path = "utils/kyber" }
+merkle-tree = { path = "utils/merkle-tree" }
+topology-wrapper = { path = "utils/topology-wrapper" }
+websocket-websys = { path = "utils/websocket-websys" }
+falcon = { path = "utils/falcon/falcon" }
 
 [profile.native-optimized]
 inherits = "release"

@@ -15,10 +15,11 @@ description = "collection of swappable cryptographic primitives"
 aes-gcm = { version = "0.10.3", features = ["aes", "rand_core"], default-features = false }
 blake3 = { version = "1.5.0", default-features = false }
 ed25519-dalek = { version = "2.0.0", features = ["rand_core"], default-features = false }
-kyber = { path = "../../utils/kyber" }
-falcon = { path = "../../utils/falcon/falcon" }
 x25519-dalek = { version = "2.0.0", features = ["static_secrets"], default-features = false }
 rand_core = { version = "0.6.4", default-features = false }
+
+kyber = { workspace = true }
+falcon = { workspace = true }
 
 [dev-dependencies]
 rand_core = { version = "0.6.4", features = ["getrandom"] }

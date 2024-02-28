@@ -12,17 +12,7 @@ description = "node storing the data mapping on the network"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rpc = { version = "0.1.0", path = "../../core/rpc" }
-dht = { version = "0.1.0", path = "../../core/dht" }
-crypto = { version = "0.1.0", path = "../../core/crypto" }
-chain-api = { version = "0.1.0", path = "../../core/chain-api", features = ["native"] }
-storage-spec = { version = "0.1.0", path = "../../core/storage-spec" }
-
-topology-wrapper = { version = "0.1.0", path = "../../utils/topology-wrapper" }
-component-utils = { version = "0.1.0", path = "../../utils/component-utils" }
-config = { version = "0.1.0", path = "../../utils/config" }
-
-anyhow = "1.0.75"
+anyhow = { workspace = true }
 bitflags = "2.4.1"
 env_logger = "0.11.0"
 libp2p = { workspace = true, features = ["quic", "noise", "macros", "tokio", "yamux", "websocket", "dns"] }
@@ -31,7 +21,17 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 smallvec = "1.11.1"
 thiserror = "1.0.50"
 tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
-streaming = { version = "0.1.0", path = "../../core/streaming" }
+
+streaming = { workspace = true }
+rpc = { workspace = true }
+dht = { workspace = true }
+crypto = { workspace = true }
+chain-api = { workspace = true }
+storage-spec = { workspace = true }
+topology-wrapper = { workspace = true }
+component-utils = { workspace = true }
+config = { workspace = true }
+
 
 [lints]
 workspace = true

@@ -15,7 +15,7 @@ arrayvec = { version = "0.7.4", features = ["serde"] }
 codec-derive = { version = "0.0.0", path = "../codec-derive" }
 futures = { version = "0.3.28" }
 thiserror = { version = "1.0.50" }
-crypto = { version = "0.1.0", path = "../../core/crypto", optional = true }
+crypto = { workspace = true, optional = true }
 
 [features]
 default = ["crypto"]

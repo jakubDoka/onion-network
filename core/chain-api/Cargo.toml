@@ -13,19 +13,20 @@ description = "interface for interacting with chain"
 
 [dependencies]
 blake2 = "0.10.6"
-chain-types = { version = "0.1.0", path = "../chain-types" }
-contract-macro = { version = "0.1.0", path = "../../utils/contract_macro" }
-crypto = { version = "0.1.0", path = "../crypto" }
 futures = { version = "0.3.29", features = ["executor"] }
 hex = "0.4.3"
 log = { workspace = true }
 parity-scale-codec = "3.6.5"
-scale-encode = "0.5.0"
+scale-encode = "0.6.0"
 serde = { version = "1.0.190", features = ["derive"] }
 serde_json = "1.0.108"
-subxt = { version = "0.33", default-features = false }
-subxt-signer = { version = "0.33", features = ["subxt", "sr25519"], default-features = false }
+subxt = { version = "0.34", default-features = false }
+subxt-signer = { version = "0.34", features = ["subxt", "sr25519"], default-features = false }
 thiserror = "1.0.50"
+
+chain-types = { workspace = true }
+contract-macro = { workspace = true }
+crypto = { workspace = true }
 
 [features]
 native = ["subxt/default", "subxt-signer/default", "chain-types/native"]

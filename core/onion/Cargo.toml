@@ -13,16 +13,17 @@ description = "libp2p protocols for onion-like routing with pqc security"
 
 [dependencies]
 aes-gcm = "0.10.3"
-component-utils = { version = "0.1.0", path = "../../utils/component-utils" }
-crypto = { version = "0.1.0", path = "../crypto" }
-futures = "0.3.28"
+futures = { workspace = true }
 instant = "0.1.12"
 libp2p = { workspace = true }
 log = { workspace = true }
 spin = { version = "0.9.8", default-features = false, features = ["mutex", "spin_mutex"] }
-streaming = { version = "0.1.0", path = "../streaming" }
 thiserror = "1.0.50"
 void = "1.0.2"
+
+streaming = { workspace = true }
+component-utils = { workspace = true }
+crypto = { workspace = true }
 
 [dev-dependencies]
 env_logger = "0.11.0"

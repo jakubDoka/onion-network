@@ -12,9 +12,10 @@ description = "topology visualization protocols for libp2p"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-component-utils = { version = "0.1.0", path = "../component-utils" }
-libp2p = "0.53.1"
+libp2p = { workspace = true }
 log = { workspace = true }
+
+component-utils = { workspace = true }
 
 [features]
 disabled = []

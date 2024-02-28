@@ -6,7 +6,7 @@ categories = { workspace = true }
 keywords = { workspace = true }
 name = "satelite"
 version = "0.1.0"
-edition = "2021"
+edition = { workspace = true }
 description = "node storing the data mapping on the network"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -25,8 +25,8 @@ config = { version = "0.1.0", path = "../../utils/config" }
 anyhow = "1.0.75"
 bitflags = "2.4.1"
 env_logger = "0.11.0"
-libp2p = { version = "0.53.0", features = ["quic", "noise", "macros", "tokio", "yamux", "websocket", "dns"] }
-log = "0.4.20"
+libp2p = { workspace = true, features = ["quic", "noise", "macros", "tokio", "yamux", "websocket", "dns"] }
+log = { workspace = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 smallvec = "1.11.1"
 thiserror = "1.0.50"

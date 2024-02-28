@@ -6,20 +6,20 @@ categories = { workspace = true }
 keywords = { workspace = true }
 name = "streaming"
 version = "0.1.0"
-edition = "2021"
+edition = { workspace = true }
 description = "minimal utility protocol that just negotiates a streams as requested"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 component-utils = { version = "0.1.0", path = "../../utils/component-utils" }
-libp2p = { version = "0.53.1" }
-log = "0.4.20"
+libp2p = { workspace = true }
+log = { workspace = true }
 void = "1.0.2"
 
 [dev-dependencies]
 tokio = { version = "1.34.0", features = ["macros", "rt", "time"] }
-libp2p = { version = "0.53.1", features = ["noise", "yamux", "tcp", "macros", "tokio"]}
+libp2p = { workspace = true, features = ["noise", "yamux", "tcp", "macros", "tokio"]}
 env_logger = "0.11.0"
 dht = { path = "../dht" }
 

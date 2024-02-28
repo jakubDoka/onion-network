@@ -12,10 +12,11 @@ description = "simple rpc calls for libp2p"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-component-utils = { version = "0.1.0", path = "../../utils/component-utils" }
 libp2p = { workspace = true }
 log = { workspace = true }
-streaming = { version = "0.1.0", path = "../streaming" }
+
+streaming = { workspace = true }
+component-utils = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1.36.0", features = ["macros", "rt", "time"] }

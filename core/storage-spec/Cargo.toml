@@ -14,10 +14,11 @@ description = "storage declarations that both server and client need to know"
 [dependencies]
 arrayvec = "0.7.4"
 blake3 = "1.5.0"
-crypto = { version = "0.1.0", path = "../crypto" }
-futures = "0.3.30"
-berkleamp-welch = { version = "0.1.0", path = "../../utils/berkleamp-welch", features = ["simd"] }
-component-utils = { version = "0.1.0", path = "../../utils/component-utils" }
+
+crypto = { workspace = true }
+futures = { workspace = true }
+berkleamp-welch = { workspace = true }
+component-utils = { workspace = true }
 
 [dev-dependencies]
 getrandom = "0.2.12"

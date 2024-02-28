@@ -13,7 +13,7 @@ description = "a trivial network topology algotithm for libp2p"
 
 [dependencies]
 blake3 = "1.5.0"
-libp2p = "0.53.2"
+libp2p = { workspace = true }
 primitive-types = "0.12.2"
 
 [lints]

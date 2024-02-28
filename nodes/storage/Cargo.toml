@@ -12,7 +12,7 @@ description = "node that stores data requested by satelites"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-storage-spec = { version = "0.1.0", path = "../../core/storage-spec" }
+storage-spec = { workspace = true }
 
 [lints]
 workspace = true

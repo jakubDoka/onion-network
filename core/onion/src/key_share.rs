@@ -1,5 +1,4 @@
 use {
-    crate::KEY_SHARE_PROTOCOL,
     crypto::{enc, TransmutationCircle},
     futures::{AsyncReadExt, Future},
     libp2p::{
@@ -9,6 +8,8 @@ use {
     },
     std::{collections::HashMap, convert::Infallible, io, iter, mem},
 };
+
+component_utils::decl_stream_protocol!(KEY_SHARE_PROTOCOL = "ksr");
 
 #[derive(Default)]
 pub struct Behaviour {

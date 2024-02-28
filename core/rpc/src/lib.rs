@@ -253,6 +253,7 @@ impl NetworkBehaviour for Behaviour {
                         self.events.push(Event::Response(peer, call, Err(err.clone())));
                     }
                 }
+                streaming::Event::SearchRequest(p) => todo!(),
             }
         }
     }

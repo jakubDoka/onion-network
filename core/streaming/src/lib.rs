@@ -31,7 +31,6 @@ pub struct Behaviour {
 }
 
 impl Behaviour {
-    #[must_use]
     pub fn is_resolving_stream_for(&self, peer: PeerId) -> bool {
         self.stream_requests.iter().any(|(p, ..)| *p == peer)
             || self.dial_requests.iter().any(|(p, ..)| *p == peer)
@@ -115,7 +114,6 @@ impl NetworkBehaviour for Behaviour {
                     }
                 }
             }
-
             libp2p::swarm::FromSwarm::ConnectionEstablished(c) => {
                 if let Some((.., count)) =
                     self.dial_requests.find_and_remove(|(p, ..)| *p == c.peer_id)
@@ -136,8 +134,8 @@ impl NetworkBehaviour for Behaviour {
         event: libp2p::swarm::THandlerOutEvent<Self>,
     ) {
         self.events.push(match event {
-            Ok(stream) => Event::IncomingStream(peer_id, stream),
-            Err(e) => Event::OutgoingStream(peer_id, e),
+            HEvent::Incoming(stream) => Event::IncomingStream(peer_id, stream),
+            HEvent::Outgoing(e) => Event::OutgoingStream(peer_id, e),
         });
     }
 
@@ -182,13 +180,14 @@ impl NetworkBehaviour for Behaviour {
 pub enum Event {
     IncomingStream(PeerId, libp2p::Stream),
     OutgoingStream(PeerId, Result<libp2p::Stream, Error>),
+    SearchRequest(PeerId),
 }
 
 pub type Error = StreamUpgradeError<void::Void>;
 
 pub struct Handler {
     requested: usize,
-    stream: Vec<Result<libp2p::Stream, Result<libp2p::Stream, Error>>>,
+    stream: Vec<HEvent>,
     waker: Option<std::task::Waker>,
     proto: fn() -> StreamProtocol,
 }
@@ -205,7 +204,7 @@ impl ConnectionHandler for Handler {
     type InboundProtocol = ReadyUpgrade<StreamProtocol>;
     type OutboundOpenInfo = ();
     type OutboundProtocol = ReadyUpgrade<StreamProtocol>;
-    type ToBehaviour = Result<libp2p::Stream, Result<libp2p::Stream, Error>>;
+    type ToBehaviour = HEvent;
 
     fn listen_protocol(
         &self,
@@ -255,9 +254,9 @@ impl ConnectionHandler for Handler {
     ) {
         use libp2p::swarm::handler::ConnectionEvent as E;
         let ev = match event {
-            E::FullyNegotiatedInbound(i) => Ok(i.protocol),
-            E::FullyNegotiatedOutbound(o) => Err(Ok(o.protocol)),
-            E::DialUpgradeError(e) => Err(Err(e.error)),
+            E::FullyNegotiatedInbound(i) => HEvent::Incoming(i.protocol),
+            E::FullyNegotiatedOutbound(o) => HEvent::Outgoing(Ok(o.protocol)),
+            E::DialUpgradeError(e) => HEvent::Outgoing(Err(e.error)),
             _ => return,
         };
         if let Some(waker) = self.waker.take() {
@@ -265,6 +264,12 @@ impl ConnectionHandler for Handler {
         }
         self.stream.push(ev);
     }
+}
+
+#[derive(Debug)]
+pub enum HEvent {
+    Incoming(libp2p::Stream),
+    Outgoing(Result<libp2p::Stream, Error>),
 }
 
 #[cfg(test)]

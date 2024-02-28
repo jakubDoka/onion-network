@@ -20,6 +20,7 @@ instant = "0.1.12"
 libp2p = { version = "0.53.0" }
 log = "0.4.20"
 spin = { version = "0.9.8", default-features = false, features = ["mutex", "spin_mutex"] }
+streaming = { version = "0.1.0", path = "../streaming" }
 thiserror = "1.0.50"
 void = "1.0.2"
 

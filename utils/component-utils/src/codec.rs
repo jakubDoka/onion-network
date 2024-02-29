@@ -1,7 +1,12 @@
 use {
     arrayvec::{ArrayString, ArrayVec},
     core::{convert::Infallible, marker::PhantomData},
-    std::{ops::Range, sync::Arc, u32, usize},
+    std::{
+        borrow::{Borrow, Cow},
+        ops::Range,
+        sync::Arc,
+        u32, usize,
+    },
 };
 
 pub const PACKET_LEN_WIDTH: usize = std::mem::size_of::<PacketLen>();
@@ -539,4 +544,17 @@ derive_tuples! {
     A, B, C, D;
     A, B, C, D, E;
     A, B, C, D, E, F;
+}
+
+impl<'a, T: ToOwned + Codec<'a>> Codec<'a> for Cow<'a, T>
+where
+    T::Owned: Codec<'a>,
+{
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        self.as_ref().borrow().encode(buffer)
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        Some(Cow::Owned(<T::Owned>::decode(buffer)?))
+    }
 }

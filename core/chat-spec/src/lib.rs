@@ -10,7 +10,7 @@
 use {
     component_utils::{arrayvec::ArrayVec, crypto::ToProofContext, Codec, Reminder},
     crypto::{enc, Serialized},
-    std::{convert::Infallible, num::NonZeroUsize},
+    std::{borrow::Cow, collections::HashMap, convert::Infallible, num::NonZeroUsize},
 };
 
 pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
@@ -40,7 +40,7 @@ component_utils::compose_protocols! {
     fn FetchMessages<'a>(ChatName, Cursor) -> Result<(Cursor, Reminder<'a>), FetchMessagesError>;
     fn ProposeMsgBlock(ChatName, BlockNumber, crypto::Hash) -> Result<(), ProposeMsgBlockError>;
     fn SendBlock<'a>(ChatName, BlockNumber, Reminder<'a>) -> Result<(), SendBlockError>;
-    fn FetchLatestBlock<'a>(ChatName) -> Result<(BlockNumber, Reminder<'a>), FetchLatestBlockError>;
+    fn FetchMinimalChatData<'a>(ChatName) -> Result<(BlockNumber, Cow<'a, HashMap<Identity, Member>>, Reminder<'a>), FetchLatestBlockError>;
 
     fn CreateProfile<'a>(Proof<&'a [u8]>, Serialized<enc::PublicKey>) -> Result<(), CreateAccountError>;
     fn SetVault<'a>(Proof<Reminder<'a>>) -> Result<(), SetVaultError>;

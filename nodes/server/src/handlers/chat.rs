@@ -3,12 +3,13 @@ use {
     chat_spec::{
         advance_nonce, retain_messages_in_vec, unpack_messages, unpack_messages_ref, BlockNumber,
         ChatAction, ChatActionError, ChatEvent, ChatName, CreateChat, CreateChatError, Cursor,
-        FetchLatestBlock, FetchLatestBlockError, FetchMessages, FetchMessagesError, Identity,
-        InvalidBlockReason, Message, Nonce, PerformChatAction, ProposeMsgBlock,
+        FetchLatestBlockError, FetchMessages, FetchMessagesError, FetchMinimalChatData, Identity,
+        InvalidBlockReason, Member, Message, Nonce, PerformChatAction, ProposeMsgBlock,
         ProposeMsgBlockError, SendBlock, SendBlockError, REPLICATION_FACTOR,
     },
     component_utils::{encode_len, Buffer, NoCapOverflow, Reminder},
     std::{
+        borrow::Cow,
         collections::{HashMap, VecDeque},
         iter, usize,
     },
@@ -30,7 +31,7 @@ impl SyncHandler for CreateChat {
             CreateChatError::AlreadyExists
         );
 
-        entry.insert(Chat::new(identity, false));
+        entry.insert(Chat::new(identity));
 
         Ok(())
     }
@@ -58,7 +59,7 @@ impl SyncHandler for PerformChatAction {
             ChatAction::AddUser(id) => {
                 // TODO: write the member addition to message history so it can be finalized
                 crate::ensure!(
-                    chat.members.try_insert(id, Member::new()).is_ok(),
+                    chat.members.try_insert(id, Member::default()).is_ok(),
                     ChatActionError::AlreadyMember
                 );
             }
@@ -66,7 +67,7 @@ impl SyncHandler for PerformChatAction {
                 crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatActionError::MessageTooLarge);
 
                 // TODO: move this to context
-                let bn = chat.block_number;
+                let bn = chat.number;
                 let message = Message {
                     identiy: sender_id,
                     nonce: sender.action - 1,
@@ -223,10 +224,10 @@ impl SyncHandler for SendBlock {
     }
 }
 
-impl SyncHandler for FetchLatestBlock {
+impl SyncHandler for FetchMinimalChatData {
     fn execute<'a>(cx: Scope<'a>, req: Self::Request<'_>) -> ProtocolResult<'a, Self> {
         let chat = cx.cx.storage.chats.get(&req).ok_or(FetchLatestBlockError::ChatNotFound)?;
-        Ok((chat.block_number, Reminder(chat.current_block.as_slice())))
+        Ok((chat.number, Cow::Borrowed(&chat.members), Reminder(chat.current_block.as_slice())))
     }
 }
 
@@ -238,7 +239,7 @@ impl SyncHandler for FetchMessages {
         let chat = sc.cx.storage.chats.get_mut(&chat).ok_or(FetchMessagesError::ChatNotFound)?;
 
         if cursor == Cursor::INIT {
-            cursor.block = chat.block_number;
+            cursor.block = chat.number;
             cursor.offset = chat.current_block.len();
         }
 
@@ -254,7 +255,7 @@ impl SyncHandler for FetchMessages {
         let Some(block) = iter::once(chat.current_block.as_mut_slice())
             .chain(chat.stage.unfinalized_block())
             .chain(chat.finalized.iter_mut().map(|b| b.data.as_mut()))
-            .nth(chat.block_number.saturating_sub(cursor.block) as usize)
+            .nth(chat.number.saturating_sub(cursor.block) as usize)
         else {
             return bail;
         };
@@ -306,26 +307,42 @@ impl BlockStage {
     }
 }
 
-#[derive(Codec)]
+#[derive(Codec, Default)]
 pub struct Chat {
     members: HashMap<Identity, Member>,
     finalized: VecDeque<Block>,
     current_block: Vec<u8>,
-    pub(crate) block_number: BlockNumber,
+    pub(crate) number: BlockNumber,
     stage: BlockStage,
-    restoring: bool,
 }
 
 impl Chat {
-    pub fn new(id: Identity, restoring: bool) -> Self {
+    pub fn new(id: Identity) -> Self {
         Self {
-            members: [(id, Member::new())].into(),
+            members: [(id, Member::default())].into(),
             finalized: Default::default(),
             current_block: Vec::with_capacity(BLOCK_SIZE),
-            block_number: 0,
+            number: 0,
             stage: Default::default(),
-            restoring,
         }
+    }
+
+    pub fn recovered(
+        members: HashMap<Identity, Member>,
+        number: BlockNumber,
+        current_block: Vec<u8>,
+    ) -> Self {
+        Self {
+            members,
+            finalized: Default::default(),
+            current_block,
+            number,
+            stage: Default::default(),
+        }
+    }
+
+    pub fn is_recovering(&self) -> bool {
+        self.members.is_empty()
     }
 
     pub fn push_message<'a>(
@@ -358,7 +375,7 @@ impl Chat {
                 } else {
                     *proposed = Some(Block { hash, data: self.current_block.as_slice().into() });
                     self.current_block.clear();
-                    self.block_number += 1;
+                    self.number += 1;
                 }
                 Some(hash)
             }
@@ -384,7 +401,7 @@ impl Chat {
         self.stage = BlockStage::default();
         self.push_to_finalized(Block { hash, data: self.current_block.as_slice().into() });
         self.current_block.clear();
-        self.block_number += 1;
+        self.number += 1;
     }
 
     fn push_to_finalized(&mut self, block: Block) {
@@ -402,28 +419,10 @@ impl Chat {
     }
 
     fn last_finalized_block(&self) -> BlockNumber {
-        self.block_number
+        self.number
             - u64::from(matches!(
                 self.stage,
                 BlockStage::Unfinalized { proposed: Some(_), .. } | BlockStage::Recovering { .. }
             ))
-    }
-}
-
-#[derive(Codec)]
-struct Member {
-    action: Nonce,
-}
-
-impl Member {
-    fn new() -> Self {
-        Self { action: 0 }
-    }
-}
-
-bitflags::bitflags! {
-    pub struct Permissions: u8 {
-        const MODIFY_PERMISSIONS = 1 << 0;
-        const KICK = 1 << 1;
     }
 }

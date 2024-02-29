@@ -1,4 +1,5 @@
 #![feature(iter_advance_by)]
+#![feature(array_windows)]
 #![feature(iter_collect_into)]
 #![feature(let_chains)]
 #![feature(entry_insert)]
@@ -15,8 +16,8 @@ use {
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
     chat_spec::{
-        CallId, ChatName, CreateChat, CreateProfile, FetchFullProfile, FetchLatestBlock,
-        FetchMessages, FetchProfile, FetchVault, Identity, PerformChatAction, PossibleTopic,
+        CallId, ChatName, CreateChat, CreateProfile, FetchFullProfile, FetchMessages,
+        FetchMinimalChatData, FetchProfile, FetchVault, Identity, PerformChatAction, PossibleTopic,
         Profile, ProposeMsgBlock, Protocol, ReadMail, SendBlock, SetVault, Subscribe, Topic,
         REPLICATION_FACTOR,
     },
@@ -56,6 +57,7 @@ macro_rules! extract_ctx {
     };
 }
 
+mod db;
 mod handlers;
 #[cfg(test)]
 mod tests;
@@ -75,7 +77,7 @@ compose_handlers! {
         PerformChatAction,
         ProposeMsgBlock,
         SendBlock,
-        FetchLatestBlock,
+        FetchMinimalChatData,
     }
 
     ExternalServer {

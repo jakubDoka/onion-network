@@ -7,6 +7,11 @@ use {
 
 pub const CHAT_NAME_CAP: usize = 32;
 
+#[derive(Codec, Default, Clone)]
+pub struct Member {
+    pub action: Nonce,
+}
+
 #[derive(Clone, Copy, Codec)]
 pub struct Message<'a> {
     pub identiy: Identity,

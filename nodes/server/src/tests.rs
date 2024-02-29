@@ -4,7 +4,7 @@ use {
     component_utils::{crypto::ToProofContext, Protocol},
     libp2p::futures::{channel::mpsc, stream::FuturesUnordered, FutureExt},
     rand_core::OsRng,
-    std::{fmt::Debug, usize},
+    std::{fmt::Debug, pin::pin, usize},
 };
 
 #[tokio::test]
@@ -119,7 +119,7 @@ async fn message_block_finalization() {
     const MULTIPLIER: usize = 1;
 
     for i in 0..12 * MULTIPLIER {
-        println!("i: {}", i);
+        println!("ij: {}", i);
         let cons = [i as u8; MESSAGE_SIZE / MULTIPLIER];
         stream1
             .test_req::<PerformChatAction>(
@@ -130,7 +130,7 @@ async fn message_block_finalization() {
             .await;
     }
 
-    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().block_number == 2);
+    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().number == 2);
 
     for i in 0..6 * MULTIPLIER {
         // futures::future::select(
@@ -139,7 +139,7 @@ async fn message_block_finalization() {
         // )
         // .await;
 
-        println!("i: {}", i);
+        println!("ik: {}", i);
         let msg = [i as u8; MESSAGE_SIZE / MULTIPLIER];
         let body = (user.proof(chat), ChatAction::SendMessage(Reminder(&msg)));
         stream1.inner.write(PerformChatAction::rpc_id(CallId::whatever(), body)).unwrap();
@@ -151,7 +151,82 @@ async fn message_block_finalization() {
         response::<PerformChatAction>(&mut nodes, &mut stream2, 1000, Ok(())).await;
     }
 
-    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().block_number == 5);
+    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().number == 5);
+
+    let target = nodes.iter_mut().next().unwrap();
+    target.storage.chats.clear();
+
+    stream1
+        .test_req::<PerformChatAction>(
+            &mut nodes,
+            (user.proof(chat), ChatAction::SendMessage(Reminder(&[0xff]))),
+            Ok(()),
+        )
+        .await;
+}
+
+//#[tokio::test]
+async fn _foo() {
+    _ = env_logger::builder().is_test(true).try_init();
+
+    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1);
+
+    let mut user = Account::new();
+    let mut user2 = Account::new();
+    let [mut stream1, used] = Stream::new_test();
+    let [mut stream2, used2] = Stream::new_test();
+
+    nodes.iter_mut().next().unwrap().clients.push(used);
+    nodes.iter_mut().last().unwrap().clients.push(used2);
+    stream1.create_user(&mut nodes, &mut user).await;
+    stream2.create_user(&mut nodes, &mut user2).await;
+
+    let chat = ChatName::from("foo").unwrap();
+
+    stream1.test_req::<CreateChat>(&mut nodes, (chat, user.identity()), Ok(())).await;
+    stream1
+        .test_req::<PerformChatAction>(
+            &mut nodes,
+            (user.proof(chat), ChatAction::AddUser(user2.identity())),
+            Ok(()),
+        )
+        .await;
+
+    const MESSAGE_SIZE: usize = 900;
+    const MULTIPLIER: usize = 1;
+
+    for i in 0..12 * MULTIPLIER {
+        let cons = [i as u8; MESSAGE_SIZE / MULTIPLIER];
+        stream1
+            .test_req::<PerformChatAction>(
+                &mut nodes,
+                (user.proof(chat), ChatAction::SendMessage(Reminder(&cons))),
+                Ok(()),
+            )
+            .await;
+    }
+
+    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().number == 2);
+
+    for i in 0..6 * MULTIPLIER {
+        // futures::future::select(
+        //     nodes.next(),
+        //     std::pin::pin!(tokio::time::sleep(Duration::from_millis(10))),
+        // )
+        // .await;
+
+        let msg = [i as u8; MESSAGE_SIZE / MULTIPLIER];
+        let body = (user.proof(chat), ChatAction::SendMessage(Reminder(&msg)));
+        stream1.inner.write(PerformChatAction::rpc_id(CallId::whatever(), body)).unwrap();
+        let msg = [i as u8 * 2; MESSAGE_SIZE / MULTIPLIER];
+        let body = (user2.proof(chat), ChatAction::SendMessage(Reminder(&msg)));
+        stream2.inner.write(PerformChatAction::rpc_id(CallId::whatever(), body)).unwrap();
+
+        response::<PerformChatAction>(&mut nodes, &mut stream1, 1000, Ok(())).await;
+        response::<PerformChatAction>(&mut nodes, &mut stream2, 1000, Ok(())).await;
+    }
+
+    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().number == 5);
 
     let target = nodes.iter_mut().next().unwrap();
     target.storage.chats.clear();

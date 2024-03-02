@@ -1,8 +1,8 @@
 use {
     super::Nonce,
-    crate::{BlockNumber, Identity, Proof, Topic},
+    crate::{BlockNumber, Identity, Proof},
     component_utils::{arrayvec::ArrayString, Codec, Reminder},
-    std::{convert::Infallible, iter, ops::Range},
+    std::{iter, ops::Range},
 };
 
 pub const CHAT_NAME_CAP: usize = 32;
@@ -31,11 +31,6 @@ impl Cursor {
 
 pub type ChatName = ArrayString<CHAT_NAME_CAP>;
 pub type RawChatName = [u8; CHAT_NAME_CAP];
-
-impl Topic for ChatName {
-    type Event<'a> = ChatEvent<'a>;
-    type Record = Infallible;
-}
 
 #[derive(Codec)]
 pub enum ChatEvent<'a> {
@@ -74,7 +69,7 @@ pub enum CreateChatError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum ChatActionError {
+pub enum AddMemberError {
     #[error("chat not found")]
     ChatNotFound,
     #[error("invalid proof")]
@@ -83,6 +78,18 @@ pub enum ChatActionError {
     NotMember,
     #[error("user already exists")]
     AlreadyMember,
+    #[error("invalid action, expected nonce higher then {0}")]
+    InvalidAction(Nonce),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
+pub enum SendMessageError {
+    #[error("chat not found")]
+    ChatNotFound,
+    #[error("invalid proof")]
+    InvalidProof,
+    #[error("you are not a member")]
+    NotMember,
     #[error("invalid action, expected nonce higher then {0}")]
     InvalidAction(Nonce),
     #[error("message too large")]
@@ -130,7 +137,7 @@ pub enum InvalidBlockReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum FetchLatestBlockError {
+pub enum FetchMinimalChatData {
     #[error("chat not found")]
     ChatNotFound,
 }

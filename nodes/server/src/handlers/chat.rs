@@ -1,18 +1,17 @@
 use {
-    super::{Codec, Protocol, ProtocolResult, RequestOrigin, Scope, SyncHandler},
     chat_spec::{
-        advance_nonce, retain_messages_in_vec, unpack_messages, unpack_messages_ref, BlockNumber,
-        ChatAction, ChatActionError, ChatEvent, ChatName, CreateChat, CreateChatError, Cursor,
-        FetchLatestBlockError, FetchMessages, FetchMessagesError, FetchMinimalChatData, Identity,
-        InvalidBlockReason, Member, Message, Nonce, PerformChatAction, ProposeMsgBlock,
-        ProposeMsgBlockError, SendBlock, SendBlockError, REPLICATION_FACTOR,
+        advance_nonce, retain_messages_in_vec, rpcs, unpack_messages_ref, AddMemberError,
+        BlockNumber, ChatEvent, ChatName, CreateChatError, Cursor, FetchMessagesError,
+        FetchMinimalChatData, Identity, Member, Message, Proof, SendBlockError, SendMessageError,
+        REPLICATION_FACTOR,
     },
     component_utils::{encode_len, Buffer, NoCapOverflow, Reminder},
     std::{
-        borrow::Cow,
         collections::{HashMap, VecDeque},
-        iter, usize,
+        sync::Arc,
+        usize,
     },
+    tokio::sync::RwLock,
 };
 
 const MAX_MESSAGE_SIZE: usize = 1024;
@@ -20,273 +19,252 @@ const MESSAGE_FETCH_LIMIT: usize = 20;
 const BLOCK_SIZE: usize = if cfg!(test) { 1024 * 4 } else { 1024 * 32 };
 const BLOCK_HISTORY: usize = 32;
 
-impl SyncHandler for CreateChat {
-    fn execute<'a>(
-        mut cx: Scope<'a>,
-        (name, identity): Self::Request<'_>,
-    ) -> ProtocolResult<'a, Self> {
-        let chat_entry = cx.storage.chats.entry(name);
-        crate::ensure!(
-            let std::collections::hash_map::Entry::Vacant(entry) = chat_entry,
-            CreateChatError::AlreadyExists
-        );
+pub async fn create(
+    cx: crate::Context,
+    (name, identity): (ChatName, Identity),
+) -> Result<(), CreateChatError> {
+    let chat_entry = cx.chats.entry(name);
+    crate::ensure!(
+        let dashmap::mapref::entry::Entry::Vacant(entry) = chat_entry,
+        CreateChatError::AlreadyExists
+    );
 
-        entry.insert(Chat::new(identity));
+    entry.insert(Arc::new(RwLock::new(Chat::new(identity))));
 
-        Ok(())
-    }
+    Ok(())
 }
 
-impl SyncHandler for PerformChatAction {
-    fn execute<'a>(
-        mut sc: Scope<'a>,
-        (proof, action): Self::Request<'_>,
-    ) -> ProtocolResult<'a, Self> {
-        crate::ensure!(proof.verify(), ChatActionError::InvalidProof);
+pub async fn add_member(
+    cx: crate::Context,
+    (proof, name, identity): (Proof<Identity>, ChatName, Identity),
+) -> Result<(), AddMemberError> {
+    let chat = cx.chats.get(&name).ok_or(AddMemberError::ChatNotFound)?.clone();
+    let mut chat = chat.write().await;
 
-        let chat =
-            sc.cx.storage.chats.get_mut(&proof.context).ok_or(ChatActionError::ChatNotFound)?;
+    crate::ensure!(proof.verify(), AddMemberError::InvalidProof);
 
-        let sender_id = crypto::hash::from_raw(&proof.pk);
-        let sender = chat.members.get_mut(&sender_id).ok_or(ChatActionError::NotMember)?;
+    let sender_id = crypto::hash::from_raw(&proof.pk);
+    let sender = chat.members.get_mut(&sender_id).ok_or(AddMemberError::NotMember)?;
 
-        crate::ensure!(
-            advance_nonce(&mut sender.action, proof.nonce),
-            ChatActionError::InvalidAction(sender.action)
-        );
+    crate::ensure!(
+        advance_nonce(&mut sender.action, proof.nonce),
+        AddMemberError::InvalidAction(sender.action)
+    );
 
-        match action {
-            ChatAction::AddUser(id) => {
-                // TODO: write the member addition to message history so it can be finalized
-                crate::ensure!(
-                    chat.members.try_insert(id, Member::default()).is_ok(),
-                    ChatActionError::AlreadyMember
-                );
-            }
-            ChatAction::SendMessage(Reminder(msg)) => {
-                crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatActionError::MessageTooLarge);
+    crate::ensure!(
+        chat.members.try_insert(identity, Member::default()).is_ok(),
+        AddMemberError::AlreadyMember
+    );
 
-                // TODO: move this to context
-                let bn = chat.number;
-                let message = Message {
-                    identiy: sender_id,
-                    nonce: sender.action - 1,
-                    content: Reminder(msg),
-                };
-                match chat.push_message(message, &mut sc.cx.res.hashes) {
-                    Err(Some(hash)) => send_block_proposals(sc.reborrow(), proof.context, bn, hash),
-                    Err(None) => return Err(ChatActionError::MessageBlockNotFinalized),
-                    Ok(()) => (),
-                }
+    Ok(())
+}
 
-                sc.push(proof.context, ChatEvent::Message(proof, Reminder(msg)));
-            }
+pub async fn send_message(
+    cx: crate::Context,
+    (proof, Reminder(msg)): (Proof<ChatName>, Reminder<'_>),
+) -> Result<(), SendMessageError> {
+    let chat = cx.chats.get(&proof.context).ok_or(SendMessageError::ChatNotFound)?.clone();
+    let mut chat = chat.write().await;
+
+    crate::ensure!(proof.verify(), SendMessageError::InvalidProof);
+
+    let sender_id = crypto::hash::from_raw(&proof.pk);
+    let bn = chat.number;
+    let sender = chat.members.get_mut(&sender_id).ok_or(SendMessageError::NotMember)?;
+
+    crate::ensure!(
+        advance_nonce(&mut sender.action, proof.nonce),
+        SendMessageError::InvalidAction(sender.action)
+    );
+
+    crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, SendMessageError::MessageTooLarge);
+
+    let message = Message { identiy: sender_id, nonce: sender.action - 1, content: Reminder(msg) };
+    match chat.push_message(message, &mut vec![]) {
+        Err(Some(hash)) => {
+            cx.replicate_rpc_no_resp(proof.context, rpcs::BLOCK_PROPOSAL, (proof.context, bn, hash))
         }
-
-        Ok(())
+        Err(None) => return Err(SendMessageError::MessageBlockNotFinalized),
+        Ok(()) => (),
     }
+
+    cx.push_event(proof.context, ChatEvent::Message(proof, Reminder(msg)));
+
+    Ok(())
 }
 
-fn send_block_proposals(sc: Scope, name: ChatName, number: BlockNumber, hash: crypto::Hash) {
-    let us = *sc.cx.swarm.local_peer_id();
-    let beh = sc.cx.swarm.behaviour_mut();
-    let mut msg = [0; std::mem::size_of::<(u8, ChatName, crypto::Hash)>()];
-    ProposeMsgBlock::rpc((name, number, hash)).encode(&mut msg.as_mut_slice()).unwrap();
-    for recip in crate::other_replicators_for(&beh.dht.table, name, us) {
-        _ = beh.rpc.request(recip, msg);
-    }
-}
+pub async fn propose_msg_block(
+    cx: crate::Context,
+    origin: super::Origin,
+    repl: super::ReplGroup,
+    (chat_name, number, phash): (ChatName, BlockNumber, crypto::Hash),
+) {
+    let Some(index) = repl.iter().position(|id| *id == origin) else {
+        return;
+    };
 
-impl SyncHandler for ProposeMsgBlock {
-    fn execute<'a>(
-        sc: Scope<'a>,
-        (chat, number, phash): Self::Request<'_>,
-    ) -> ProtocolResult<'a, Self> {
-        crate::ensure!(let RequestOrigin::Server(origin) = sc.origin, ProposeMsgBlockError::NotServer);
+    let Some(chat) = cx.chats.get_mut(&chat_name).map(|c| c.value().clone()) else {
+        return;
+    };
 
-        let index = sc
-            .other_replicators_for(chat)
-            .map(RequestOrigin::Server)
-            .position(|id| id == sc.origin)
-            .ok_or(ProposeMsgBlockError::NoReplicator)?;
+    {
+        let chat = chat.read().await;
 
-        crate::ensure!(
-            let Some(chat_data) = sc.cx.storage.chats.get_mut(&chat),
-            ProposeMsgBlockError::ChatNotFound
-        );
-
-        let our_finalized = chat_data.last_finalized_block();
+        let our_finalized = chat.last_finalized_block();
         match number.cmp(&our_finalized) {
             std::cmp::Ordering::Less if our_finalized - number <= 1 => {
-                crate::ensure!(
-                    let Some(block) = chat_data.finalized.front(),
-                    ProposeMsgBlockError::NoBlocks
-                );
+                if let Some(block) = chat.finalized.front() {
+                    if block.hash == phash {
+                        return;
+                    }
 
-                if block.hash == phash {
-                    return Ok(());
+                    cx.send_rpc_no_resp(
+                        chat_name,
+                        repl[index],
+                        rpcs::SEND_BLOCK,
+                        (chat_name, number, Reminder(block.data.as_ref())),
+                    );
+                    return;
                 }
-
-                let packet =
-                    SendBlock::rpc((chat, number, Reminder(block.data.as_ref()))).to_bytes();
-                _ = sc.cx.swarm.behaviour_mut().rpc.request(origin, packet);
-                return Ok(());
             }
             std::cmp::Ordering::Less => todo!("sender needs more complex data recovery"),
             std::cmp::Ordering::Equal => {}
             std::cmp::Ordering::Greater if number - our_finalized <= 1 => {}
             std::cmp::Ordering::Greater => todo!("we are behind, so I guess just wait for blocks"),
         }
+    }
 
-        let BlockStage::Unfinalized { proposed, others } = &mut chat_data.stage else {
-            return Ok(());
-        };
+    let mut chat = chat.write().await;
 
-        let we_finalized = proposed.is_some();
-        let we_match = proposed.as_ref().map(|p| p.hash) == Some(phash);
+    let BlockStage::Unfinalized { proposed, others } = &mut chat.stage else {
+        return;
+    };
 
-        others[index] = phash;
+    let we_finalized = proposed.is_some();
+    let we_match = proposed.as_ref().map(|p| p.hash) == Some(phash);
 
-        if others.iter().filter(|h| **h == phash).count()
-            > REPLICATION_FACTOR.get() / 2 - usize::from(we_match)
+    others[index] = phash;
+
+    if others.iter().filter(|h| **h == phash).count()
+        > REPLICATION_FACTOR.get() / 2 - usize::from(we_match)
+    {
+        chat.stage = if let Some(block) = proposed.take()
+            && block.hash == phash
         {
-            chat_data.stage = if let Some(block) = proposed.take()
-                && block.hash == phash
-            {
-                chat_data.push_to_finalized(block);
-                BlockStage::default()
-            } else {
-                BlockStage::Recovering { final_hash: phash, we_finalized }
-            };
-        } else if !others.contains(&Default::default()) && we_finalized {
-            todo!("no majority, we need to initialize recovery");
-        }
-
-        Ok(())
+            chat.push_to_finalized(block);
+            BlockStage::default()
+        } else {
+            BlockStage::Recovering { final_hash: phash, we_finalized }
+        };
+    } else if !others.contains(&Default::default()) && we_finalized {
+        todo!("no majority, we need to initialize recovery");
     }
 }
 
-impl SyncHandler for SendBlock {
-    fn execute<'a>(
-        sc: Scope<'a>,
-        (chat, number, Reminder(block)): Self::Request<'_>,
-    ) -> ProtocolResult<'a, Self> {
-        use {
-            InvalidBlockReason::{MajorityMismatch, NotExpected, Outdated},
-            SendBlockError::{ChatNotFound, InvalidBlock, NoReplicator},
-        };
+pub async fn send_block(
+    cx: crate::Context,
+    origin: super::Origin,
+    repl: super::ReplGroup,
+    (chat, number, Reminder(block)): (ChatName, BlockNumber, Reminder<'_>),
+) -> Result<(), SendBlockError> {
+    use {chat_spec::InvalidBlockReason::*, SendBlockError::*};
 
-        let index = sc
-            .other_replicators_for(chat)
-            .map(RequestOrigin::Server)
-            .position(|id| id == sc.origin)
-            .ok_or(NoReplicator)?;
+    let Some(index) = repl.iter().position(|id| *id == origin) else {
+        return Err(NoReplicator);
+    };
 
-        crate::ensure!(
-            let Some(chat_data) = sc.cx.storage.chats.get_mut(&chat),
-            ChatNotFound
-        );
+    let chat = cx.chats.get(&chat).ok_or(ChatNotFound)?.clone();
+    let mut chat = chat.write().await;
 
-        crate::ensure!(chat_data.last_finalized_block() == number, InvalidBlock(Outdated));
+    crate::ensure!(chat.last_finalized_block() == number, InvalidBlock(Outdated));
 
-        match &mut chat_data.stage {
-            BlockStage::Unfinalized { proposed: Some(_), others } => {
-                let hash = Chat::hash_block(block, &mut sc.cx.res.hashes);
+    match &mut chat.stage {
+        BlockStage::Unfinalized { proposed: Some(_), others } => {
+            let hash = Chat::hash_block(block, &mut vec![]);
 
-                others[index] = hash;
+            others[index] = hash;
 
-                if others.iter().filter(|h| **h == hash).count() < REPLICATION_FACTOR.get() / 2 {
-                    Err(InvalidBlock(MajorityMismatch))
-                } else {
-                    chat_data.stage = BlockStage::default();
-                    chat_data.push_to_finalized(Block { hash, data: block.into() });
-
-                    Ok(())
-                }
-            }
-            BlockStage::Unfinalized { .. } => Err(InvalidBlock(NotExpected)),
-            BlockStage::Recovering { final_hash, .. } => {
-                let hash_temp = &mut sc.cx.res.hashes;
-                let hash = Chat::hash_block(block, hash_temp);
-                crate::ensure!(hash == *final_hash, InvalidBlock(MajorityMismatch));
-
-                retain_messages_in_vec(&mut chat_data.current_block, |msg| {
-                    // this is fine since message contains sender id and nonce which is
-                    // unique for each messsage
-                    !hash_temp.contains(&crypto::hash::from_slice(msg))
-                });
-
-                chat_data.push_to_finalized(Block { hash, data: block.into() });
+            if others.iter().filter(|h| **h == hash).count() < REPLICATION_FACTOR.get() / 2 {
+                Err(InvalidBlock(MajorityMismatch))
+            } else {
+                chat.stage = BlockStage::default();
+                chat.push_to_finalized(Block { hash, data: block.into() });
 
                 Ok(())
             }
         }
+        BlockStage::Unfinalized { .. } => Err(InvalidBlock(NotExpected)),
+        BlockStage::Recovering { final_hash, .. } => {
+            let hash_temp = &mut vec![];
+            let hash = Chat::hash_block(block, hash_temp);
+            crate::ensure!(hash == *final_hash, InvalidBlock(MajorityMismatch));
+
+            retain_messages_in_vec(&mut chat.current_block, |msg| {
+                // this is fine since message contains sender id and nonce which is
+                // unique for each messsage
+                !hash_temp.contains(&crypto::hash::from_slice(msg))
+            });
+
+            chat.push_to_finalized(Block { hash, data: block.into() });
+
+            Ok(())
+        }
     }
 }
 
-impl SyncHandler for FetchMinimalChatData {
-    fn execute<'a>(cx: Scope<'a>, req: Self::Request<'_>) -> ProtocolResult<'a, Self> {
-        let chat = cx.cx.storage.chats.get(&req).ok_or(FetchLatestBlockError::ChatNotFound)?;
-        Ok((chat.number, Cow::Borrowed(&chat.members), Reminder(chat.current_block.as_slice())))
-    }
+pub async fn fetch_minimal_chat_data(
+    cx: crate::Context,
+    chat: ChatName,
+) -> Result<(BlockNumber, HashMap<Identity, Member>, Vec<u8>), FetchMinimalChatData> {
+    let chat = cx.chats.get(&chat).ok_or(FetchMinimalChatData::ChatNotFound)?;
+    let chat = chat.read().await;
+
+    Ok((chat.number, chat.members.clone(), chat.current_block.clone()))
 }
 
-impl SyncHandler for FetchMessages {
-    fn execute<'a>(
-        sc: Scope<'a>,
-        (chat, mut cursor): Self::Request<'_>,
-    ) -> ProtocolResult<'a, Self> {
-        let chat = sc.cx.storage.chats.get_mut(&chat).ok_or(FetchMessagesError::ChatNotFound)?;
+pub async fn fetch_messages(
+    cx: crate::Context,
+    (chat, mut cursor): (ChatName, Cursor),
+) -> Result<(Cursor, Vec<u8>), FetchMessagesError> {
+    let chat = cx.chats.get(&chat).ok_or(FetchMessagesError::ChatNotFound)?.clone();
+    let chat = chat.read().await;
 
-        if cursor == Cursor::INIT {
-            cursor.block = chat.number;
-            cursor.offset = chat.current_block.len();
-        }
+    if cursor == Cursor::INIT {
+        cursor.block = chat.number;
+        cursor.offset = chat.current_block.len();
+    }
 
-        let bail = Ok((Cursor::INIT, Reminder(&[])));
+    let bail = Ok((Cursor::INIT, vec![]));
 
-        if cursor.offset == 0 {
-            if cursor.block == 0 {
-                return bail;
-            }
-            cursor.block += 1;
-        }
-
-        let Some(block) = iter::once(chat.current_block.as_mut_slice())
-            .chain(chat.stage.unfinalized_block())
-            .chain(chat.finalized.iter_mut().map(|b| b.data.as_mut()))
-            .nth(chat.number.saturating_sub(cursor.block) as usize)
-        else {
+    if cursor.offset == 0 {
+        if cursor.block == 0 {
             return bail;
-        };
-
-        if cursor.offset == 0 {
-            cursor.offset = block.len();
         }
-
-        let Some(block) = block.get_mut(..cursor.offset) else {
-            return bail;
-        };
-
-        let message_length = unpack_messages(block)
-            .take(MESSAGE_FETCH_LIMIT)
-            .map(|msg| msg.len() + 2)
-            .sum::<usize>();
-
-        let slice = &block[cursor.offset - message_length..cursor.offset];
-        cursor.offset -= message_length;
-
-        Ok((cursor, Reminder(slice)))
+        cursor.block += 1;
     }
+
+    let block = match chat.finalized.get(chat.number.saturating_sub(cursor.block) as usize) {
+        Some(block) => block.data.as_ref(),
+        None => return bail,
+    };
+
+    if cursor.offset == 0 {
+        cursor.offset = block.len();
+    }
+
+    let slice = &block[cursor.offset - MESSAGE_FETCH_LIMIT..cursor.offset];
+    cursor.offset -= slice.len();
+
+    Ok((cursor, slice.to_vec()))
 }
 
-#[derive(Codec)]
+#[derive(component_utils::Codec)]
 struct Block {
     hash: crypto::Hash,
     data: Box<[u8]>,
 }
 
-#[derive(Codec)]
+#[derive(component_utils::Codec)]
 enum BlockStage {
     Unfinalized { proposed: Option<Block>, others: [crypto::Hash; REPLICATION_FACTOR.get()] },
     Recovering { final_hash: crypto::Hash, we_finalized: bool },
@@ -299,7 +277,7 @@ impl Default for BlockStage {
 }
 
 impl BlockStage {
-    fn unfinalized_block(&mut self) -> Option<&mut [u8]> {
+    fn _unfinalized_block(&mut self) -> Option<&mut [u8]> {
         match self {
             Self::Unfinalized { proposed, .. } => proposed.as_mut().map(|p| p.data.as_mut()),
             _ => None,
@@ -307,7 +285,7 @@ impl BlockStage {
     }
 }
 
-#[derive(Codec, Default)]
+#[derive(component_utils::Codec, Default)]
 pub struct Chat {
     members: HashMap<Identity, Member>,
     finalized: VecDeque<Block>,
@@ -327,32 +305,14 @@ impl Chat {
         }
     }
 
-    pub fn recovered(
-        members: HashMap<Identity, Member>,
-        number: BlockNumber,
-        current_block: Vec<u8>,
-    ) -> Self {
-        Self {
-            members,
-            finalized: Default::default(),
-            current_block,
-            number,
-            stage: Default::default(),
-        }
-    }
-
-    pub fn is_recovering(&self) -> bool {
-        self.members.is_empty()
-    }
-
     pub fn push_message<'a>(
         &mut self,
-        msg: impl Codec<'a>,
+        msg: impl component_utils::Codec<'a>,
         hash_temp: &mut Vec<crypto::Hash>,
     ) -> Result<(), Option<crypto::Hash>> {
         let prev_len = self.current_block.len();
 
-        fn try_push<'a>(block: &mut Vec<u8>, msg: impl Codec<'a>) -> Option<()> {
+        fn try_push<'a>(block: &mut Vec<u8>, msg: impl component_utils::Codec<'a>) -> Option<()> {
             let len = block.len();
             let buffer = NoCapOverflow::new(block);
             msg.encode(buffer)?;

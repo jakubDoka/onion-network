@@ -298,6 +298,19 @@ impl<'a> Codec<'a> for u8 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ReminderOwned(pub Vec<u8>);
+
+impl<'a> Codec<'a> for ReminderOwned {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        self.0.encode(buffer)
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        <Vec<u8>>::decode(buffer).map(Self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Reminder<'a>(pub &'a [u8]);
 

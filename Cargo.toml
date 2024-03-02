@@ -11,6 +11,7 @@ members = [
 exclude = [
 	"forked/node-template",
 	"utils/falcon",
+	"nodes/client",
 ]
 
 [workspace.lints.clippy]

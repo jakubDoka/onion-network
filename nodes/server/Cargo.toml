@@ -31,7 +31,7 @@ rpc = { workspace = true }
 crypto = { workspace = true }
 dht = { workspace = true }
 onion = { workspace = true }
-lmdb = "0.8.0"
+dashmap = "5.5.3"
 
 [lints]
 workspace = true

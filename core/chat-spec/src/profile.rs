@@ -1,7 +1,7 @@
 use {
-    crate::{Identity, Nonce, Proof, Topic},
+    crate::{Nonce, Proof},
     chain_api::{RawUserName, USER_NAME_CAP},
-    component_utils::{arrayvec::ArrayString, encode_len, Codec, Reminder},
+    component_utils::{arrayvec::ArrayString, encode_len, Codec},
     crypto::{enc, sign, Serialized},
     std::iter,
 };
@@ -14,7 +14,7 @@ pub type UserName = ArrayString<32>;
 pub struct Profile {
     pub sign: Serialized<sign::PublicKey>,
     pub enc: Serialized<enc::PublicKey>,
-    pub last_sig: Serialized<sign::Signature>,
+    pub vault_sig: Serialized<sign::Signature>,
     pub vault_version: Nonce,
     pub mail_action: Nonce,
     pub vault: Vec<u8>,
@@ -55,7 +55,7 @@ impl<'a> From<&'a Profile> for BorrowedProfile<'a> {
         Self {
             sign: profile.sign,
             enc: profile.enc,
-            last_sig: profile.last_sig,
+            last_sig: profile.vault_sig,
             vault_version: profile.vault_version,
             mail_action: profile.mail_action,
             vault: profile.vault.as_slice(),
@@ -82,7 +82,7 @@ impl<'a> From<BorrowedProfile<'a>> for Profile {
         Self {
             sign: profile.sign,
             enc: profile.enc,
-            last_sig: profile.last_sig,
+            vault_sig: profile.last_sig,
             vault_version: profile.vault_version,
             mail_action: profile.mail_action,
             vault: profile.vault.to_vec(),
@@ -97,13 +97,6 @@ impl From<&Profile> for FetchProfileResp {
     }
 }
 
-impl Topic for Identity {
-    type Event<'a> = ProfileEvent<'a>;
-    type Record = Profile;
-}
-
-type ProfileEvent<'a> = Reminder<'a>;
-
 #[derive(Codec)]
 pub struct FetchProfileResp {
     pub sign: Serialized<sign::PublicKey>,
@@ -117,7 +110,7 @@ pub enum FetchProfileError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum CreateAccountError {
+pub enum CreateProfileError {
     #[error("invalid proof")]
     InvalidProof,
     #[error("account already exists")]

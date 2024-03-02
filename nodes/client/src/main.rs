@@ -694,3 +694,4 @@ fn encrypt(data: &mut Vec<u8>, secret: crypto::SharedSecret) {
     let arr = crypto::encrypt(data, secret, OsRng);
     data.extend(arr);
 }
+

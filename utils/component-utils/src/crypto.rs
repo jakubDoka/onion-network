@@ -60,6 +60,12 @@ impl<'a> ToProofContext for &'a [u8] {
     }
 }
 
+impl<const SIZE: usize> ToProofContext for [u8; SIZE] {
+    fn to_proof_context(self) -> Hash {
+        crypto::hash::from_slice(&self)
+    }
+}
+
 impl<const SIZE: usize> ToProofContext for ArrayString<SIZE> {
     fn to_proof_context(self) -> Hash {
         crypto::hash::from_slice(self.as_bytes())

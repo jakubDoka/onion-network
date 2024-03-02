@@ -1,13 +1,3 @@
-pub use {chat::*, profile::*, replicated::*, retry::*};
-use {
-    chat_spec::{Protocol, ProtocolResult, Subscribe},
-    component_utils::{codec, Codec},
-    libp2p::PeerId,
-    onion::PathId,
-    rpc::CallId,
-    std::ops::{Deref, DerefMut},
-};
-
 #[macro_export]
 macro_rules! ensure {
     ($cond:expr, Ok($resp:expr)) => {
@@ -34,293 +24,428 @@ macro_rules! ensure {
     };
 }
 
-#[macro_export]
-macro_rules! compose_handlers {
-    ($($name:ident {$(
-        $handler:ty,
-    )*})*) => {$(
-        pub struct $name($(
-           $crate::handlers::HandlerNest<$handler>,
-        )*);
+use {
+    crate::{Context, OnlineLocation},
+    chat_spec::{
+        rpcs, BorrowedProfile, FetchProfileError, Identity, PossibleTopic, Profile, ReplVec,
+        Request, REPLICATION_FACTOR,
+    },
+    component_utils::{arrayvec::ArrayVec, Codec},
+    libp2p::{
+        futures::{stream::FuturesUnordered, StreamExt},
+        PeerId, Swarm,
+    },
+    rpc::CallId,
+    std::{future::Future, pin::Pin},
+};
 
-        impl Default for $name {
-            fn default() -> Self {
-                Self($(
-                    $crate::handlers::HandlerNest::<$handler>::default(),
-                )*)
-            }
-        }
+pub mod chat;
+pub mod profile;
+//mod retry;
 
-        impl $name {
-            pub fn try_complete<E>(
-                &mut self,
-                mut cx: $crate::Context<'_>,
-                mut event: E,
-                bp: &mut impl component_utils::codec::Buffer,
-            ) -> Result<(RequestOrigin, CallId), E>
-            where
-                $(
-                    E: $crate::handlers::TryUnwrap<<$handler as Handler>::Event>,
-                    E: From<<$handler as Handler>::Event>,
-                )*
-            {
-                $(
-                    match HandlerNest::<$handler>::try_complete(&mut self.${index(0)}, $crate::extract_ctx!(cx), event, bp) {
-                        Ok(res) => return Ok(res),
-                        Err(e) => event = e,
-                    }
-                )*
-                Err(event)
-            }
-
-            pub fn execute(
-                &mut self,
-                mut cx: $crate::Context<'_>,
-                req: $crate::handlers::Request<'_>,
-                bp: &mut impl component_utils::codec::Buffer,
-            ) -> Result<$crate::handlers::ExitedEarly, $crate::handlers::HandlerExecError>
-            {
-                $(if <<$handler as Handler>::Protocol as Protocol>::PREFIX == req.prefix
-                    { return self.${index(0)}.execute($crate::extract_ctx!(cx), req, bp) })*
-                Err($crate::handlers::HandlerExecError::UnknownPrefix)
-            }
-
-        }
-    )*};
+pub enum Response {
+    Success(Vec<u8>),
+    Failure(Vec<u8>),
+    DontRespond,
 }
 
-mod chat;
-mod peer_search;
-mod populating;
-mod profile;
-mod replicated;
-mod retry;
+pub struct State<'a> {
+    pub swarm: &'a mut Swarm<crate::Behaviour>,
+    pub location: OnlineLocation,
+    pub context: Context,
+    pub missing_topic: bool,
+}
 
-impl SyncHandler for Subscribe {
-    fn execute<'a>(mut sc: Scope<'a>, req: Self::Request<'_>) -> ProtocolResult<'a, Self> {
-        if let RequestOrigin::Client(path) = sc.origin {
-            sc.cx.subscribe(req, sc.call_id, path);
-        }
+pub trait IntoResponse {
+    fn into_response(self) -> Response;
+}
 
-        Ok(())
+impl IntoResponse for Response {
+    fn into_response(self) -> Response {
+        self
     }
 }
 
-pub type HandlerResult<'a, H> = Result<
-    Result<
-        <<H as Handler>::Protocol as Protocol>::Response<'a>,
-        <<H as Handler>::Protocol as Protocol>::Error,
-    >,
-    H,
->;
-
-pub trait Handler: Sized {
-    type Protocol: Protocol;
-    type Event;
-
-    fn execute<'a>(
-        cx: Scope<'a>,
-        req: <Self::Protocol as Protocol>::Request<'_>,
-    ) -> HandlerResult<'a, Self>;
-
-    fn execute_and_encode(
-        cx: Scope<'_>,
-        req: <Self::Protocol as Protocol>::Request<'_>,
-        buffer: &mut impl codec::Buffer,
-    ) -> Result<Option<()>, Self> {
-        Self::execute(cx, req).map(move |r| r.encode(buffer))
+impl IntoResponse for Vec<u8> {
+    fn into_response(self) -> Response {
+        Response::Success(self)
     }
+}
 
-    fn resume<'a>(self, cx: Scope<'a>, enent: &'a Self::Event) -> HandlerResult<'a, Self>;
+impl<'a, O, E> IntoResponse for Result<O, E>
+where
+    O: component_utils::Codec<'a>,
+    E: component_utils::Codec<'a>,
+{
+    fn into_response(self) -> Response {
+        match self {
+            Ok(_) => Response::Success(self.to_bytes()),
+            Err(_) => Response::Failure(self.to_bytes()),
+        }
+    }
+}
 
-    fn resume_and_encode(
+impl IntoResponse for () {
+    fn into_response(self) -> Response {
+        Response::DontRespond
+    }
+}
+
+pub trait FromRequestOwned: Sized {
+    fn from_request(req: Request, state: &mut State) -> Option<Self>;
+}
+
+macro_rules! impl_tuples_from_request {
+    ($($ty:ident),*) => {
+        impl<$($ty,)*> FromRequestOwned for ($($ty,)*)
+        where
+            $($ty: FromRequestOwned,)*
+        {
+            fn from_request(req: Request, state: &mut State) -> Option<Self> {
+                Some(($($ty::from_request(req, state)?,)*))
+            }
+        }
+    };
+}
+
+impl_tuples_from_request!(A);
+impl_tuples_from_request!(A, B);
+impl_tuples_from_request!(A, B, C);
+impl_tuples_from_request!(A, B, C, D);
+impl_tuples_from_request!(A, B, C, D, E);
+
+impl FromRequestOwned for Context {
+    fn from_request(_: Request, state: &mut State) -> Option<Self> {
+        Some(state.context)
+    }
+}
+
+pub type ReplGroup = ArrayVec<PeerId, { REPLICATION_FACTOR.get() + 1 }>;
+
+impl FromRequestOwned for ReplGroup {
+    fn from_request(req: Request, state: &mut State) -> Option<Self> {
+        let us = *state.swarm.local_peer_id();
+        Some(
+            state
+                .swarm
+                .behaviour_mut()
+                .dht
+                .table
+                .closest(req.topic?.as_bytes())
+                .take(REPLICATION_FACTOR.get() + 1)
+                .map(dht::Route::peer_id)
+                .filter(|&p| p != us)
+                .collect(),
+        )
+    }
+}
+
+impl FromRequestOwned for PossibleTopic {
+    fn from_request(req: Request, _: &mut State) -> Option<Self> {
+        req.topic
+    }
+}
+
+impl FromRequestOwned for Identity {
+    fn from_request(req: Request, _: &mut State) -> Option<Self> {
+        match req.topic? {
+            PossibleTopic::Profile(i) => Some(i),
+            _ => None,
+        }
+    }
+}
+
+pub struct MissingTopic(pub bool);
+
+impl FromRequestOwned for MissingTopic {
+    fn from_request(_: Request, s: &mut State) -> Option<Self> {
+        Some(MissingTopic(s.missing_topic))
+    }
+}
+
+pub type Prefix = u8;
+
+impl FromRequestOwned for Prefix {
+    fn from_request(req: Request, _: &mut State) -> Option<Self> {
+        Some(req.prefix)
+    }
+}
+
+impl FromRequestOwned for OnlineLocation {
+    fn from_request(_: Request, state: &mut State) -> Option<Self> {
+        Some(state.location)
+    }
+}
+
+pub type Origin = PeerId;
+
+impl FromRequestOwned for Origin {
+    fn from_request(_: Request, state: &mut State) -> Option<Self> {
+        match state.location {
+            OnlineLocation::Local(_) => None,
+            OnlineLocation::Remote(p) => Some(p),
+        }
+    }
+}
+
+pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::Codec<'a>>:
+    Clone + Send + Sized + 'static
+{
+    type Future: Future + Send;
+
+    fn call_computed(self, args: T, res: R) -> Self::Future;
+
+    fn call(
         self,
-        cx: Scope<'_>,
-        enent: &Self::Event,
-        buffer: &mut impl codec::Buffer,
-    ) -> Result<Option<()>, Self> {
-        self.resume(cx, enent).map(move |r| r.encode(buffer))
+        req: Request,
+        mut state: State,
+    ) -> Option<impl Future<Output = Response> + Send + 'static>
+    where
+        <Self::Future as Future>::Output: IntoResponse,
+    {
+        let args = T::from_request(req, &mut state)?;
+        let body = req.body.0.to_vec();
+        Some(async move {
+            let Some(r) = R::decode(unsafe { std::mem::transmute(&mut body.as_slice()) }) else {
+                return Response::DontRespond;
+            };
+            self.call_computed(args, r).await.into_response()
+        })
+    }
+
+    fn repl(self) -> Repl<Self> {
+        Repl { handler: self }
+    }
+
+    fn restore(self) -> Restore<Self> {
+        Restore { handler: self }
     }
 }
 
-pub trait SyncHandler: Protocol {
-    fn execute<'a>(cx: Scope<'a>, req: Self::Request<'_>) -> ProtocolResult<'a, Self>;
+#[derive(Clone)]
+pub struct Repl<H> {
+    pub handler: H,
 }
 
-//pub struct Sync<T>(T);
+pub type ReplArgs<A> = (PossibleTopic, Context, Prefix, A);
 
-impl<H: SyncHandler> Handler for H {
-    type Event = rpc::Event;
-    type Protocol = H;
+impl<'a, H, A, R> Handler<'a, ReplArgs<A>, R> for Repl<H>
+where
+    H: Handler<'a, A, R>,
+    A: FromRequestOwned + Send + 'static,
+    R: component_utils::Codec<'a> + Send + Clone,
+    <H::Future as Future>::Output: IntoResponse,
+{
+    type Future = impl Future<Output: IntoResponse> + Send;
 
-    fn execute<'a>(
-        cx: Scope<'a>,
-        req: <Self::Protocol as Protocol>::Request<'_>,
-    ) -> HandlerResult<'a, Self> {
-        Ok(H::execute(cx, req))
-    }
+    fn call_computed(self, (topic, cx, prefix, args): ReplArgs<A>, req: R) -> Self::Future {
+        async move {
+            let bytes = match self.handler.call_computed(args, req.clone()).await.into_response() {
+                Response::Success(bytes) => bytes,
+                resp => return resp,
+            };
 
-    fn resume<'a>(self, _: Scope<'a>, _: &'a Self::Event) -> HandlerResult<'a, Self> {
-        Err(self)
-    }
-}
+            let mut repl = cx.replicate_rpc(topic, prefix, req);
+            let mut counter = ReplVec::<(crypto::Hash, u8)>::new();
 
-pub type Scope<'a> = ScopeRepr<crate::Context<'a>>;
+            counter.push((crypto::hash::from_slice(&bytes), 1));
 
-impl<'a> Scope<'a> {
-    fn reborrow(&mut self) -> Scope<'_> {
-        Scope {
-            cx: crate::extract_ctx!(self.cx),
-            origin: self.origin,
-            call_id: self.call_id,
-            prefix: self.prefix,
-        }
-    }
-}
+            while let Some((_, resp)) = repl.next().await {
+                let hash = crypto::hash::from_slice(&resp);
 
-pub struct ScopeRepr<T> {
-    pub cx: T,
-    pub origin: RequestOrigin,
-    pub call_id: CallId,
-    pub prefix: u8,
-}
+                let Some((_, count)) = counter.iter_mut().find(|(h, _)| h == &hash) else {
+                    counter.push((hash, 1));
+                    continue;
+                };
 
-impl<'a> Deref for Scope<'a> {
-    type Target = crate::Context<'a>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.cx
-    }
-}
-
-impl<'a> DerefMut for Scope<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.cx
-    }
-}
-
-pub trait TryUnwrap<T>: Sized {
-    fn try_unwrap(self) -> Result<T, Self>;
-}
-
-impl<T> TryUnwrap<T> for T {
-    fn try_unwrap(self) -> Result<T, Self> {
-        Ok(self)
-    }
-}
-
-pub trait ProvideRequestBuffer {
-    fn request_buffer(&mut self, id: CallId, origin: RequestOrigin) -> impl codec::Buffer + '_;
-}
-
-pub struct HandlerNest<H> {
-    handlers: Vec<Option<HandlerInstance<H>>>,
-}
-
-impl<H> Default for HandlerNest<H> {
-    fn default() -> Self {
-        Self { handlers: Vec::new() }
-    }
-}
-
-pub type ExitedEarly = bool;
-
-impl<H: Handler> HandlerNest<H> {
-    pub fn execute(
-        &mut self,
-        cx: crate::Context<'_>,
-        req: Request<'_>,
-        bp: &mut impl component_utils::codec::Buffer,
-    ) -> Result<ExitedEarly, HandlerExecError> {
-        let decoded = <H::Protocol as Protocol>::Request::decode(&mut &*req.body)
-            .ok_or(HandlerExecError::DecodeRequest)?;
-        if let Err(con) = H::execute_and_encode(
-            Scope { cx, origin: req.origin, call_id: req.id, prefix: req.prefix },
-            decoded,
-            bp,
-        ) {
-            self.handlers.push(Some(HandlerInstance {
-                prefix: req.prefix,
-                id: req.id,
-                origin: req.origin,
-                handler: con,
-            }));
-
-            Ok(false)
-        } else {
-            Ok(true)
-        }
-    }
-
-    pub fn try_complete<E: TryUnwrap<H::Event> + From<H::Event>>(
-        &mut self,
-        mut cx: crate::Context<'_>,
-        event: E,
-        bp: &mut impl codec::Buffer,
-    ) -> Result<(RequestOrigin, CallId), E> {
-        let event = event.try_unwrap()?;
-
-        let (i, res, origin, id) = self
-            .handlers
-            .iter_mut()
-            .enumerate()
-            .find_map(|(i, h)| {
-                let mut read = h.take().expect("we keep the integrity");
-                match read.handler.resume_and_encode(
-                    Scope {
-                        cx: crate::extract_ctx!(cx),
-                        origin: read.origin,
-                        call_id: read.id,
-                        prefix: read.prefix,
-                    },
-                    &event,
-                    bp,
-                ) {
-                    Ok(res) => Some((i, res, read.origin, read.id)),
-                    Err(new_handler) => {
-                        read.handler = new_handler;
-                        *h = Some(read);
-                        None
+                *count += 1;
+                if *count as usize > REPLICATION_FACTOR.get() / 2 {
+                    if hash != crypto::hash::from_slice(&bytes) {
+                        todo!("for some reason we have different opinion, this should initiate recovery");
                     }
+                    return Response::Success(resp);
                 }
-            })
-            .ok_or(event)?;
+            }
 
-        self.handlers.swap_remove(i);
-
-        if res.is_none() {
-            log::info!("the response buffer is owerwhelmed");
+            Response::Success(bytes)
         }
-
-        Ok((origin, id))
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum HandlerExecError {
-    #[error("failed to decode request")]
-    DecodeRequest,
-    #[error("unknown prefix")]
-    UnknownPrefix,
+#[derive(Clone)]
+pub struct Restore<H> {
+    pub handler: H,
 }
 
-struct HandlerInstance<H> {
-    prefix: u8,
-    id: CallId,
-    origin: RequestOrigin,
-    handler: H,
+pub type RestoreArgsArgs<A> = (PossibleTopic, Context, Prefix, MissingTopic, A);
+
+impl<'a, H, A, R> Handler<'a, RestoreArgsArgs<A>, R> for Restore<H>
+where
+    H: Handler<'a, A, R>,
+    A: FromRequestOwned + Send + 'static,
+    R: component_utils::Codec<'a> + Send + Clone,
+    <H::Future as Future>::Output: IntoResponse,
+{
+    type Future = impl Future<Output: IntoResponse> + Send;
+
+    fn call_computed(
+        self,
+        (topic, cx, prefix, missing_topic, args): RestoreArgsArgs<A>,
+        req: R,
+    ) -> Self::Future {
+        async move {
+            if !missing_topic.0 {
+                return self.handler.call_computed(args, req).await.into_response();
+            }
+
+            match topic {
+                PossibleTopic::Profile(identity) => {
+                    let mut profiles =
+                        cx.replicate_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity);
+                    let mut best_profile = None::<Profile>;
+                    while let Some((peer, resp)) = profiles.next().await {
+                        let Some(Ok(profile)) =
+                            Result::<BorrowedProfile, FetchProfileError>::decode(
+                                &mut resp.as_slice(),
+                            )
+                        else {
+                            log::warn!("invalid profile encoding from {:?}", peer);
+                            continue;
+                        };
+
+                        if crypto::hash::from_slice(&profile.vault) != identity {
+                            log::warn!("invalid profile identity form {:?}", peer);
+                            continue;
+                        }
+
+                        if !profile.is_valid() {
+                            log::warn!("invalid profile signature from {:?}", peer);
+                            continue;
+                        }
+
+                        if let Some(best) = best_profile.as_ref() {
+                            if best.vault_version < profile.vault_version {
+                                best_profile = Some(profile);
+                            }
+                        } else {
+                            best_profile = Some(profile);
+                        }
+                    }
+
+                    let Some(profile) = best_profile else {
+                        log::warn!("no valid profile found for {:?}", identity);
+                        // we keep convention of not found errors being the first variant
+                        return Response::Failure(Err(0u8).to_bytes());
+                    };
+
+                    cx.profiles.insert(identity, value);
+                }
+                PossibleTopic::Chat(name) => {
+                    let mut chats = cx.replicate_rpc(name, rpcs::FETCH_MINIMAL_CHAT_DATA, name);
+
+                    while let Some((peer, resp)) = chats.next().await {}
+                }
+            }
+
+            self.handler.call_computed(args, req).await.into_response()
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Request<'a> {
-    pub prefix: u8,
-    pub id: CallId,
-    pub origin: RequestOrigin,
-    pub body: &'a [u8],
+macro_rules! impl_handler {
+    (
+        [$($ty:ident),*], $last:ident
+    ) => {
+        #[allow(non_snake_case, unused_mut)]
+        impl<'a, F, Fut, $($ty,)* $last: component_utils::Codec<'a>> Handler<'a, ($($ty,)*), $last> for F
+        where
+            F: FnOnce($($ty,)* $last,) -> Fut + Clone + Send + 'static,
+            Fut: Future + Send,
+            Fut::Output: IntoResponse,
+            $( $ty: FromRequestOwned + Send + 'static, )*
+            $last: component_utils::Codec<'a> + Send,
+        {
+            type Future = Fut;
+
+            fn call_computed(self, args: ($($ty,)*), req: $last) -> Self::Future {
+                let ($($ty,)*) = args;
+                self($($ty,)* req)
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestOrigin {
-    Client(PathId),
-    Server(PeerId),
+impl_handler!([A], B);
+impl_handler!([A, B], C);
+impl_handler!([A, B, C], D);
+impl_handler!([A, B, C, D], E);
+impl_handler!([A, B, C, D, E], G);
+
+pub type FinalResponse = (Response, OnlineLocation, CallId);
+pub type RouteRet = Pin<Box<dyn Future<Output = FinalResponse>>>;
+pub type Route = Box<dyn Fn(Request, State) -> RouteRet>;
+
+#[derive(Default)]
+pub struct Router {
+    routes: Vec<Option<Route>>,
+    requests: FuturesUnordered<RouteRet>,
 }
+
+impl Router {
+    pub fn register<'a, H, A, R>(&mut self, expected: u8, route: H)
+    where
+        H: Handler<'a, A, R>,
+        A: FromRequestOwned + Send + 'static,
+        R: component_utils::Codec<'a>,
+        <H::Future as Future>::Output: IntoResponse,
+    {
+        if self.routes.len() <= expected as usize {
+            self.routes.resize_with(expected as usize + 1, || None);
+        }
+        self.routes[expected as usize] = Some(Box::new(move |req, state| {
+            let local_self = route.clone();
+            let origin = state.location;
+            let f = local_self.call(req, state);
+            Box::pin(async move {
+                (
+                    match f {
+                        Some(f) => f.await.into_response(),
+                        None => Response::DontRespond,
+                    },
+                    origin,
+                    req.id,
+                )
+            })
+        }));
+    }
+
+    pub fn handle(&mut self, request: Request, state: State) {
+        let Some(Some(route)) = self.routes.get(request.prefix as usize) else {
+            return;
+        };
+
+        self.requests.push(route(request, state));
+    }
+
+    pub fn poll(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<FinalResponse> {
+        match self.requests.poll_next_unpin(cx) {
+            std::task::Poll::Ready(Some(res)) => std::task::Poll::Ready(res),
+            _ => std::task::Poll::Pending,
+        }
+    }
+}
+
+macro_rules! __routes {
+    ($($module:ident::{$($id:expr => $endpoint:expr;)*};)*) => {{
+        let mut router = Router::default();
+        $( {
+            use handlers::$module::*;
+            $(
+                router.register($id, $endpoint);
+            )*
+        } )*
+        router
+    }};
+}
+
+pub(crate) use __routes as router;

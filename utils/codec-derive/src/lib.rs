@@ -17,8 +17,8 @@ pub fn derive_codec(input: TokenStream) -> TokenStream {
 
     let crate_name = syn::Ident::new("component_utils", proc_macro2::Span::call_site());
     let [encode, decode] = match input.data {
-        syn::Data::Struct(s) => derive_codec_struct(s),
-        syn::Data::Enum(e) => derive_codec_enum(e),
+        syn::Data::Struct(s) => derive_codec_struct(s, crate_name.clone()),
+        syn::Data::Enum(e) => derive_codec_enum(e, crate_name.clone()),
         syn::Data::Union(_) => unimplemented!("Unions are not supported"),
     };
     let (generics, lt) = modify_generics(crate_name.clone(), input.generics.clone());
@@ -62,7 +62,7 @@ fn modify_generics(
     (generics, lt.lifetime)
 }
 
-fn derive_codec_enum(e: syn::DataEnum) -> [proc_macro2::TokenStream; 2] {
+fn derive_codec_enum(e: syn::DataEnum, crate_name: syn::Ident) -> [proc_macro2::TokenStream; 2] {
     let variant_index = 0..e.variants.len() as u8;
     let variant_index2 = 0..e.variants.len() as u8;
 
@@ -100,7 +100,7 @@ fn derive_codec_enum(e: syn::DataEnum) -> [proc_macro2::TokenStream; 2] {
                 .named
                 .iter()
                 .filter_map(|f| FieldAttrFlags::new(&f.attrs).ignore.not().then_some(&f.ident));
-            quote! { #(Codec::<'a>::encode(#field_names, buffer)?;)* }
+            quote! { #(#crate_name::Codec::<'a>::encode(#field_names, buffer)?;)* }
         }
         syn::Fields::Unnamed(u) => {
             let field_names = u
@@ -109,7 +109,7 @@ fn derive_codec_enum(e: syn::DataEnum) -> [proc_macro2::TokenStream; 2] {
                 .map(|f| FieldAttrFlags::new(&f.attrs))
                 .enumerate()
                 .filter_map(|(i, f)| f.ignore.not().then(|| format_ident!("f{}", i)));
-            quote! { #(Codec::<'a>::encode(#field_names, buffer)?;)* }
+            quote! { #(#crate_name::Codec::<'a>::encode(#field_names, buffer)?;)* }
         }
         syn::Fields::Unit => quote! {},
     });
@@ -123,7 +123,7 @@ fn derive_codec_enum(e: syn::DataEnum) -> [proc_macro2::TokenStream; 2] {
                     if FieldAttrFlags::new(&f.attrs).ignore {
                         quote! { #name: Default::default() }
                     } else {
-                        quote! { #name: Codec::decode(buffer)? }
+                        quote! { #name: #crate_name::Codec::decode(buffer)? }
                     }
                 });
                 quote! { #name {#(#fields),*} }
@@ -133,7 +133,7 @@ fn derive_codec_enum(e: syn::DataEnum) -> [proc_macro2::TokenStream; 2] {
                     if FieldAttrFlags::new(&f.attrs).ignore {
                         quote! { Default::default() }
                     } else {
-                        quote! { Codec::decode(buffer)? }
+                        quote! { #crate_name::Codec::decode(buffer)? }
                     }
                 });
                 quote! { #name (#(#fields),*) }
@@ -163,15 +163,21 @@ fn derive_codec_enum(e: syn::DataEnum) -> [proc_macro2::TokenStream; 2] {
     ]
 }
 
-fn derive_codec_struct(s: syn::DataStruct) -> [proc_macro2::TokenStream; 2] {
+fn derive_codec_struct(
+    s: syn::DataStruct,
+    crate_name: syn::Ident,
+) -> [proc_macro2::TokenStream; 2] {
     match s.fields {
-        syn::Fields::Named(n) => derive_codec_named_struct(n),
-        syn::Fields::Unnamed(u) => derive_codec_unnamed_struct(u),
+        syn::Fields::Named(n) => derive_codec_named_struct(n, crate_name),
+        syn::Fields::Unnamed(u) => derive_codec_unnamed_struct(u, crate_name),
         syn::Fields::Unit => derive_codec_unit_struct(),
     }
 }
 
-fn derive_codec_unnamed_struct(u: syn::FieldsUnnamed) -> [proc_macro2::TokenStream; 2] {
+fn derive_codec_unnamed_struct(
+    u: syn::FieldsUnnamed,
+    crate_name: syn::Ident,
+) -> [proc_macro2::TokenStream; 2] {
     let flags = u.unnamed.iter().map(|f| FieldAttrFlags::new(&f.attrs)).collect::<Vec<_>>();
 
     let field_names = flags.iter().enumerate().map(|(i, f)| {
@@ -190,14 +196,14 @@ fn derive_codec_unnamed_struct(u: syn::FieldsUnnamed) -> [proc_macro2::TokenStre
         if f.ignore {
             quote! { Default::default() }
         } else {
-            quote! { Codec::decode(buffer)? }
+            quote! { #crate_name::Codec::decode(buffer)? }
         }
     });
 
     [
         quote! {
             let Self(#(#field_names,)*) = self;
-            #(Codec::<'a>::encode(#used_fields, buffer)?;)*
+            #(#crate_name::Codec::<'a>::encode(#used_fields, buffer)?;)*
         },
         quote! {
             Some(Self(#(#decode_fields,)*))
@@ -205,7 +211,10 @@ fn derive_codec_unnamed_struct(u: syn::FieldsUnnamed) -> [proc_macro2::TokenStre
     ]
 }
 
-fn derive_codec_named_struct(n: syn::FieldsNamed) -> [proc_macro2::TokenStream; 2] {
+fn derive_codec_named_struct(
+    n: syn::FieldsNamed,
+    crate_name: syn::Ident,
+) -> [proc_macro2::TokenStream; 2] {
     let flags = n.named.iter().map(|f| FieldAttrFlags::new(&f.attrs)).collect::<Vec<_>>();
 
     let field_names = flags.iter().zip(&n.named).map(|(f, nf)| {
@@ -224,14 +233,14 @@ fn derive_codec_named_struct(n: syn::FieldsNamed) -> [proc_macro2::TokenStream; 
         if f.ignore {
             quote! { #name: Default::default() }
         } else {
-            quote! { #name: Codec::decode(buffer)? }
+            quote! { #name: #crate_name::Codec::decode(buffer)? }
         }
     });
 
     [
         quote! {
             let Self { #(#field_names,)* } = self;
-            #(Codec::<'a>::encode(#used_fields, buffer)?;)*
+            #(#crate_name::Codec::<'a>::encode(#used_fields, buffer)?;)*
         },
         quote! {
             Some(Self { #(#decode_fields,)* })

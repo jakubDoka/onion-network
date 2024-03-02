@@ -5,30 +5,6 @@
 #![feature(slice_split_at_unchecked)]
 
 #[macro_export]
-macro_rules! compose_protocols {
-    ($id:literal fn $for:ident($($req:ty),*) -> Result<$resp:ty, $error:ty>) => {
-        $crate::compose_protocols!($id fn $for<'a>($($req),*) -> Result<$resp, $error>);
-    };
-
-    ($id:literal fn $for:ident<$lt:lifetime>($($req:ty),*) -> Result<$resp:ty, $error:ty>) => {
-        pub enum $for {}
-        impl $crate::Protocol for $for {
-            const PREFIX: u8 = $id;
-            type Error = $error;
-            #[allow(unused_parens)]
-            type Request<$lt> = ($($req),*);
-            type Response<$lt> = $resp;
-        }
-    };
-
-    ($(
-        fn $for:ident$(<$lt:lifetime>)?($($req:ty),*) -> Result<$resp:ty, $error:ty>;
-    )*) => {$(
-        $crate::compose_protocols!(${index(0)} fn $for$(<$lt>)?($($req),*) -> Result<$resp, $error>);
-    )*};
-}
-
-#[macro_export]
 macro_rules! build_env {
     ($vis:vis $name:ident) => {
         #[cfg(feature = "building")]
@@ -114,8 +90,8 @@ pub mod crypto;
 pub mod proximity;
 pub mod stream;
 
+use core::task::Waker;
 pub use {arrayvec, codec::*, codec_derive::Codec, futures, stream::*, thiserror};
-use {core::task::Waker, std::convert::Infallible};
 
 pub struct DropFn<F: FnOnce()>(Option<F>);
 
@@ -174,27 +150,4 @@ pub fn set_waker(old: &mut Option<Waker>, new: &Waker) {
     } else {
         *old = Some(new.clone());
     }
-}
-
-pub trait Protocol {
-    const PREFIX: u8;
-    type Request<'a>: Codec<'a>;
-    type Response<'a>: Codec<'a>;
-    type Error: for<'a> Codec<'a> + std::error::Error;
-
-    fn rpc(request: Self::Request<'_>) -> (u8, Self::Request<'_>) {
-        (Self::PREFIX, request)
-    }
-
-    fn rpc_id<'a, T: Codec<'a>>(id: T, request: Self::Request<'_>) -> (u8, T, Self::Request<'_>) {
-        (Self::PREFIX, id, request)
-    }
-}
-
-impl Protocol for Infallible {
-    type Error = Self;
-    type Request<'a> = Self;
-    type Response<'a> = Self;
-
-    const PREFIX: u8 = u8::MAX / 2;
 }

@@ -2,8 +2,8 @@ use {
     super::{codec, CallId, Codec, Handler, HandlerResult, ProtocolResult, Scope, TryUnwrap},
     crate::handlers::Chat,
     chat_spec::{
-        unpack_messages_ref, BlockNumber, FetchFullProfile, FetchMinimalChatData, Identity, Member,
-        PossibleTopic, Protocol, ReplVec, ToPossibleTopic, REPLICATION_FACTOR,
+        unpack_messages_ref, BlockNumber, Identity, Member, PossibleTopic, ReplVec,
+        ToPossibleTopic, REPLICATION_FACTOR,
     },
     component_utils::{FindAndRemove, Reminder},
     std::{

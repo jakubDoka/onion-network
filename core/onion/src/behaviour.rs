@@ -411,6 +411,10 @@ impl EncryptedStream {
 
         Poll::Ready(Ok(&mut read[..len]))
     }
+
+    pub fn close(&mut self) {
+        _ = self.inner.take();
+    }
 }
 
 impl futures::Stream for EncryptedStream {

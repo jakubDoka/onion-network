@@ -28,6 +28,7 @@ features = [
   "ProgressEvent",
   "CloseEvent",
   "WebSocket",
+  "Window",
 ]
 
 [lints]

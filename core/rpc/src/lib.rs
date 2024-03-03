@@ -8,14 +8,24 @@
 use {
     component_utils::{Codec, FindAndRemove, PacketReader, PacketWriter, Reminder},
     libp2p::{
-        futures::{stream::SelectAll, StreamExt},
+        futures::{stream::SelectAll, task::AtomicWaker, StreamExt},
         swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError},
         PeerId,
     },
-    std::{io, sync::Arc, task::Poll, time::Duration},
+    std::{
+        collections::VecDeque,
+        io,
+        sync::{Arc, Mutex, Weak},
+        task::Poll,
+        thread::JoinHandle,
+        time::Duration,
+    },
 };
 
 component_utils::decl_stream_protocol!(PROTOCOL_NAME = "rpc");
+
+pub type Error = streaming::Error;
+pub type Result<T, E = Arc<streaming::Error>> = std::result::Result<T, E>;
 
 pub struct Stream {
     writer: PacketWriter,
@@ -92,10 +102,11 @@ impl Stream {
 pub struct Behaviour {
     config: Config,
     streams: SelectAll<Stream>,
-    pending_requests: Vec<(PeerId, CallId, Vec<u8>, std::time::Instant)>,
-    ongoing_requests: Vec<(CallId, PeerId, std::time::Instant)>,
+    pending_requests: Vec<(PeerId, CallId, Vec<u8>)>,
+    ongoing_requests: Vec<(CallId, PeerId)>,
     pending_repsonses: Vec<(PeerId, CallId, Vec<u8>)>,
     events: Vec<Event>,
+    timeouts: DelayStream,
 
     streaming: streaming::Behaviour,
 }
@@ -113,15 +124,19 @@ impl Behaviour {
         &mut self,
         peer: PeerId,
         packet: impl AsRef<[u8]> + Into<Vec<u8>>,
-    ) -> io::Result<CallId> {
+    ) -> Result<CallId> {
         let call = CallId::new();
         if let Some(stream) = self.streams.iter_mut().find(|s| s.peer == peer) {
-            self.ongoing_requests.push((call, peer, std::time::Instant::now()));
-            stream.write(call, packet.as_ref(), true)?;
+            self.ongoing_requests.push((call, peer));
+            stream
+                .write(call, packet.as_ref(), true)
+                .map_err(streaming::Error::Io)
+                .map_err(Arc::new)?;
         } else if !self.streaming.is_resolving_stream_for(peer) {
             self.streaming.create_stream(peer);
-            self.pending_requests.push((peer, call, packet.into(), std::time::Instant::now()));
+            self.pending_requests.push((peer, call, packet.into()));
         }
+        self.timeouts.enqueue(call, std::time::Instant::now() + self.config.request_timeout);
         Ok(call)
     }
 
@@ -201,7 +216,7 @@ impl NetworkBehaviour for Behaviour {
         while let Poll::Ready(Some((pid, res))) = self.streams.poll_next_unpin(cx) {
             match res {
                 Ok((cid, content, false)) => {
-                    let Some((_, peer, time)) =
+                    let Some((_, peer)) =
                         self.ongoing_requests.find_and_remove(|(c, ..)| *c == cid)
                     else {
                         log::warn!("unexpected response {:?}", cid);
@@ -214,7 +229,7 @@ impl NetworkBehaviour for Behaviour {
                     return Poll::Ready(libp2p::swarm::ToSwarm::GenerateEvent(Event::Response(
                         pid,
                         cid,
-                        Ok((content, time.elapsed())),
+                        Ok(content),
                     )));
                 }
                 Ok((cid, content, true)) => {
@@ -224,6 +239,14 @@ impl NetworkBehaviour for Behaviour {
                 }
                 Err(e) => self.clean_failed_requests(pid, StreamUpgradeError::Io(e)),
             }
+        }
+
+        while let Poll::Ready(Some(call)) = self.timeouts.poll_next_unpin(cx) {
+            let Some((_, peer)) = self.ongoing_requests.find_and_remove(|(c, ..)| *c == call)
+            else {
+                continue;
+            };
+            self.events.push(Event::Response(peer, call, Err(StreamUpgradeError::Timeout.into())));
         }
 
         loop {
@@ -242,7 +265,7 @@ impl NetworkBehaviour for Behaviour {
                 | streaming::Event::OutgoingStream(p, Ok(s)) => {
                     let mut stream = Stream::new(p, s, self.config.buffer_size);
 
-                    for (peer, call, payload, time) in
+                    for (peer, call, payload) in
                         self.pending_requests.extract_if(|(op, ..)| *op == p)
                     {
                         if let Err(err) = stream.write(call, &payload, true) {
@@ -252,7 +275,7 @@ impl NetworkBehaviour for Behaviour {
                                 Err(StreamUpgradeError::Io(err).into()),
                             ));
                         } else {
-                            self.ongoing_requests.push((call, peer, time));
+                            self.ongoing_requests.push((call, peer));
                         }
                     }
 
@@ -277,6 +300,73 @@ impl NetworkBehaviour for Behaviour {
     }
 }
 
+#[derive(Clone)]
+struct DelayStream {
+    inner: Arc<DelayStreamInner>,
+}
+
+impl Default for DelayStream {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new_cyclic(|weak: &Weak<DelayStreamInner>| DelayStreamInner {
+                waker: AtomicWaker::new(),
+                pending: Mutex::new(Vec::new()),
+                queued: Mutex::new(VecDeque::new()),
+                handle: Self::spawn_worker(weak.clone()),
+            }),
+        }
+    }
+}
+
+impl DelayStream {
+    fn spawn_worker(state: Weak<DelayStreamInner>) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            while let Some(inner) = state.upgrade() {
+                let now = std::time::Instant::now();
+                let Some((call, time)) = inner.queued.lock().unwrap().pop_front() else {
+                    std::thread::park();
+                    continue;
+                };
+
+                if time < now {
+                    inner.pending.lock().unwrap().push(call);
+                    inner.waker.wake();
+                } else {
+                    inner.queued.lock().unwrap().push_front((call, time));
+                    std::thread::park_timeout(time - now);
+                }
+            }
+        })
+    }
+
+    pub fn enqueue(&self, call: CallId, time: std::time::Instant) {
+        self.inner.queued.lock().unwrap().push_back((call, time));
+        self.inner.handle.thread().unpark();
+    }
+}
+
+impl libp2p::futures::Stream for DelayStream {
+    type Item = CallId;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<CallId>> {
+        if let Some(call) = self.inner.pending.lock().unwrap().pop() {
+            return Poll::Ready(Some(call));
+        }
+        self.inner.waker.register(cx.waker());
+        Poll::Pending
+    }
+}
+
+struct DelayStreamInner {
+    waker: AtomicWaker,
+    pending: Mutex<Vec<CallId>>,
+    queued: Mutex<VecDeque<(CallId, std::time::Instant)>>,
+    handle: JoinHandle<()>,
+}
+
 component_utils::gen_config! {
     ;;
     emmit_search_requests: bool = false,
@@ -297,7 +387,7 @@ component_utils::gen_unique_id!(pub CallId);
 #[allow(clippy::large_enum_variant)]
 #[allow(clippy::type_complexity)]
 pub enum Event {
-    Response(PeerId, CallId, Result<(Vec<u8>, Duration), Arc<streaming::Error>>),
+    Response(PeerId, CallId, Result<Vec<u8>>),
     Request(PeerId, CallId, Vec<u8>),
     SearchRequest(PeerId),
 }

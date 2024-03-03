@@ -103,58 +103,6 @@ pub struct FetchProfileResp {
     pub enc: Serialized<enc::PublicKey>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum FetchProfileError {
-    #[error("account not found")]
-    NotFound,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum CreateProfileError {
-    #[error("invalid proof")]
-    InvalidProof,
-    #[error("account already exists")]
-    AlreadyExists,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum SetVaultError {
-    #[error("account not found")]
-    NotFound,
-    #[error("invalid proof")]
-    InvalidProof,
-    #[error("invalid action")]
-    InvalidAction,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum FetchVaultError {
-    #[error("account not found")]
-    NotFound,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum ReadMailError {
-    #[error("account not found")]
-    NotFound,
-    #[error("invalid proof")]
-    InvalidProof,
-    #[error("invalid action")]
-    InvalidAction,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum SendMailError {
-    #[error("account not found")]
-    NotFound,
-    #[error("sent directly")]
-    SentDirectly,
-    #[error("sending to self is not allowed")]
-    SendingToSelf,
-    #[error("mailbox full (limit: {MAIL_BOX_CAP})")]
-    MailboxFull,
-}
-
 #[must_use]
 pub fn username_to_raw(u: UserName) -> RawUserName {
     let mut arr = [0; USER_NAME_CAP];

@@ -303,11 +303,11 @@ pub struct ReminderOwned(pub Vec<u8>);
 
 impl<'a> Codec<'a> for ReminderOwned {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
-        self.0.encode(buffer)
+        buffer.extend_from_slice(&self.0)
     }
 
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
-        <Vec<u8>>::decode(buffer).map(Self)
+        Some(Self(std::mem::take(buffer).to_vec()))
     }
 }
 

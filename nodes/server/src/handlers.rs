@@ -27,8 +27,8 @@ macro_rules! ensure {
 use {
     crate::{Context, OnlineLocation},
     chat_spec::{
-        rpcs, BorrowedProfile, FetchProfileError, Identity, PossibleTopic, Profile, ReplVec,
-        Request, REPLICATION_FACTOR,
+        rpcs, BorrowedProfile, ChatError, Identity, PossibleTopic, Profile, ReplVec, Request,
+        REPLICATION_FACTOR,
     },
     component_utils::{arrayvec::ArrayVec, Codec},
     libp2p::{
@@ -42,6 +42,8 @@ use {
 pub mod chat;
 pub mod profile;
 //mod retry;
+
+type Result<T, E = ChatError> = std::result::Result<T, E>;
 
 pub enum Response {
     Success(Vec<u8>),
@@ -206,7 +208,15 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
         let args = T::from_request(req, &mut state)?;
         let body = req.body.0.to_vec();
         Some(async move {
+            // SAFETY: the lifetime of `body` is bound to the scope of the future, `r` does not
+            // escape its scope. Extending lifetime here is only needed due to limitations of
+            // compiler.
             let Some(r) = R::decode(unsafe { std::mem::transmute(&mut body.as_slice()) }) else {
+                log::warn!(
+                    "invalid encoding from {:?} for handler {:?}",
+                    state.location,
+                    std::any::type_name::<Self>()
+                );
                 return Response::DontRespond;
             };
             self.call_computed(args, r).await.into_response()
@@ -250,7 +260,7 @@ where
 
             counter.push((crypto::hash::from_slice(&bytes), 1));
 
-            while let Some((_, resp)) = repl.next().await {
+            while let Some((_, Ok(resp))) = repl.next().await {
                 let hash = crypto::hash::from_slice(&resp);
 
                 let Some((_, count)) = counter.iter_mut().find(|(h, _)| h == &hash) else {
@@ -277,7 +287,7 @@ pub struct Restore<H> {
     pub handler: H,
 }
 
-pub type RestoreArgsArgs<A> = (PossibleTopic, Context, Prefix, MissingTopic, A);
+pub type RestoreArgsArgs<A> = (PossibleTopic, Context, MissingTopic, A);
 
 impl<'a, H, A, R> Handler<'a, RestoreArgsArgs<A>, R> for Restore<H>
 where
@@ -290,61 +300,18 @@ where
 
     fn call_computed(
         self,
-        (topic, cx, prefix, missing_topic, args): RestoreArgsArgs<A>,
+        (topic, cx, missing_topic, args): RestoreArgsArgs<A>,
         req: R,
     ) -> Self::Future {
         async move {
-            if !missing_topic.0 {
-                return self.handler.call_computed(args, req).await.into_response();
-            }
+            if missing_topic.0 {
+                let res = match topic {
+                    PossibleTopic::Profile(identity) => profile::recover(cx, identity).await,
+                    PossibleTopic::Chat(name) => chat::recover(cx, name).await,
+                };
 
-            match topic {
-                PossibleTopic::Profile(identity) => {
-                    let mut profiles =
-                        cx.replicate_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity).await;
-                    let mut latest_profile = None::<Profile>;
-                    while let Some((peer, resp)) = profiles.next().await {
-                        let Some(Ok(profile)) =
-                            Result::<BorrowedProfile, FetchProfileError>::decode(
-                                &mut resp.as_slice(),
-                            )
-                        else {
-                            log::warn!("invalid profile encoding from {:?}", peer);
-                            continue;
-                        };
-
-                        if crypto::hash::from_slice(profile.vault) != identity {
-                            log::warn!("invalid profile identity form {:?}", peer);
-                            continue;
-                        }
-
-                        if !profile.is_valid() {
-                            log::warn!("invalid profile signature from {:?}", peer);
-                            continue;
-                        }
-
-                        if let Some(best) = latest_profile.as_ref() {
-                            if best.vault_version < profile.vault_version {
-                                latest_profile = Some(profile.into());
-                            }
-                        } else {
-                            latest_profile = Some(profile.into());
-                        }
-                    }
-
-                    let Some(profile) = latest_profile else {
-                        log::warn!("no valid profile found for {:?}", identity);
-                        // we keep convention of not found errors being the first variant
-                        return Response::Failure(Err::<(), u8>(0u8).to_bytes());
-                    };
-
-                    cx.profiles.insert(identity, profile);
-                }
-                PossibleTopic::Chat(name) => {
-                    let mut chats =
-                        cx.replicate_rpc(name, rpcs::FETCH_MINIMAL_CHAT_DATA, name).await;
-
-                    while let Some((_peer, _resp)) = chats.next().await {}
+                if res.is_err() {
+                    return Response::Failure(res.to_bytes());
                 }
             }
 

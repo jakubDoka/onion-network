@@ -80,15 +80,21 @@ pub async fn send_message(
     crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, SendMessageError::MessageTooLarge);
 
     let message = Message { identiy: sender_id, nonce: sender.action - 1, content: Reminder(msg) };
-    match chat.push_message(message, &mut vec![]) {
+    let push_res = { chat }.push_message(message, &mut vec![]);
+    match push_res {
         Err(Some(hash)) => {
-            cx.replicate_rpc_no_resp(proof.context, rpcs::BLOCK_PROPOSAL, (proof.context, bn, hash))
+            cx.replicate_rpc_no_resp(
+                proof.context,
+                rpcs::BLOCK_PROPOSAL,
+                (proof.context, bn, hash),
+            )
+            .await;
         }
         Err(None) => return Err(SendMessageError::MessageBlockNotFinalized),
         Ok(()) => (),
     }
 
-    cx.push_event(proof.context, ChatEvent::Message(proof, Reminder(msg)));
+    cx.push_chat_event(proof.context, ChatEvent::Message(proof, Reminder(msg))).await;
 
     Ok(())
 }

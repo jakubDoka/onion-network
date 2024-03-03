@@ -245,7 +245,7 @@ where
                 resp => return resp,
             };
 
-            let mut repl = cx.replicate_rpc(topic, prefix, req);
+            let mut repl = cx.replicate_rpc(topic, prefix, req).await;
             let mut counter = ReplVec::<(crypto::Hash, u8)>::new();
 
             counter.push((crypto::hash::from_slice(&bytes), 1));
@@ -301,8 +301,8 @@ where
             match topic {
                 PossibleTopic::Profile(identity) => {
                     let mut profiles =
-                        cx.replicate_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity);
-                    let mut best_profile = None::<Profile>;
+                        cx.replicate_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity).await;
+                    let mut latest_profile = None::<Profile>;
                     while let Some((peer, resp)) = profiles.next().await {
                         let Some(Ok(profile)) =
                             Result::<BorrowedProfile, FetchProfileError>::decode(
@@ -313,7 +313,7 @@ where
                             continue;
                         };
 
-                        if crypto::hash::from_slice(&profile.vault) != identity {
+                        if crypto::hash::from_slice(profile.vault) != identity {
                             log::warn!("invalid profile identity form {:?}", peer);
                             continue;
                         }
@@ -323,27 +323,28 @@ where
                             continue;
                         }
 
-                        if let Some(best) = best_profile.as_ref() {
+                        if let Some(best) = latest_profile.as_ref() {
                             if best.vault_version < profile.vault_version {
-                                best_profile = Some(profile);
+                                latest_profile = Some(profile.into());
                             }
                         } else {
-                            best_profile = Some(profile);
+                            latest_profile = Some(profile.into());
                         }
                     }
 
-                    let Some(profile) = best_profile else {
+                    let Some(profile) = latest_profile else {
                         log::warn!("no valid profile found for {:?}", identity);
                         // we keep convention of not found errors being the first variant
-                        return Response::Failure(Err(0u8).to_bytes());
+                        return Response::Failure(Err::<(), u8>(0u8).to_bytes());
                     };
 
-                    cx.profiles.insert(identity, value);
+                    cx.profiles.insert(identity, profile);
                 }
                 PossibleTopic::Chat(name) => {
-                    let mut chats = cx.replicate_rpc(name, rpcs::FETCH_MINIMAL_CHAT_DATA, name);
+                    let mut chats =
+                        cx.replicate_rpc(name, rpcs::FETCH_MINIMAL_CHAT_DATA, name).await;
 
-                    while let Some((peer, resp)) = chats.next().await {}
+                    while let Some((_peer, _resp)) = chats.next().await {}
                 }
             }
 

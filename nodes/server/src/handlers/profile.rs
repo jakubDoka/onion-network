@@ -137,7 +137,7 @@ pub async fn send_mail(
         OnlineLocation::Local(p) => {
             crate::ensure!(OnlineLocation::Local(p) != origin, SendMailError::SendingToSelf);
             crate::ensure!(
-                !cx.push_notification(for_who, Reminder(mail), p).await,
+                !cx.push_profile_event(for_who, mail).await,
                 SendMailError::SentDirectly
             );
         }
@@ -147,11 +147,11 @@ pub async fn send_mail(
             }
 
             let resp = cx.send_rpc(for_who, peer, rpcs::SEND_MAIL, (for_who, Reminder(mail))).await;
-            if let Some(resp) = <Result<(), SendMailError>>::decode(&mut resp.as_slice())
-                && resp.is_ok()
-            {
-                return Ok(());
-            }
+            let Some(Ok(())) = <Result<(), SendMailError>>::decode(&mut resp.as_slice()) else {
+                break 'b;
+            };
+
+            return Err(SendMailError::SentDirectly);
         }
     }
 

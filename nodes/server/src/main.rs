@@ -11,35 +11,37 @@
 #![feature(macro_metavar_expr)]
 #![feature(slice_take)]
 
-#[cfg(test)]
-use futures::channel::mpsc;
 use {
     self::handlers::chat::Chat,
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
     chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, REPLICATION_FACTOR},
-    component_utils::{Codec, LinearMap},
+    component_utils::{Codec, LinearMap, Reminder},
     crypto::{enc, sign, TransmutationCircle},
     dashmap::DashMap,
     dht::Route,
+    futures::channel::mpsc,
     libp2p::{
         core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
-        futures::{self, SinkExt, StreamExt},
+        futures::{self, channel::oneshot, SinkExt, StreamExt},
         identity::{self, ed25519},
-        swarm::{handler, NetworkBehaviour, SwarmEvent},
+        swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId, Transport,
     },
     onion::{EncryptedStream, PathId},
     rand_core::OsRng,
     rpc::CallId,
     std::{
+        collections::HashMap,
         convert::Infallible,
         fs,
         future::Future,
         io,
         net::{IpAddr, Ipv4Addr},
+        ops::DerefMut,
         sync::Arc,
+        task::Poll,
         time::Duration,
     },
     tokio::sync::RwLock,
@@ -49,6 +51,10 @@ mod db;
 mod handlers;
 #[cfg(test)]
 mod tests;
+
+type Context = &'static OwnedContext;
+type StakeEvents = futures::channel::mpsc::Receiver<chain_api::Result<chain_api::StakeEvent>>;
+type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 
 #[derive(Clone)]
 struct NodeKeys {
@@ -111,17 +117,20 @@ config::env_config! {
     }
 }
 
-type StakeEvents = futures::channel::mpsc::Receiver<chain_api::Result<chain_api::StakeEvent>>;
+enum RpcRespChannel {
+    Oneshot(oneshot::Sender<Vec<u8>>),
+    Mpsc(mpsc::Sender<(PeerId, Vec<u8>)>),
+}
 
 struct Server {
     swarm: libp2p::swarm::Swarm<Behaviour>,
     context: Context,
+    request_events: mpsc::Receiver<RequestEvent>,
     clients: futures::stream::SelectAll<Stream>,
-    buffer: Vec<u8>,
     client_router: handlers::Router,
-    server_router: handlers::Router,
+    _server_router: handlers::Router,
     stake_events: StakeEvents,
-    res: TempRes,
+    pending_rpcs: HashMap<CallId, RpcRespChannel>,
 }
 
 fn unpack_node_id(id: sign::Ed) -> anyhow::Result<ed25519::PublicKey> {
@@ -288,15 +297,18 @@ impl Server {
             swarm.dial(boot_node).context("dialing a boot peer")?;
         }
 
+        let (request_event_sink, request_events) = mpsc::channel(100);
+
         Ok(Self {
             swarm,
             context: Box::leak(Box::new(OwnedContext {
                 profiles: Default::default(),
                 online: Default::default(),
                 chats: Default::default(),
+                request_event_sink,
             })),
+            request_events,
             clients: Default::default(),
-            buffer: Default::default(),
             stake_events,
             client_router: handlers::router!(
                 chat::{
@@ -314,7 +326,7 @@ impl Server {
                     rpcs::FETCH_VAULT => fetch_vault.restore();
                 };
             ),
-            server_router: handlers::router!(
+            _server_router: handlers::router!(
                 chat::{
                     rpcs::CREATE_CHAT => create.restore();
                     rpcs::ADD_MEMBER => add_member.restore();
@@ -330,7 +342,7 @@ impl Server {
                     rpcs::FETCH_PROFILE_FULL => fetch_full;
                 };
             ),
-            res: Default::default(),
+            pending_rpcs: Default::default(),
         })
     }
 
@@ -396,7 +408,10 @@ impl Server {
             && we_have_the_topic
         {
             let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
-            client.subscriptions.insert(topic, req.id);
+            match topic {
+                PossibleTopic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
+                PossibleTopic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
+            }
         } else {
             self.client_router.handle(req, handlers::State {
                 swarm: &mut self.swarm,
@@ -488,6 +503,58 @@ impl Server {
             handlers::Response::DontRespond => {}
         }
     }
+
+    fn handle_chat_event(&mut self, chat: ChatName, event: Vec<u8>) {
+        for client in self.clients.iter_mut() {
+            let Some(call) = client.subscriptions.get(&chat) else {
+                continue;
+            };
+
+            _ = client.inner.write((call, Reminder(&event)));
+        }
+    }
+
+    fn handle_profile_event(
+        &mut self,
+        identity: Identity,
+        event: Vec<u8>,
+        success_resp: oneshot::Sender<()>,
+    ) {
+        let Some((id, client)) = self
+            .clients
+            .iter_mut()
+            .find_map(|c| (c.profile_sub?.0 == identity).then_some((c.profile_sub?.1, c)))
+        else {
+            return;
+        };
+
+        if client.inner.write((id, event)).is_none() {
+            return;
+        }
+
+        _ = success_resp.send(());
+    }
+
+    fn handle_rpc(
+        &self,
+        topic: PossibleTopic,
+        peer: PeerId,
+        prefix: u8,
+        msg: Vec<u8>,
+        resp: Option<oneshot::Sender<Vec<u8>>>,
+    ) {
+        todo!()
+    }
+
+    fn handle_repl_rpc(
+        &self,
+        topic: PossibleTopic,
+        prefix: u8,
+        msg: Vec<u8>,
+        resp: Option<mpsc::Sender<(PeerId, Vec<u8>)>>,
+    ) {
+        todo!()
+    }
 }
 
 impl Future for Server {
@@ -496,42 +563,51 @@ impl Future for Server {
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
+    ) -> Poll<Self::Output> {
         let mut did_something = false;
         while std::mem::take(&mut did_something) {
-            while let std::task::Poll::Ready(Some((id, m))) = self.clients.poll_next_unpin(cx) {
+            while let Poll::Ready(Some((id, m))) = self.clients.poll_next_unpin(cx) {
                 self.handle_client_message(id, m);
                 did_something = true;
             }
 
-            while let std::task::Poll::Ready(Some(e)) = self.swarm.poll_next_unpin(cx) {
+            while let Poll::Ready(Some(e)) = self.swarm.poll_next_unpin(cx) {
                 self.handle_event(e);
                 did_something = true;
             }
 
-            while let std::task::Poll::Ready(Some(e)) = self.stake_events.poll_next_unpin(cx) {
+            while let Poll::Ready(Some(e)) = self.stake_events.poll_next_unpin(cx) {
                 self.handle_stake_event(e);
                 did_something = true;
             }
 
-            while let std::task::Poll::Ready((res, OnlineLocation::Local(peer), id)) =
+            while let Poll::Ready((res, OnlineLocation::Local(peer), id)) =
                 self.client_router.poll(cx)
             {
                 self.handle_router_response(peer, id, res);
                 did_something = true;
             }
+
+            while let Poll::Ready(Some(event)) = self.request_events.poll_next_unpin(cx) {
+                match event {
+                    RequestEvent::Profile(identity, event, resp) => {
+                        self.handle_profile_event(identity, event, resp)
+                    }
+                    RequestEvent::Chat(topic, event) => self.handle_chat_event(topic, event),
+                    RequestEvent::Rpc(topic, peer, prefix, msg, resp) => {
+                        self.handle_rpc(topic, peer, prefix, msg, resp)
+                    }
+                    RequestEvent::ReplRpc(topic, prefix, msg, resp) => {
+                        self.handle_repl_rpc(topic, prefix, msg, resp)
+                    }
+                }
+                did_something = true;
+            }
         }
 
-        std::task::Poll::Pending
+        Poll::Pending
     }
 }
-
-#[derive(Default)]
-pub struct TempRes {
-    pub hashes: Vec<crypto::Hash>,
-}
-
-type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -568,13 +644,19 @@ impl InnerStream {
 
 pub struct Stream {
     id: PathId,
-    subscriptions: LinearMap<PossibleTopic, CallId>,
+    profile_sub: Option<(Identity, CallId)>,
+    subscriptions: LinearMap<ChatName, CallId>,
     inner: InnerStream,
 }
 
 impl Stream {
     fn new(id: PathId, inner: EncryptedStream) -> Self {
-        Self { id, subscriptions: Default::default(), inner: InnerStream::Normal(inner) }
+        Self {
+            id,
+            profile_sub: Default::default(),
+            subscriptions: Default::default(),
+            inner: InnerStream::Normal(inner),
+        }
     }
 
     #[cfg(test)]
@@ -584,6 +666,7 @@ impl Stream {
         let id = PathId::new();
         [(input_r, output_s), (output_r, input_s)].map(|(a, b)| Self {
             id,
+            profile_sub: Default::default(),
             subscriptions: Default::default(),
             inner: InnerStream::Test(a, Some(b)),
         })
@@ -596,7 +679,7 @@ impl libp2p::futures::Stream for Stream {
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
+    ) -> Poll<Option<Self::Item>> {
         match &mut self.inner {
             InnerStream::Normal(n) => n.poll_next_unpin(cx).map(|v| v.map(|v| (self.id, v))),
             #[cfg(test)]
@@ -611,63 +694,90 @@ pub enum OnlineLocation {
     Remote(PeerId),
 }
 
-pub type Context = &'static OwnedContext;
+enum RequestEvent {
+    Profile(Identity, Vec<u8>, oneshot::Sender<()>),
+    Chat(ChatName, Vec<u8>),
+    Rpc(PossibleTopic, PeerId, u8, Vec<u8>, Option<oneshot::Sender<Vec<u8>>>),
+    ReplRpc(PossibleTopic, u8, Vec<u8>, Option<mpsc::Sender<(PeerId, Vec<u8>)>>),
+}
 
 pub struct OwnedContext {
     profiles: DashMap<Identity, Profile>,
     online: DashMap<Identity, OnlineLocation>,
     chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
+    request_event_sink: mpsc::Sender<RequestEvent>,
 }
 
 impl OwnedContext {
-    fn push_event(&self, _topic: impl Into<PossibleTopic>, _msg: chat_spec::ChatEvent<'_>) {
-        todo!()
+    async fn push_chat_event(&self, topic: ChatName, msg: chat_spec::ChatEvent<'_>) {
+        _ = self.request_event_sink.clone().send(RequestEvent::Chat(topic, msg.to_bytes())).await;
     }
 
-    fn replicate_rpc_no_resp<'a>(
+    async fn push_profile_event(&self, for_who: [u8; 32], mail: &[u8]) -> bool {
+        let (sender, recv) = oneshot::channel();
+        _ = self
+            .request_event_sink
+            .clone()
+            .send(RequestEvent::Profile(for_who, mail.to_vec(), sender))
+            .await;
+        recv.await.is_ok()
+    }
+
+    async fn replicate_rpc_no_resp<'a>(
         &self,
-        _topic: impl Into<PossibleTopic>,
-        _prefix: u8,
-        _msg: impl Codec<'a>,
+        topic: impl Into<PossibleTopic>,
+        prefix: u8,
+        msg: impl Codec<'a>,
     ) {
-        todo!()
+        _ = self
+            .request_event_sink
+            .clone()
+            .send(RequestEvent::ReplRpc(topic.into(), prefix, msg.to_bytes(), None))
+            .await;
     }
 
-    fn send_rpc_no_resp<'a>(
+    async fn send_rpc_no_resp<'a>(
         &self,
-        _topic: impl Into<PossibleTopic>,
-        _dest: PeerId,
-        _prefix: u8,
-        _msg: impl Codec<'a>,
+        topic: impl Into<PossibleTopic>,
+        dest: PeerId,
+        prefix: u8,
+        msg: impl Codec<'a>,
     ) {
-        todo!()
+        _ = self
+            .request_event_sink
+            .clone()
+            .send(RequestEvent::Rpc(topic.into(), dest, prefix, msg.to_bytes(), None))
+            .await;
     }
 
-    fn replicate_rpc<'a>(
+    async fn replicate_rpc<'a>(
         &self,
-        _topic: impl Into<PossibleTopic>,
-        _prefix: u8,
-        _req: impl Codec<'a>,
+        topic: impl Into<PossibleTopic>,
+        prefix: u8,
+        req: impl Codec<'a>,
     ) -> impl futures::Stream<Item = (PeerId, Vec<u8>)> {
-        futures::stream::pending()
-    }
-
-    async fn push_notification(
-        &self,
-        _for_who: [u8; 32],
-        _mail: component_utils::Reminder<'_>,
-        _p: PathId,
-    ) -> bool {
-        todo!()
+        let (sender, recv) = mpsc::channel(REPLICATION_FACTOR.get() as usize);
+        _ = self
+            .request_event_sink
+            .clone()
+            .send(RequestEvent::ReplRpc(topic.into(), prefix, req.to_bytes(), Some(sender)))
+            .await;
+        recv
     }
 
     async fn send_rpc<'a>(
         &self,
-        _for_who: [u8; 32],
-        _peer: PeerId,
-        _send_mail: u8,
-        _mail: impl Codec<'a>,
+        topic: impl Into<PossibleTopic>,
+        peer: PeerId,
+        send_mail: u8,
+        mail: impl Codec<'a>,
     ) -> Vec<u8> {
-        todo!()
+        let (sender, recv) = oneshot::channel();
+        _ = self
+            .request_event_sink
+            .clone()
+            .send(RequestEvent::Rpc(topic.into(), peer, send_mail, mail.to_bytes(), Some(sender)))
+            .await;
+        recv.await.unwrap_or_default()
     }
 }

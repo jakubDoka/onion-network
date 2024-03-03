@@ -1,20 +1,23 @@
 use {
     crate::OnlineLocation,
     chat_spec::{
-        advance_nonce, rpcs, CreateProfileError, FetchProfileError, FetchProfileResp, Identity,
-        Profile, Proof, ReadMailError, SendMailError, SetVaultError,
+        advance_nonce, rpcs, BorrowedProfile, ChatError, FetchProfileResp, Identity, Mail, Profile,
+        Proof,
     },
     component_utils::{Codec, Reminder, ReminderOwned},
     dashmap::mapref::entry::Entry,
+    libp2p::futures::StreamExt,
 };
 
 const MAIL_BOX_CAP: usize = 1024 * 1024;
 
+type Result<T, E = ChatError> = std::result::Result<T, E>;
+
 pub async fn create(
     cx: super::Context,
     (proof, enc): (Proof<&[u8]>, crypto::Serialized<crypto::enc::PublicKey>),
-) -> Result<(), CreateProfileError> {
-    crate::ensure!(proof.verify(), CreateProfileError::InvalidProof);
+) -> Result<()> {
+    crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let user_id = crypto::hash::from_raw(&proof.pk);
     let entry = cx.profiles.entry(user_id);
@@ -40,24 +43,21 @@ pub async fn create(
             account.vault.extend(proof.context);
             Ok(())
         }
-        _ => Err(CreateProfileError::AlreadyExists),
+        _ => Err(ChatError::AlreadyExists),
     }
 }
 
-pub async fn set_vault(
-    cx: super::Context,
-    proof: Proof<Reminder<'_>>,
-) -> Result<(), SetVaultError> {
-    crate::ensure!(proof.verify(), SetVaultError::InvalidProof);
+pub async fn set_vault(cx: super::Context, proof: Proof<Reminder<'_>>) -> Result<()> {
+    crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let identity = crypto::hash::from_raw(&proof.pk);
     let profile = cx.profiles.get_mut(&identity);
 
-    crate::ensure!(let Some(mut profile) = profile, SetVaultError::NotFound);
+    crate::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
 
     crate::ensure!(
         advance_nonce(&mut profile.vault_version, proof.nonce),
-        SetVaultError::InvalidAction
+        ChatError::InvalidAction
     );
     profile.vault_sig = proof.signature;
 
@@ -69,50 +69,41 @@ pub async fn set_vault(
 
 pub async fn read_mail(
     cx: super::Context,
-    proof: Proof<Identity>,
-) -> Result<ReminderOwned, ReadMailError> {
-    crate::ensure!(proof.verify(), ReadMailError::InvalidProof);
+    location: OnlineLocation,
+    proof: Proof<Mail>,
+) -> Result<ReminderOwned> {
+    crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let identity = crypto::hash::from_raw(&proof.pk);
     let profile = cx.profiles.get_mut(&identity);
 
-    crate::ensure!(let Some(mut profile) = profile, ReadMailError::NotFound);
-    crate::ensure!(
-        advance_nonce(&mut profile.mail_action, proof.nonce),
-        ReadMailError::InvalidAction
-    );
+    crate::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
+    crate::ensure!(advance_nonce(&mut profile.mail_action, proof.nonce), ChatError::InvalidAction);
+
+    cx.online.insert(identity, location);
 
     Ok(ReminderOwned(profile.read_mail().to_vec()))
 }
 
-pub async fn fetch_keys(
-    cx: super::Context,
-    identity: Identity,
-) -> Result<FetchProfileResp, FetchProfileError> {
-    cx.profiles
-        .get(&identity)
-        .ok_or(FetchProfileError::NotFound)
-        .map(|p| FetchProfileResp::from(p.value()))
+pub async fn fetch_keys(cx: super::Context, identity: Identity) -> Result<FetchProfileResp> {
+    cx.profiles.get(&identity).ok_or(ChatError::NotFound).map(|p| FetchProfileResp::from(p.value()))
 }
 
-pub async fn fetch_vault(
-    cx: super::Context,
-    identity: Identity,
-) -> Result<ReminderOwned, FetchProfileError> {
+pub async fn fetch_vault(cx: super::Context, identity: Identity) -> Result<ReminderOwned> {
     cx.profiles
         .get(&identity)
-        .ok_or(FetchProfileError::NotFound)
-        .map(|p| p.value().vault.clone())
+        .ok_or(ChatError::NotFound)
+        .map(|p| {
+            (p.value().vault_version, p.value().mail_action, Reminder(p.value().vault.as_slice()))
+                .to_bytes()
+        })
         .map(ReminderOwned)
 }
 
-pub async fn fetch_full(
-    cx: super::Context,
-    identity: Identity,
-) -> Result<ReminderOwned, FetchProfileError> {
+pub async fn fetch_full(cx: super::Context, identity: Identity) -> Result<ReminderOwned> {
     cx.profiles
         .get(&identity)
-        .ok_or(FetchProfileError::NotFound)
+        .ok_or(ChatError::NotFound)
         .map(|p| p.value().to_bytes())
         .map(ReminderOwned)
 }
@@ -121,10 +112,10 @@ pub async fn send_mail(
     cx: super::Context,
     origin: OnlineLocation,
     (for_who, Reminder(mail)): (Identity, Reminder<'_>),
-) -> Result<(), SendMailError> {
+) -> Result<()> {
     let push_mail = || {
-        let mut profile = cx.profiles.get_mut(&for_who).ok_or(SendMailError::NotFound)?;
-        crate::ensure!(profile.mail.len() + mail.len() < MAIL_BOX_CAP, SendMailError::MailboxFull);
+        let mut profile = cx.profiles.get_mut(&for_who).ok_or(ChatError::NotFound)?;
+        crate::ensure!(profile.mail.len() + mail.len() < MAIL_BOX_CAP, ChatError::MailboxFull);
         profile.push_mail(mail);
         Ok(())
     };
@@ -135,26 +126,68 @@ pub async fn send_mail(
 
     match online_in {
         OnlineLocation::Local(p) => {
-            crate::ensure!(OnlineLocation::Local(p) != origin, SendMailError::SendingToSelf);
-            crate::ensure!(
-                !cx.push_profile_event(for_who, mail).await,
-                SendMailError::SentDirectly
-            );
+            crate::ensure!(OnlineLocation::Local(p) != origin, ChatError::SendingToSelf);
+            crate::ensure!(!cx.push_profile_event(for_who, mail).await, ChatError::SentDirectly);
         }
         OnlineLocation::Remote(peer) => 'b: {
             if matches!(origin, OnlineLocation::Remote(_)) {
                 break 'b;
             }
 
-            let resp = cx.send_rpc(for_who, peer, rpcs::SEND_MAIL, (for_who, Reminder(mail))).await;
-            let Some(Ok(())) = <Result<(), SendMailError>>::decode(&mut resp.as_slice()) else {
+            let Ok(resp) =
+                cx.send_rpc(for_who, peer, rpcs::SEND_MAIL, (for_who, Reminder(mail))).await
+            else {
                 break 'b;
             };
 
-            return Err(SendMailError::SentDirectly);
+            let Some(Err(ChatError::SentDirectly)) = <Result<()>>::decode(&mut resp.as_slice())
+            else {
+                break 'b;
+            };
+
+            return Err(ChatError::SentDirectly);
         }
     }
 
     cx.online.remove(&for_who);
     push_mail()
+}
+
+pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
+    let mut profiles = cx.replicate_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity).await;
+    let mut latest_profile = None::<Profile>;
+    while let Some((peer, Ok(resp))) = profiles.next().await {
+        let Some(Ok(profile)) = Result::<BorrowedProfile>::decode(&mut resp.as_slice()) else {
+            log::warn!("invalid profile encoding from {:?}", peer);
+            continue;
+        };
+
+        if crypto::hash::from_slice(&profile.sign) != identity {
+            log::warn!("invalid profile identity form {:?}", peer);
+            continue;
+        }
+
+        if !profile.is_valid() {
+            log::warn!("invalid profile signature from {:?}", peer);
+            continue;
+        }
+
+        if let Some(best) = latest_profile.as_ref() {
+            if best.vault_version < profile.vault_version {
+                latest_profile = Some(profile.into());
+            }
+        } else {
+            latest_profile = Some(profile.into());
+        }
+    }
+
+    let Some(profile) = latest_profile else {
+        log::warn!("no valid profile found for {:?}", identity);
+        // we keep convention of not found errors being the first variant
+        return Err(ChatError::NotFound);
+    };
+
+    cx.profiles.insert(identity, profile);
+
+    Ok(())
 }

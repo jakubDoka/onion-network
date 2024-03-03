@@ -16,8 +16,8 @@ use {
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
-    chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, REPLICATION_FACTOR},
-    component_utils::{Codec, LinearMap, Reminder},
+    chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR},
+    component_utils::{Codec, LinearMap, Reminder, ReminderOwned},
     crypto::{enc, sign, TransmutationCircle},
     dashmap::DashMap,
     dht::Route,
@@ -118,8 +118,17 @@ config::env_config! {
 }
 
 enum RpcRespChannel {
-    Oneshot(oneshot::Sender<Vec<u8>>),
-    Mpsc(mpsc::Sender<(PeerId, Vec<u8>)>),
+    Oneshot(oneshot::Sender<rpc::Result<Vec<u8>>>),
+    Mpsc(mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>),
+}
+
+impl RpcRespChannel {
+    fn send(self, peer: PeerId, msg: rpc::Result<Vec<u8>>) {
+        match self {
+            Self::Oneshot(s) => _ = s.send(msg),
+            Self::Mpsc(mut s) => _ = s.try_send((peer, msg)),
+        }
+    }
 }
 
 struct Server {
@@ -128,7 +137,7 @@ struct Server {
     request_events: mpsc::Receiver<RequestEvent>,
     clients: futures::stream::SelectAll<Stream>,
     client_router: handlers::Router,
-    _server_router: handlers::Router,
+    server_router: handlers::Router,
     stake_events: StakeEvents,
     pending_rpcs: HashMap<CallId, RpcRespChannel>,
 }
@@ -312,23 +321,23 @@ impl Server {
             stake_events,
             client_router: handlers::router!(
                 chat::{
-                    rpcs::CREATE_CHAT => create.restore().repl();
-                    rpcs::ADD_MEMBER => add_member.restore().repl();
-                    rpcs::SEND_MESSAGE => send_message.restore().repl();
+                    rpcs::CREATE_CHAT => create.repl();
+                    rpcs::ADD_MEMBER => add_member.repl().restore();
+                    rpcs::SEND_MESSAGE => send_message.repl().restore();
                     rpcs::FETCH_MESSAGES => fetch_messages.restore();
                 };
                 profile::{
-                    rpcs::CREATE_PROFILE => create.restore().repl();
-                    rpcs::SEND_MAIL => send_mail.restore().repl();
-                    rpcs::READ_MAIL => read_mail.restore().repl();
-                    rpcs::SET_VAULT => set_vault.restore().repl();
+                    rpcs::CREATE_PROFILE => create.repl();
+                    rpcs::SEND_MAIL => send_mail.repl().restore();
+                    rpcs::READ_MAIL => read_mail.repl().restore();
+                    rpcs::SET_VAULT => set_vault.repl().restore();
                     rpcs::FETCH_PROFILE => fetch_keys.restore();
                     rpcs::FETCH_VAULT => fetch_vault.restore();
                 };
             ),
-            _server_router: handlers::router!(
+            server_router: handlers::router!(
                 chat::{
-                    rpcs::CREATE_CHAT => create.restore();
+                    rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
                     rpcs::SEND_MESSAGE => send_message.restore();
                     rpcs::BLOCK_PROPOSAL => propose_msg_block;
@@ -336,6 +345,7 @@ impl Server {
                     rpcs::FETCH_MINIMAL_CHAT_DATA => fetch_minimal_chat_data;
                 };
                 profile::{
+                    rpcs::CREATE_PROFILE => create;
                     rpcs::SEND_MAIL => send_mail.restore();
                     rpcs::READ_MAIL => read_mail.restore();
                     rpcs::SET_VAULT => set_vault.restore();
@@ -367,7 +377,33 @@ impl Server {
     fn handle_event(&mut self, event: SE) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Request(peer, id, body))) => {
-                todo!()
+                let Some((prefix, topic, body)) =
+                    <(u8, PossibleTopic, Reminder)>::decode(&mut body.as_slice())
+                else {
+                    log::warn!("received invalid internal rpc request");
+                    return;
+                };
+
+                let Some(we_have_the_topic) = self.validate_topic(Some(topic)) else {
+                    log::warn!("received request with invalid topic: {:?}", topic);
+                    return;
+                };
+
+                let request = Request { prefix, id, topic: Some(topic), body };
+
+                self.server_router.handle(request, handlers::State {
+                    swarm: &mut self.swarm,
+                    location: OnlineLocation::Remote(peer),
+                    context: self.context,
+                    missing_topic: !we_have_the_topic,
+                });
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Response(peer, id, body))) => {
+                let Some(resp) = self.pending_rpcs.remove(&id) else {
+                    log::warn!("received response to unknown rpc");
+                    return;
+                };
+                resp.send(peer, body);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Onion(onion::Event::InboundStream(
                 inner,
@@ -375,7 +411,7 @@ impl Server {
             ))) => {
                 self.clients.push(Stream::new(id, inner));
             }
-            SwarmEvent::Behaviour(ev) => {
+            SwarmEvent::Behaviour(_ev) => {
                 todo!()
             }
             e => log::debug!("{e:?}"),
@@ -412,6 +448,7 @@ impl Server {
                 PossibleTopic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
                 PossibleTopic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
             }
+            _ = client.inner.write((req.id, ()));
         } else {
             self.client_router.handle(req, handlers::State {
                 swarm: &mut self.swarm,
@@ -488,14 +525,19 @@ impl Server {
         }
     }
 
-    fn handle_router_response(&mut self, client: PathId, id: CallId, res: handlers::Response) {
+    fn handle_client_router_response(
+        &mut self,
+        client: PathId,
+        id: CallId,
+        res: handlers::Response,
+    ) {
         match res {
             handlers::Response::Success(pl) | handlers::Response::Failure(pl) => {
                 let Some(client) = self.clients.iter_mut().find(|c| c.id == client) else {
                     log::warn!("client did not wait for respnse");
                     return;
                 };
-                if client.inner.write((id, pl)).is_none() {
+                if client.inner.write((id, ReminderOwned(pl))).is_none() {
                     log::warn!("client cant keep up with own requests");
                     client.inner.close();
                 };
@@ -528,7 +570,7 @@ impl Server {
             return;
         };
 
-        if client.inner.write((id, event)).is_none() {
+        if client.inner.write((id, ReminderOwned(event))).is_none() {
             return;
         }
 
@@ -536,24 +578,65 @@ impl Server {
     }
 
     fn handle_rpc(
-        &self,
-        topic: PossibleTopic,
+        &mut self,
         peer: PeerId,
-        prefix: u8,
         msg: Vec<u8>,
-        resp: Option<oneshot::Sender<Vec<u8>>>,
+        resp: Option<oneshot::Sender<rpc::Result<Vec<u8>>>>,
     ) {
-        todo!()
+        let call_id = match self.swarm.behaviour_mut().rpc.request(peer, msg.as_slice()) {
+            Ok(call_id) => call_id,
+            Err(e) => {
+                if let Some(resp) = resp {
+                    _ = resp.send(Err(e));
+                }
+                return;
+            }
+        };
+
+        if let Some(resp) = resp {
+            self.pending_rpcs.insert(call_id, RpcRespChannel::Oneshot(resp));
+        }
     }
 
     fn handle_repl_rpc(
-        &self,
+        &mut self,
         topic: PossibleTopic,
-        prefix: u8,
         msg: Vec<u8>,
-        resp: Option<mpsc::Sender<(PeerId, Vec<u8>)>>,
+        mut resp: Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>,
     ) {
-        todo!()
+        let us = *self.swarm.local_peer_id();
+        let beh = self.swarm.behaviour_mut();
+        for peer in beh
+            .dht
+            .table
+            .closest(topic.as_bytes())
+            .take(REPLICATION_FACTOR.get() + 1)
+            .map(Route::peer_id)
+            .filter(|p| *p != us)
+        {
+            let call_id = match beh.rpc.request(peer, msg.as_slice()) {
+                Ok(call_id) => call_id,
+                Err(e) => {
+                    if let Some(resp) = &mut resp {
+                        _ = resp.try_send((peer, Err(e)));
+                    }
+                    continue;
+                }
+            };
+
+            if let Some(resp) = &resp {
+                self.pending_rpcs.insert(call_id, RpcRespChannel::Mpsc(resp.clone()));
+            }
+        }
+    }
+
+    fn handle_server_router_response(&mut self, peer: PeerId, id: CallId, res: handlers::Response) {
+        match res {
+            handlers::Response::Success(b) | handlers::Response::Failure(b) => {
+                self.swarm.behaviour_mut().rpc.respond(peer, id, b)
+            }
+            handlers::Response::DontRespond => {}
+        };
     }
 }
 
@@ -564,7 +647,7 @@ impl Future for Server {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
-        let mut did_something = false;
+        let mut did_something = true;
         while std::mem::take(&mut did_something) {
             while let Poll::Ready(Some((id, m))) = self.clients.poll_next_unpin(cx) {
                 self.handle_client_message(id, m);
@@ -584,7 +667,14 @@ impl Future for Server {
             while let Poll::Ready((res, OnlineLocation::Local(peer), id)) =
                 self.client_router.poll(cx)
             {
-                self.handle_router_response(peer, id, res);
+                self.handle_client_router_response(peer, id, res);
+                did_something = true;
+            }
+
+            while let Poll::Ready((res, OnlineLocation::Remote(peer), id)) =
+                self.server_router.poll(cx)
+            {
+                self.handle_server_router_response(peer, id, res);
                 did_something = true;
             }
 
@@ -594,11 +684,9 @@ impl Future for Server {
                         self.handle_profile_event(identity, event, resp)
                     }
                     RequestEvent::Chat(topic, event) => self.handle_chat_event(topic, event),
-                    RequestEvent::Rpc(topic, peer, prefix, msg, resp) => {
-                        self.handle_rpc(topic, peer, prefix, msg, resp)
-                    }
-                    RequestEvent::ReplRpc(topic, prefix, msg, resp) => {
-                        self.handle_repl_rpc(topic, prefix, msg, resp)
+                    RequestEvent::Rpc(peer, msg, resp) => self.handle_rpc(peer, msg, resp),
+                    RequestEvent::ReplRpc(topic, msg, resp) => {
+                        self.handle_repl_rpc(topic, msg, resp)
                     }
                 }
                 did_something = true;
@@ -697,8 +785,8 @@ pub enum OnlineLocation {
 enum RequestEvent {
     Profile(Identity, Vec<u8>, oneshot::Sender<()>),
     Chat(ChatName, Vec<u8>),
-    Rpc(PossibleTopic, PeerId, u8, Vec<u8>, Option<oneshot::Sender<Vec<u8>>>),
-    ReplRpc(PossibleTopic, u8, Vec<u8>, Option<mpsc::Sender<(PeerId, Vec<u8>)>>),
+    Rpc(PeerId, Vec<u8>, Option<oneshot::Sender<rpc::Result<Vec<u8>>>>),
+    ReplRpc(PossibleTopic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
 }
 
 pub struct OwnedContext {
@@ -706,6 +794,10 @@ pub struct OwnedContext {
     online: DashMap<Identity, OnlineLocation>,
     chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
     request_event_sink: mpsc::Sender<RequestEvent>,
+}
+
+fn rpc<'a>(prefix: u8, topic: impl Into<PossibleTopic>, msg: impl Codec<'a>) -> Vec<u8> {
+    (prefix, topic.into(), msg).to_bytes()
 }
 
 impl OwnedContext {
@@ -729,10 +821,11 @@ impl OwnedContext {
         prefix: u8,
         msg: impl Codec<'a>,
     ) {
+        let topic = topic.into();
         _ = self
             .request_event_sink
             .clone()
-            .send(RequestEvent::ReplRpc(topic.into(), prefix, msg.to_bytes(), None))
+            .send(RequestEvent::ReplRpc(topic, rpc(prefix, topic, msg), None))
             .await;
     }
 
@@ -743,10 +836,11 @@ impl OwnedContext {
         prefix: u8,
         msg: impl Codec<'a>,
     ) {
+        let topic = topic.into();
         _ = self
             .request_event_sink
             .clone()
-            .send(RequestEvent::Rpc(topic.into(), dest, prefix, msg.to_bytes(), None))
+            .send(RequestEvent::Rpc(dest, rpc(prefix, topic, msg), None))
             .await;
     }
 
@@ -754,13 +848,14 @@ impl OwnedContext {
         &self,
         topic: impl Into<PossibleTopic>,
         prefix: u8,
-        req: impl Codec<'a>,
-    ) -> impl futures::Stream<Item = (PeerId, Vec<u8>)> {
-        let (sender, recv) = mpsc::channel(REPLICATION_FACTOR.get() as usize);
+        msg: impl Codec<'a>,
+    ) -> impl futures::Stream<Item = (PeerId, rpc::Result<Vec<u8>>)> {
+        let topic = topic.into();
+        let (sender, recv) = mpsc::channel(REPLICATION_FACTOR.get());
         _ = self
             .request_event_sink
             .clone()
-            .send(RequestEvent::ReplRpc(topic.into(), prefix, req.to_bytes(), Some(sender)))
+            .send(RequestEvent::ReplRpc(topic, rpc(prefix, topic, msg), Some(sender)))
             .await;
         recv
     }
@@ -771,13 +866,14 @@ impl OwnedContext {
         peer: PeerId,
         send_mail: u8,
         mail: impl Codec<'a>,
-    ) -> Vec<u8> {
+    ) -> rpc::Result<Vec<u8>> {
+        let topic = topic.into();
         let (sender, recv) = oneshot::channel();
         _ = self
             .request_event_sink
             .clone()
-            .send(RequestEvent::Rpc(topic.into(), peer, send_mail, mail.to_bytes(), Some(sender)))
+            .send(RequestEvent::Rpc(peer, rpc(send_mail, topic, mail), Some(sender)))
             .await;
-        recv.await.unwrap_or_default()
+        recv.await.unwrap_or(Err(rpc::Error::Timeout.into()))
     }
 }

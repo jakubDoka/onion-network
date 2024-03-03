@@ -1,9 +1,7 @@
 use {
     chat_spec::{
-        advance_nonce, retain_messages_in_vec, rpcs, unpack_messages_ref, AddMemberError,
-        BlockNumber, ChatEvent, ChatName, CreateChatError, Cursor, FetchMessagesError,
-        FetchMinimalChatData, Identity, Member, Message, Proof, SendBlockError, SendMessageError,
-        REPLICATION_FACTOR,
+        advance_nonce, retain_messages_in_vec, rpcs, unpack_messages_ref, BlockNumber, ChatError,
+        ChatEvent, ChatName, Cursor, Identity, Member, Message, Proof, REPLICATION_FACTOR,
     },
     component_utils::{encode_len, Buffer, NoCapOverflow, Reminder},
     std::{
@@ -19,14 +17,13 @@ const MESSAGE_FETCH_LIMIT: usize = 20;
 const BLOCK_SIZE: usize = if cfg!(test) { 1024 * 4 } else { 1024 * 32 };
 const BLOCK_HISTORY: usize = 32;
 
-pub async fn create(
-    cx: crate::Context,
-    (name, identity): (ChatName, Identity),
-) -> Result<(), CreateChatError> {
+type Result<T, E = ChatError> = std::result::Result<T, E>;
+
+pub async fn create(cx: crate::Context, (name, identity): (ChatName, Identity)) -> Result<()> {
     let chat_entry = cx.chats.entry(name);
     crate::ensure!(
         let dashmap::mapref::entry::Entry::Vacant(entry) = chat_entry,
-        CreateChatError::AlreadyExists
+        ChatError::AlreadyExists
     );
 
     entry.insert(Arc::new(RwLock::new(Chat::new(identity))));
@@ -36,24 +33,24 @@ pub async fn create(
 
 pub async fn add_member(
     cx: crate::Context,
-    (proof, name, identity): (Proof<Identity>, ChatName, Identity),
-) -> Result<(), AddMemberError> {
-    let chat = cx.chats.get(&name).ok_or(AddMemberError::ChatNotFound)?.clone();
+    (proof, identity): (Proof<ChatName>, Identity),
+) -> Result<()> {
+    let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
     let mut chat = chat.write().await;
 
-    crate::ensure!(proof.verify(), AddMemberError::InvalidProof);
+    crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let sender_id = crypto::hash::from_raw(&proof.pk);
-    let sender = chat.members.get_mut(&sender_id).ok_or(AddMemberError::NotMember)?;
+    let sender = chat.members.get_mut(&sender_id).ok_or(ChatError::NotMember)?;
 
     crate::ensure!(
         advance_nonce(&mut sender.action, proof.nonce),
-        AddMemberError::InvalidAction(sender.action)
+        ChatError::InvalidChatAction(sender.action)
     );
 
     crate::ensure!(
         chat.members.try_insert(identity, Member::default()).is_ok(),
-        AddMemberError::AlreadyMember
+        ChatError::AlreadyMember
     );
 
     Ok(())
@@ -62,22 +59,22 @@ pub async fn add_member(
 pub async fn send_message(
     cx: crate::Context,
     (proof, Reminder(msg)): (Proof<ChatName>, Reminder<'_>),
-) -> Result<(), SendMessageError> {
-    let chat = cx.chats.get(&proof.context).ok_or(SendMessageError::ChatNotFound)?.clone();
+) -> Result<()> {
+    let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
     let mut chat = chat.write().await;
 
-    crate::ensure!(proof.verify(), SendMessageError::InvalidProof);
+    crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let sender_id = crypto::hash::from_raw(&proof.pk);
     let bn = chat.number;
-    let sender = chat.members.get_mut(&sender_id).ok_or(SendMessageError::NotMember)?;
+    let sender = chat.members.get_mut(&sender_id).ok_or(ChatError::NotMember)?;
 
     crate::ensure!(
         advance_nonce(&mut sender.action, proof.nonce),
-        SendMessageError::InvalidAction(sender.action)
+        ChatError::InvalidChatAction(sender.action)
     );
 
-    crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, SendMessageError::MessageTooLarge);
+    crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatError::MessageTooLarge);
 
     let message = Message { identiy: sender_id, nonce: sender.action - 1, content: Reminder(msg) };
     let push_res = { chat }.push_message(message, &mut vec![]);
@@ -90,7 +87,7 @@ pub async fn send_message(
             )
             .await;
         }
-        Err(None) => return Err(SendMessageError::MessageBlockNotFinalized),
+        Err(None) => return Err(ChatError::MessageBlockNotFinalized),
         Ok(()) => (),
     }
 
@@ -118,22 +115,31 @@ pub async fn propose_msg_block(
 
         let our_finalized = chat.last_finalized_block();
         match number.cmp(&our_finalized) {
-            std::cmp::Ordering::Less if our_finalized - number <= 1 => {
-                if let Some(block) = chat.finalized.front() {
-                    if block.hash == phash {
-                        return;
-                    }
+            std::cmp::Ordering::Less => {
+                let block_index = our_finalized - number - 1;
 
-                    cx.send_rpc_no_resp(
-                        chat_name,
-                        repl[index],
-                        rpcs::SEND_BLOCK,
-                        (chat_name, number, Reminder(block.data.as_ref())),
-                    );
+                if let Some(block) = chat.finalized.get(block_index as usize)
+                    && block.hash == phash
+                {
                     return;
-                }
+                };
+
+                let (block, number) = chat
+                    .finalized
+                    .get(block_index as usize)
+                    .or(chat.finalized.back())
+                    .map(|b| (b.data.as_ref(), number))
+                    .unwrap_or_else(|| (chat.current_block.as_ref(), our_finalized));
+
+                cx.send_rpc_no_resp(
+                    chat_name,
+                    origin,
+                    rpcs::SEND_BLOCK,
+                    (chat_name, number, Reminder(block)),
+                )
+                .await;
+                return;
             }
-            std::cmp::Ordering::Less => todo!("sender needs more complex data recovery"),
             std::cmp::Ordering::Equal => {}
             std::cmp::Ordering::Greater if number - our_finalized <= 1 => {}
             std::cmp::Ordering::Greater => todo!("we are behind, so I guess just wait for blocks"),
@@ -172,14 +178,14 @@ pub async fn send_block(
     origin: super::Origin,
     repl: super::ReplGroup,
     (chat, number, Reminder(block)): (ChatName, BlockNumber, Reminder<'_>),
-) -> Result<(), SendBlockError> {
-    use {chat_spec::InvalidBlockReason::*, SendBlockError::*};
+) -> Result<()> {
+    use {chat_spec::InvalidBlockReason::*, ChatError::*};
 
     let Some(index) = repl.iter().position(|id| *id == origin) else {
         return Err(NoReplicator);
     };
 
-    let chat = cx.chats.get(&chat).ok_or(ChatNotFound)?.clone();
+    let chat = cx.chats.get(&chat).ok_or(NotFound)?.clone();
     let mut chat = chat.write().await;
 
     crate::ensure!(chat.last_finalized_block() == number, InvalidBlock(Outdated));
@@ -221,8 +227,8 @@ pub async fn send_block(
 pub async fn fetch_minimal_chat_data(
     cx: crate::Context,
     chat: ChatName,
-) -> Result<(BlockNumber, HashMap<Identity, Member>, Vec<u8>), FetchMinimalChatData> {
-    let chat = cx.chats.get(&chat).ok_or(FetchMinimalChatData::ChatNotFound)?;
+) -> Result<(BlockNumber, HashMap<Identity, Member>, Vec<u8>)> {
+    let chat = cx.chats.get(&chat).ok_or(ChatError::NotFound)?;
     let chat = chat.read().await;
 
     Ok((chat.number, chat.members.clone(), chat.current_block.clone()))
@@ -231,8 +237,8 @@ pub async fn fetch_minimal_chat_data(
 pub async fn fetch_messages(
     cx: crate::Context,
     (chat, mut cursor): (ChatName, Cursor),
-) -> Result<(Cursor, Vec<u8>), FetchMessagesError> {
-    let chat = cx.chats.get(&chat).ok_or(FetchMessagesError::ChatNotFound)?.clone();
+) -> Result<(Cursor, Vec<u8>)> {
+    let chat = cx.chats.get(&chat).ok_or(ChatError::NotFound)?.clone();
     let chat = chat.read().await;
 
     if cursor == Cursor::INIT {
@@ -391,4 +397,8 @@ impl Chat {
                 BlockStage::Unfinalized { proposed: Some(_), .. } | BlockStage::Recovering { .. }
             ))
     }
+}
+
+pub async fn recover(cx: crate::Context, name: ChatName) -> Result<()> {
+    todo!("recover chat")
 }

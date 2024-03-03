@@ -52,16 +52,48 @@ pub use {
     rpc::CallId,
 };
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error, Codec)]
-pub enum ReplError<T> {
-    #[error("no majority")]
-    NoMajority,
-    #[error("invalid response from majority")]
-    InvalidResponse,
-    #[error("invalid topic")]
-    InvalidTopic,
-    #[error(transparent)]
-    Inner(T),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
+pub enum ChatError {
+    #[error("account not found")]
+    NotFound,
+    #[error("invalid proof")]
+    InvalidProof,
+    #[error("account already exists")]
+    AlreadyExists,
+    #[error("invalid action")]
+    InvalidAction,
+    #[error("sent directly")]
+    SentDirectly,
+    #[error("sending to self is not allowed")]
+    SendingToSelf,
+    #[error("mailbox full (limit: {MAIL_BOX_CAP})")]
+    MailboxFull,
+    #[error("you are not a member")]
+    NotMember,
+    #[error("user already exists")]
+    AlreadyMember,
+    #[error("invalid action, expected nonce higher then {0}")]
+    InvalidChatAction(Nonce),
+    #[error("message too large")]
+    MessageTooLarge,
+    #[error("latest message block is still being finalized")]
+    MessageBlockNotFinalized,
+    #[error("no blocks even though past block was proposed")]
+    NoBlocks,
+    #[error("The sending node is not among replicators")]
+    NoReplicator,
+    #[error("invalid block: {0}")]
+    InvalidBlock(InvalidBlockReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
+pub enum InvalidBlockReason {
+    #[error("does not match majority")]
+    MajorityMismatch,
+    #[error("is uotdated for us")]
+    Outdated,
+    #[error("not expected at this point")]
+    NotExpected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Codec)]

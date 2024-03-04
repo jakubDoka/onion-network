@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 #[ink::contract]
+#[allow(non_local_definitions)]
 mod user_manager {
     pub const USER_NAME_CAP: usize = 32;
     pub type RawUserName = [u8; USER_NAME_CAP];

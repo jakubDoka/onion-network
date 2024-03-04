@@ -2,14 +2,14 @@
 
 use {
     chain_types::{
-        futures, node_staker,
+        node_staker,
         polkadot::{
             self,
             contracts::calls::types::Call,
             runtime_types::{sp_runtime::DispatchError, sp_weights::weight_v2::Weight},
         },
         runtime_types::pallet_contracts::primitives::{ContractResult, ExecReturnValue},
-        subxt, subxt_signer, user_manager, Hash, InkMessage,
+        user_manager, Hash, InkMessage,
     },
     futures::{StreamExt, TryFutureExt, TryStreamExt},
     parity_scale_codec::{Decode, Encode as _},

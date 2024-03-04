@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
 
 pub struct Satelite {
     swarm: libp2p::Swarm<Behaviour>,
-    db: Storage,
+    _db: Storage,
 }
 
 impl Satelite {
@@ -45,7 +45,7 @@ impl Satelite {
             })
             .build();
 
-        Ok(Self { swarm, db: store })
+        Ok(Self { swarm, _db: store })
     }
 
     async fn run(&mut self) -> ! {

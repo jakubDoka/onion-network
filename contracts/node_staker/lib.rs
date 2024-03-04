@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 #[ink::contract]
+#[allow(non_local_definitions)]
 #[allow(clippy::module_name_repetitions)]
 mod node_staker {
     use ink::prelude::vec::Vec;

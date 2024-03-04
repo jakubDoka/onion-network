@@ -7,9 +7,15 @@ use {
 
 pub const CHAT_NAME_CAP: usize = 32;
 
-#[derive(Codec, Default, Clone)]
+#[derive(Codec, Default, Clone, Copy)]
 pub struct Member {
     pub action: Nonce,
+}
+
+impl Member {
+    pub fn max(self, other: Self) -> Self {
+        Self { action: self.action.max(other.action) }
+    }
 }
 
 #[derive(Clone, Copy, Codec)]

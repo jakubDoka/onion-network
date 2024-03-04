@@ -7,7 +7,7 @@ use {
 
 pub type Nonce = u64;
 
-#[derive(Clone, Copy, Codec)]
+#[derive(Clone, Copy, Codec, Debug)]
 pub struct Proof<T> {
     pub pk: Serialized<sign::PublicKey>,
     pub nonce: Nonce,

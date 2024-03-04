@@ -182,7 +182,7 @@ impl NoCapOverflow {
 
 impl Buffer for NoCapOverflow {
     fn extend_from_slice(&mut self, slice: &[u8]) -> Option<()> {
-        if self.vec.len() + slice.len() > self.vec.capacity() {
+        if self.vec.len() + slice.len() + 2 > self.vec.capacity() {
             return None;
         }
         self.vec.extend_from_slice(slice);
@@ -190,7 +190,7 @@ impl Buffer for NoCapOverflow {
     }
 
     fn push(&mut self, byte: u8) -> Option<()> {
-        if self.vec.len() == self.vec.capacity() {
+        if self.vec.len() + 2 == self.vec.capacity() {
             return None;
         }
         self.vec.push(byte);

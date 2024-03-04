@@ -102,7 +102,7 @@ impl Stream {
 pub struct Behaviour {
     config: Config,
     streams: SelectAll<Stream>,
-    pending_requests: Vec<(PeerId, CallId, Vec<u8>)>,
+    pending_requests: Vec<(PeerId, CallId, Vec<u8>, bool)>,
     ongoing_requests: Vec<(CallId, PeerId)>,
     pending_repsonses: Vec<(PeerId, CallId, Vec<u8>)>,
     events: Vec<Event>,
@@ -124,19 +124,24 @@ impl Behaviour {
         &mut self,
         peer: PeerId,
         packet: impl AsRef<[u8]> + Into<Vec<u8>>,
+        ignore_resonse: bool,
     ) -> Result<CallId> {
         let call = CallId::new();
         if let Some(stream) = self.streams.iter_mut().find(|s| s.peer == peer) {
-            self.ongoing_requests.push((call, peer));
+            if !ignore_resonse {
+                self.ongoing_requests.push((call, peer));
+            }
             stream
                 .write(call, packet.as_ref(), true)
                 .map_err(streaming::Error::Io)
                 .map_err(Arc::new)?;
         } else if !self.streaming.is_resolving_stream_for(peer) {
             self.streaming.create_stream(peer);
-            self.pending_requests.push((peer, call, packet.into()));
+            self.pending_requests.push((peer, call, packet.into(), ignore_resonse));
         }
-        self.timeouts.enqueue(call, std::time::Instant::now() + self.config.request_timeout);
+        if ignore_resonse {
+            self.timeouts.enqueue(call, std::time::Instant::now() + self.config.request_timeout);
+        }
         Ok(call)
     }
 
@@ -265,7 +270,7 @@ impl NetworkBehaviour for Behaviour {
                 | streaming::Event::OutgoingStream(p, Ok(s)) => {
                     let mut stream = Stream::new(p, s, self.config.buffer_size);
 
-                    for (peer, call, payload) in
+                    for (peer, call, payload, ignore_response) in
                         self.pending_requests.extract_if(|(op, ..)| *op == p)
                     {
                         if let Err(err) = stream.write(call, &payload, true) {
@@ -274,7 +279,7 @@ impl NetworkBehaviour for Behaviour {
                                 call,
                                 Err(StreamUpgradeError::Io(err).into()),
                             ));
-                        } else {
+                        } else if !ignore_response {
                             self.ongoing_requests.push((call, peer));
                         }
                     }
@@ -405,7 +410,7 @@ mod test {
         super::*,
         dht::Route,
         libp2p::{
-            futures::{stream::FuturesUnordered, StreamExt},
+            futures::stream::FuturesUnordered,
             identity::{Keypair, PublicKey},
             multiaddr::Protocol,
             Multiaddr, Transport,
@@ -472,7 +477,7 @@ mod test {
             while total_requests < 30000 {
                 if max_pending_requests > pending_request_count {
                     let peer_id = all_peers[iteration % all_peers.len()];
-                    swarm.behaviour_mut().rpc.request(peer_id, [0, 0]).unwrap();
+                    swarm.behaviour_mut().rpc.request(peer_id, [0, 0], false).unwrap();
                     pending_request_count += 1;
                     total_requests += 1;
                 }

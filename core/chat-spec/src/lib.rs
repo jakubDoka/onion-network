@@ -30,7 +30,7 @@ pub mod rpcs {
         ADD_MEMBER;
         SEND_MESSAGE;
         BLOCK_PROPOSAL;
-        SEND_BLOCK;
+        MAJOR_BLOCK;
         FETCH_MINIMAL_CHAT_DATA;
         FETCH_MESSAGES;
         SUBSCRIBE;
@@ -84,6 +84,8 @@ pub enum ChatError {
     NoReplicator,
     #[error("invalid block: {0}")]
     InvalidBlock(InvalidBlockReason),
+    #[error("no majority to confirm the request")]
+    NoMajority,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
@@ -140,7 +142,7 @@ pub struct Request<'a> {
     pub body: Reminder<'a>,
 }
 
-#[derive(Clone, Copy, Codec)]
+#[derive(Clone, Copy, Codec, Debug)]
 pub struct Mail;
 
 impl ToProofContext for Mail {

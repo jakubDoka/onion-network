@@ -19,7 +19,7 @@ use {
     chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR},
     component_utils::{Codec, LinearMap, Reminder, ReminderOwned},
     crypto::{enc, sign, TransmutationCircle},
-    dashmap::DashMap,
+    dashmap::{DashMap, DashSet},
     dht::Route,
     futures::channel::mpsc,
     libp2p::{
@@ -39,7 +39,6 @@ use {
         future::Future,
         io,
         net::{IpAddr, Ipv4Addr},
-        ops::DerefMut,
         sync::Arc,
         task::Poll,
         time::Duration,
@@ -103,6 +102,7 @@ config::env_config! {
         key_path: String,
         boot_nodes: config::List<Multiaddr>,
         idle_timeout: u64,
+        rpc_timeout: u64,
     }
 }
 
@@ -241,7 +241,12 @@ impl Server {
                 sender.clone(),
             ),
             dht: dht::Behaviour::new(filter_incoming),
-            rpc: topology_wrapper::new(rpc::Behaviour::default(), sender.clone()),
+            rpc: topology_wrapper::new(
+                rpc::Behaviour::new(
+                    rpc::Config::new().request_timeout(Duration::from_millis(config.rpc_timeout)),
+                ),
+                sender.clone(),
+            ),
             report: topology_wrapper::report::new(receiver),
         };
         let transport = libp2p::websocket::WsConfig::new(libp2p::tcp::tokio::Transport::new(
@@ -314,6 +319,7 @@ impl Server {
                 profiles: Default::default(),
                 online: Default::default(),
                 chats: Default::default(),
+                recovers: Default::default(),
                 request_event_sink,
             })),
             request_events,
@@ -341,7 +347,7 @@ impl Server {
                     rpcs::ADD_MEMBER => add_member.restore();
                     rpcs::SEND_MESSAGE => send_message.restore();
                     rpcs::BLOCK_PROPOSAL => propose_msg_block;
-                    rpcs::SEND_BLOCK => send_block;
+                    rpcs::MAJOR_BLOCK => receive_block;
                     rpcs::FETCH_MINIMAL_CHAT_DATA => fetch_minimal_chat_data;
                 };
                 profile::{
@@ -400,7 +406,7 @@ impl Server {
             }
             SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Response(peer, id, body))) => {
                 let Some(resp) = self.pending_rpcs.remove(&id) else {
-                    log::warn!("received response to unknown rpc");
+                    log::warn!("received response to unknown rpc {:?} {:?}", id, body);
                     return;
                 };
                 resp.send(peer, body);
@@ -437,7 +443,7 @@ impl Server {
             return;
         };
 
-        log::info!("received message from client: {:?} {:?}", req.id, req.prefix,);
+        log::debug!("received message from client: {:?} {:?}", req.id, req.prefix);
 
         if req.prefix == rpcs::SUBSCRIBE
             && let Some(topic) = req.topic
@@ -476,10 +482,18 @@ impl Server {
             return None;
         }
 
-        Some(match topic {
+        let mut we_have_the_topic = match topic {
             PossibleTopic::Profile(prf) => self.context.profiles.contains_key(&prf),
             PossibleTopic::Chat(chat) => self.context.chats.contains_key(&chat),
-        })
+        };
+
+        if !we_have_the_topic {
+            we_have_the_topic = !self.context.recovers.insert(topic);
+        } else {
+            self.context.recovers.remove(&topic);
+        }
+
+        Some(we_have_the_topic)
     }
 
     fn handle_stake_event(&mut self, event: Result<chain_api::StakeEvent, chain_api::Error>) {
@@ -583,15 +597,16 @@ impl Server {
         msg: Vec<u8>,
         resp: Option<oneshot::Sender<rpc::Result<Vec<u8>>>>,
     ) {
-        let call_id = match self.swarm.behaviour_mut().rpc.request(peer, msg.as_slice()) {
-            Ok(call_id) => call_id,
-            Err(e) => {
-                if let Some(resp) = resp {
-                    _ = resp.send(Err(e));
+        let call_id =
+            match self.swarm.behaviour_mut().rpc.request(peer, msg.as_slice(), resp.is_none()) {
+                Ok(call_id) => call_id,
+                Err(e) => {
+                    if let Some(resp) = resp {
+                        _ = resp.send(Err(e));
+                    }
+                    return;
                 }
-                return;
-            }
-        };
+            };
 
         if let Some(resp) = resp {
             self.pending_rpcs.insert(call_id, RpcRespChannel::Oneshot(resp));
@@ -614,7 +629,7 @@ impl Server {
             .map(Route::peer_id)
             .filter(|p| *p != us)
         {
-            let call_id = match beh.rpc.request(peer, msg.as_slice()) {
+            let call_id = match beh.rpc.request(peer, msg.as_slice(), resp.is_none()) {
                 Ok(call_id) => call_id,
                 Err(e) => {
                     if let Some(resp) = &mut resp {
@@ -793,6 +808,7 @@ pub struct OwnedContext {
     profiles: DashMap<Identity, Profile>,
     online: DashMap<Identity, OnlineLocation>,
     chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
+    recovers: DashSet<PossibleTopic>,
     request_event_sink: mpsc::Sender<RequestEvent>,
 }
 
@@ -815,7 +831,7 @@ impl OwnedContext {
         recv.await.is_ok()
     }
 
-    async fn replicate_rpc_no_resp<'a>(
+    async fn repl_rpc_no_resp<'a>(
         &self,
         topic: impl Into<PossibleTopic>,
         prefix: u8,

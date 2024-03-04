@@ -11,6 +11,7 @@ macro_rules! ensure {
             return Ok(Err($resp));
         };
     };
+
     ($cond:expr, $resp:expr) => {
         if !$cond {
             return Err($resp);
@@ -27,8 +28,7 @@ macro_rules! ensure {
 use {
     crate::{Context, OnlineLocation},
     chat_spec::{
-        rpcs, BorrowedProfile, ChatError, Identity, PossibleTopic, Profile, ReplVec, Request,
-        REPLICATION_FACTOR,
+        ChatError, ChatName, Identity, PossibleTopic, ReplVec, Request, REPLICATION_FACTOR,
     },
     component_utils::{arrayvec::ArrayVec, Codec},
     libp2p::{
@@ -157,6 +157,15 @@ impl FromRequestOwned for Identity {
     }
 }
 
+impl FromRequestOwned for ChatName {
+    fn from_request(req: Request, _: &mut State) -> Option<Self> {
+        match req.topic? {
+            PossibleTopic::Chat(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
 pub struct MissingTopic(pub bool);
 
 impl FromRequestOwned for MissingTopic {
@@ -264,6 +273,12 @@ where
                 let hash = crypto::hash::from_slice(&resp);
 
                 let Some((_, count)) = counter.iter_mut().find(|(h, _)| h == &hash) else {
+                    log::warn!(
+                        "unexpected response from {:?} {:?} {:?}",
+                        std::any::type_name::<<H::Future as Future>::Output>(),
+                        Result::<(), ChatError>::decode(&mut resp.as_slice()),
+                        resp,
+                    );
                     counter.push((hash, 1));
                     continue;
                 };
@@ -273,11 +288,13 @@ where
                     if hash != crypto::hash::from_slice(&bytes) {
                         todo!("for some reason we have different opinion, this should initiate recovery");
                     }
+
+                    //while repl.next().await.is_some() {}
                     return Response::Success(resp);
                 }
             }
 
-            Response::Success(bytes)
+            Err::<(), _>(ChatError::NoMajority).into_response()
         }
     }
 }

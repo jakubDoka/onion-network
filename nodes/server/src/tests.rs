@@ -1,9 +1,8 @@
 use {
     super::*,
-    chat_spec::{Proof, *},
+    chat_spec::*,
     component_utils::crypto::ToProofContext,
-    libp2p::futures::{channel::mpsc, stream::FuturesUnordered, FutureExt},
-    rand_core::OsRng,
+    libp2p::futures::{stream::FuturesUnordered, FutureExt},
     std::{fmt::Debug, usize},
 };
 
@@ -165,7 +164,6 @@ async fn message_block_finalization() {
     const MULTIPLIER: usize = 1;
 
     for i in 0..12 * MULTIPLIER {
-        println!("ij: {}", i);
         let cons = [i as u8; MESSAGE_SIZE / MULTIPLIER];
         stream1
             .test_req_simple(
@@ -185,13 +183,6 @@ async fn message_block_finalization() {
     let topic = Some(PossibleTopic::Chat(chat));
 
     for i in 0..6 * MULTIPLIER {
-        // futures::future::select(
-        //     nodes.next(),
-        //     std::pin::pin!(tokio::time::sleep(Duration::from_millis(10))),
-        // )
-        // .await;
-
-        println!("ik: {}", i);
         let msg = [i as u8; MESSAGE_SIZE / MULTIPLIER];
         let body = (user.proof(chat), Reminder(&msg));
         stream1.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
@@ -221,80 +212,82 @@ async fn message_block_finalization() {
         .await;
 }
 
-//#[tokio::test]
-//async fn _foo() {
-//    _ = env_logger::builder().is_test(true).try_init();
-//
-//    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1);
-//
-//    let mut user = Account::new();
-//    let mut user2 = Account::new();
-//    let [mut stream1, used] = Stream::new_test();
-//    let [mut stream2, used2] = Stream::new_test();
-//
-//    nodes.iter_mut().next().unwrap().clients.push(used);
-//    nodes.iter_mut().last().unwrap().clients.push(used2);
-//    stream1.create_user(&mut nodes, &mut user).await;
-//    stream2.create_user(&mut nodes, &mut user2).await;
-//
-//    let chat = ChatName::from("foo").unwrap();
-//
-//    stream1.test_req::<CreateChat>(&mut nodes, (chat, user.identity()), Ok(())).await;
-//    stream1
-//        .test_req::<PerformChatAction>(
-//            &mut nodes,
-//            (user.proof(chat), ChatAction::AddUser(user2.identity())),
-//            Ok(()),
-//        )
-//        .await;
-//
-//    const MESSAGE_SIZE: usize = 900;
-//    const MULTIPLIER: usize = 1;
-//
-//    for i in 0..12 * MULTIPLIER {
-//        let cons = [i as u8; MESSAGE_SIZE / MULTIPLIER];
-//        stream1
-//            .test_req::<PerformChatAction>(
-//                &mut nodes,
-//                (user.proof(chat), ChatAction::SendMessage(Reminder(&cons))),
-//                Ok(()),
-//            )
-//            .await;
-//    }
-//
-//    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().number == 2);
-//
-//    for i in 0..6 * MULTIPLIER {
-//        // futures::future::select(
-//        //     nodes.next(),
-//        //     std::pin::pin!(tokio::time::sleep(Duration::from_millis(10))),
-//        // )
-//        // .await;
-//
-//        let msg = [i as u8; MESSAGE_SIZE / MULTIPLIER];
-//        let body = (user.proof(chat), ChatAction::SendMessage(Reminder(&msg)));
-//        stream1.inner.write(PerformChatAction::rpc_id(CallId::whatever(), body)).unwrap();
-//        let msg = [i as u8 * 2; MESSAGE_SIZE / MULTIPLIER];
-//        let body = (user2.proof(chat), ChatAction::SendMessage(Reminder(&msg)));
-//        stream2.inner.write(PerformChatAction::rpc_id(CallId::whatever(), body)).unwrap();
-//
-//        response::<PerformChatAction>(&mut nodes, &mut stream1, 1000, Ok(())).await;
-//        response::<PerformChatAction>(&mut nodes, &mut stream2, 1000, Ok(())).await;
-//    }
-//
-//    assert_nodes(&nodes, |s| s.storage.chats.get(&chat).unwrap().number == 5);
-//
-//    let target = nodes.iter_mut().next().unwrap();
-//    target.storage.chats.clear();
-//
-//    stream1
-//        .test_req::<PerformChatAction>(
-//            &mut nodes,
-//            (user.proof(chat), ChatAction::SendMessage(Reminder(&[0xff]))),
-//            Ok(()),
-//        )
-//        .await;
-//}
+#[tokio::test]
+async fn message_flooding() {
+    _ = env_logger::builder().is_test(true).format_timestamp(None).try_init();
+
+    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1);
+
+    let mut streams = nodes
+        .iter_mut()
+        .take(5)
+        .map(|node| {
+            let [stream, used] = Stream::new_test();
+            node.clients.push(used);
+            (stream, Account::new())
+        })
+        .collect::<Vec<_>>();
+
+    for (stream, user) in &mut streams {
+        stream.create_user(&mut nodes, user).await;
+    }
+
+    let chat = ChatName::from("foo").unwrap();
+
+    let ((some_stream, some_user), others) = streams.split_first_mut().unwrap();
+
+    some_stream
+        .test_req_simple(&mut nodes, rpcs::CREATE_CHAT, chat, (chat, some_user.identity()), Ok(()))
+        .await;
+
+    for (_, user) in others.iter_mut() {
+        some_stream
+            .test_req_simple(
+                &mut nodes,
+                rpcs::ADD_MEMBER,
+                chat,
+                (some_user.proof(chat), user.identity()),
+                Ok(()),
+            )
+            .await;
+        log::info!("member added");
+    }
+
+    log::info!("chat created");
+    _ = tokio::time::timeout(Duration::from_millis(100), nodes.next()).await;
+
+    const MESSAGE_SIZE: usize = 40;
+
+    let topic = Some(PossibleTopic::Chat(chat));
+    for i in 0..100 {
+        log::warn!("sending message {}", i);
+        for (stream, user) in streams.iter_mut() {
+            let msg = [i as u8; MESSAGE_SIZE];
+            let body = (user.proof(chat), Reminder(&msg));
+            stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
+        }
+
+        let join_all = futures::future::join_all(streams.iter_mut().map(|(s, _)| s.next()));
+
+        futures::select! {
+            _ = nodes.select_next_some() => unreachable!(),
+            res = join_all.fuse() => {
+                for res in res {
+                    let res = res.unwrap().1.unwrap();
+                    {
+                        let (_, resp) = <(CallId, Result<()>)>::decode(&mut unsafe { std::mem::transmute(res.as_slice()) }).unwrap();
+                        assert_eq!(resp, Ok(()));
+                    }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(1000)).fuse() => {
+                panic!("timeout")
+            }
+        }
+
+        //_ = tokio::time::timeout(Duration::from_millis(20), nodes.next()).await;
+    }
+}
 
 impl Stream {
     async fn test_req<'a, R: Codec<'a> + PartialEq + Debug>(
@@ -422,6 +415,7 @@ fn next_node_config() -> NodeConfig {
         key_path: Default::default(),
         boot_nodes: config::List::default(),
         idle_timeout: 1000,
+        rpc_timeout: 500,
     }
 }
 

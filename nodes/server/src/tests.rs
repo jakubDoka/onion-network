@@ -285,7 +285,7 @@ async fn message_flooding() {
             }
         }
 
-        //_ = tokio::time::timeout(Duration::from_millis(20), nodes.next()).await;
+        _ = tokio::time::timeout(Duration::from_millis(20), nodes.next()).await;
     }
 }
 

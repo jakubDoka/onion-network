@@ -269,15 +269,16 @@ where
 
             counter.push((crypto::hash::from_slice(&bytes), 1));
 
-            while let Some((_, Ok(resp))) = repl.next().await {
+            while let Some((peer, Ok(resp))) = repl.next().await {
                 let hash = crypto::hash::from_slice(&resp);
 
                 let Some((_, count)) = counter.iter_mut().find(|(h, _)| h == &hash) else {
                     log::warn!(
-                        "unexpected response from {:?} {:?} {:?}",
+                        "unexpected response from {:?} {:?} {:?} {:?}",
                         std::any::type_name::<<H::Future as Future>::Output>(),
                         Result::<(), ChatError>::decode(&mut resp.as_slice()),
                         resp,
+                        peer,
                     );
                     counter.push((hash, 1));
                     continue;

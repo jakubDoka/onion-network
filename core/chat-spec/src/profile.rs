@@ -21,6 +21,20 @@ pub struct Profile {
     pub mail: Vec<u8>,
 }
 
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            sign: [0; std::mem::size_of::<sign::PublicKey>()],
+            enc: [0; std::mem::size_of::<enc::PublicKey>()],
+            vault_sig: [0; std::mem::size_of::<sign::Signature>()],
+            vault_version: Nonce::default(),
+            mail_action: Nonce::default(),
+            vault: Vec::new(),
+            mail: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Codec)]
 pub struct BorrowedProfile<'a> {
     pub sign: Serialized<sign::PublicKey>,

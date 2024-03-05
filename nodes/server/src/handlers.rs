@@ -26,17 +26,20 @@ macro_rules! ensure {
 }
 
 use {
+    self::chat::Chat,
     crate::{Context, OnlineLocation},
     chat_spec::{
         ChatError, ChatName, Identity, PossibleTopic, ReplVec, Request, REPLICATION_FACTOR,
     },
     component_utils::{arrayvec::ArrayVec, Codec},
+    dht::U256,
     libp2p::{
-        futures::{stream::FuturesUnordered, StreamExt},
+        futures::{stream::FuturesUnordered, FutureExt, StreamExt},
         PeerId, Swarm,
     },
     rpc::CallId,
     std::{future::Future, pin::Pin},
+    tokio::sync::OwnedRwLockWriteGuard,
 };
 
 pub mod chat;
@@ -55,7 +58,7 @@ pub struct State<'a> {
     pub swarm: &'a mut Swarm<crate::Behaviour>,
     pub location: OnlineLocation,
     pub context: Context,
-    pub missing_topic: bool,
+    pub missing_topic: Option<MissingTopic>,
 }
 
 pub trait IntoResponse {
@@ -122,8 +125,7 @@ impl FromRequestOwned for Context {
     }
 }
 
-pub type ReplGroup = ArrayVec<PeerId, { REPLICATION_FACTOR.get() + 1 }>;
-
+pub type ReplGroup = ArrayVec<PeerId, { REPLICATION_FACTOR.get() }>;
 impl FromRequestOwned for ReplGroup {
     fn from_request(req: Request, state: &mut State) -> Option<Self> {
         let us = *state.swarm.local_peer_id();
@@ -137,6 +139,23 @@ impl FromRequestOwned for ReplGroup {
                 .take(REPLICATION_FACTOR.get() + 1)
                 .map(dht::Route::peer_id)
                 .filter(|&p| p != us)
+                .collect(),
+        )
+    }
+}
+
+pub type FullReplGroup = ArrayVec<U256, { REPLICATION_FACTOR.get() + 1 }>;
+impl FromRequestOwned for FullReplGroup {
+    fn from_request(req: Request, state: &mut State) -> Option<Self> {
+        Some(
+            state
+                .swarm
+                .behaviour_mut()
+                .dht
+                .table
+                .closest(req.topic?.as_bytes())
+                .take(REPLICATION_FACTOR.get() + 1)
+                .map(|r| r.id)
                 .collect(),
         )
     }
@@ -166,11 +185,20 @@ impl FromRequestOwned for ChatName {
     }
 }
 
-pub struct MissingTopic(pub bool);
+impl<T: FromRequestOwned> FromRequestOwned for Option<T> {
+    fn from_request(req: Request, state: &mut State) -> Option<Self> {
+        Some(T::from_request(req, state))
+    }
+}
+
+pub enum MissingTopic {
+    Chat { name: ChatName, lock: OwnedRwLockWriteGuard<Chat> },
+    Profile(Identity),
+}
 
 impl FromRequestOwned for MissingTopic {
     fn from_request(_: Request, s: &mut State) -> Option<Self> {
-        Some(MissingTopic(s.missing_topic))
+        s.missing_topic.take()
     }
 }
 
@@ -196,6 +224,12 @@ impl FromRequestOwned for Origin {
             OnlineLocation::Local(_) => None,
             OnlineLocation::Remote(p) => Some(p),
         }
+    }
+}
+
+impl FromRequestOwned for () {
+    fn from_request(_: Request, _: &mut State) -> Option<Self> {
+        Some(())
     }
 }
 
@@ -239,6 +273,13 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
     fn restore(self) -> Restore<Self> {
         Restore { handler: self }
     }
+
+    fn no_resp(self) -> NoResp<Self>
+    where
+        Self::Future: Future<Output = Result<()>> + Send,
+    {
+        NoResp { handler: self }
+    }
 }
 
 #[derive(Clone)]
@@ -264,7 +305,7 @@ where
                 resp => return resp,
             };
 
-            let mut repl = cx.replicate_rpc(topic, prefix, req).await;
+            let mut repl = cx.repl_rpc(topic, prefix, req).await;
             let mut counter = ReplVec::<(crypto::Hash, u8)>::new();
 
             counter.push((crypto::hash::from_slice(&bytes), 1));
@@ -305,7 +346,7 @@ pub struct Restore<H> {
     pub handler: H,
 }
 
-pub type RestoreArgsArgs<A> = (PossibleTopic, Context, MissingTopic, A);
+pub type RestoreArgsArgs<A> = (Context, Option<MissingTopic>, A);
 
 impl<'a, H, A, R> Handler<'a, RestoreArgsArgs<A>, R> for Restore<H>
 where
@@ -316,25 +357,43 @@ where
 {
     type Future = impl Future<Output: IntoResponse> + Send;
 
-    fn call_computed(
-        self,
-        (topic, cx, missing_topic, args): RestoreArgsArgs<A>,
-        req: R,
-    ) -> Self::Future {
+    fn call_computed(self, (cx, missing_topic, args): RestoreArgsArgs<A>, req: R) -> Self::Future {
         async move {
-            if missing_topic.0 {
-                let res = match topic {
-                    PossibleTopic::Profile(identity) => profile::recover(cx, identity).await,
-                    PossibleTopic::Chat(name) => chat::recover(cx, name).await,
-                };
+            let res = match missing_topic {
+                Some(MissingTopic::Chat { name, lock }) => chat::recover(cx, name, lock).await,
+                Some(MissingTopic::Profile(identity)) => profile::recover(cx, identity).await,
+                _ => Ok(()),
+            };
 
-                if res.is_err() {
-                    return Response::Failure(res.to_bytes());
-                }
+            if res.is_err() {
+                return Response::Failure(res.to_bytes());
             }
 
             self.handler.call_computed(args, req).await.into_response()
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct NoResp<H> {
+    handler: H,
+}
+
+impl<'a, H, T, R> Handler<'a, T, R> for NoResp<H>
+where
+    H: Handler<'a, T, R>,
+    T: FromRequestOwned + Send + 'static,
+    R: component_utils::Codec<'a>,
+    H::Future: Future<Output = Result<()>> + Send,
+{
+    type Future = impl Future<Output = ()> + Send;
+
+    fn call_computed(self, args: T, req: R) -> Self::Future {
+        self.handler.call_computed(args, req).map(|e| {
+            if let Err(e) = e {
+                log::warn!("no response from {:?} {:?}", std::any::type_name::<Self>(), e);
+            }
+        })
     }
 }
 
@@ -361,6 +420,7 @@ macro_rules! impl_handler {
     };
 }
 
+impl_handler!([], B);
 impl_handler!([A], B);
 impl_handler!([A, B], C);
 impl_handler!([A, B, C], D);

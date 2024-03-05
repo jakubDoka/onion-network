@@ -160,10 +160,10 @@ async fn message_block_finalization() {
         )
         .await;
 
-    const MESSAGE_SIZE: usize = 900;
+    const MESSAGE_SIZE: usize = 100;
     const MULTIPLIER: usize = 1;
 
-    for i in 0..12 * MULTIPLIER {
+    for i in 0..100 * MULTIPLIER {
         let cons = [i as u8; MESSAGE_SIZE / MULTIPLIER];
         stream1
             .test_req_simple(
@@ -174,28 +174,36 @@ async fn message_block_finalization() {
                 Ok(()),
             )
             .await;
+
+        log::info!("message sent {i}");
+
+        //_ = tokio::time::timeout(Duration::from_millis(300), nodes.next()).await;
     }
 
     assert_nodes(&nodes, |s| {
-        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 2
+        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number() == 2
     });
 
     let topic = Some(PossibleTopic::Chat(chat));
 
-    for i in 0..6 * MULTIPLIER {
+    for i in 0..50 * MULTIPLIER {
         let msg = [i as u8; MESSAGE_SIZE / MULTIPLIER];
         let body = (user.proof(chat), Reminder(&msg));
         stream1.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
-        let msg = [i as u8 * 6; MESSAGE_SIZE / MULTIPLIER];
+        let msg = [(i as u8).wrapping_mul(6); MESSAGE_SIZE / MULTIPLIER];
         let body = (user2.proof(chat), Reminder(&msg));
         stream2.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
 
         response_simple(&mut nodes, &mut stream1, 1000, Ok(())).await;
         response_simple(&mut nodes, &mut stream2, 1000, Ok(())).await;
+
+        log::info!("message sent {i}");
+
+        //_ = tokio::time::timeout(Duration::from_millis(300), nodes.next()).await;
     }
 
     assert_nodes(&nodes, |s| {
-        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 5
+        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number() == 6
     });
 
     let target = nodes.iter_mut().find(|s| *s.swarm.local_peer_id() == peer).unwrap();

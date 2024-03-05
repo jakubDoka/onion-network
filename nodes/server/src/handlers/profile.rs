@@ -154,7 +154,7 @@ pub async fn send_mail(
 }
 
 pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
-    let mut profiles = cx.replicate_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity).await;
+    let mut profiles = cx.repl_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity).await;
     let mut latest_profile = None::<Profile>;
     while let Some((peer, Ok(resp))) = profiles.next().await {
         let Some(Ok(profile)) = Result::<BorrowedProfile>::decode(&mut resp.as_slice()) else {

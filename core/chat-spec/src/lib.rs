@@ -30,8 +30,8 @@ pub mod rpcs {
         ADD_MEMBER;
         SEND_MESSAGE;
         BLOCK_PROPOSAL;
-        MAJOR_BLOCK;
-        FETCH_MINIMAL_CHAT_DATA;
+        SEND_BLOCK;
+        FETCH_CHAT_DATA;
         FETCH_MESSAGES;
         SUBSCRIBE;
 
@@ -77,7 +77,7 @@ pub enum ChatError {
     #[error("message too large")]
     MessageTooLarge,
     #[error("latest message block is still being finalized")]
-    MessageBlockNotFinalized,
+    MessageOverload,
     #[error("no blocks even though past block was proposed")]
     NoBlocks,
     #[error("The sending node is not among replicators")]
@@ -91,7 +91,7 @@ pub enum ChatError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
 pub enum InvalidBlockReason {
     #[error("does not match majority")]
-    MajorityMismatch,
+    ExtraMessages,
     #[error("is uotdated for us")]
     Outdated,
     #[error("not expected at this point")]

@@ -20,7 +20,7 @@ impl Member {
 
 #[derive(Clone, Copy, Codec)]
 pub struct Message<'a> {
-    pub identiy: Identity,
+    pub identity: Identity,
     pub nonce: Nonce,
     pub content: Reminder<'a>,
 }
@@ -32,7 +32,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    pub const INIT: Self = Self { block: u64::MAX, offset: 0 };
+    pub const INIT: Self = Self { block: BlockNumber::MAX, offset: 0 };
 }
 
 pub type ChatName = ArrayString<CHAT_NAME_CAP>;

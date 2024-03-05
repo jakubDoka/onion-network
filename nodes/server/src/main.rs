@@ -12,14 +12,16 @@
 #![feature(slice_take)]
 
 use {
-    self::handlers::chat::Chat,
+    self::handlers::{chat::Chat, MissingTopic},
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
-    chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR},
-    component_utils::{Codec, LinearMap, Reminder, ReminderOwned},
+    chat_spec::{
+        rpcs, BlockNumber, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR,
+    },
+    component_utils::{arrayvec::ArrayVec, Codec, LinearMap, Reminder, ReminderOwned},
     crypto::{enc, sign, TransmutationCircle},
-    dashmap::{DashMap, DashSet},
+    dashmap::{mapref::entry::Entry, DashMap},
     dht::Route,
     futures::channel::mpsc,
     libp2p::{
@@ -314,14 +316,14 @@ impl Server {
         let (request_event_sink, request_events) = mpsc::channel(100);
 
         Ok(Self {
-            swarm,
             context: Box::leak(Box::new(OwnedContext {
                 profiles: Default::default(),
                 online: Default::default(),
                 chats: Default::default(),
-                recovers: Default::default(),
                 request_event_sink,
+                local_peer_id: *swarm.local_peer_id(),
             })),
+            swarm,
             request_events,
             clients: Default::default(),
             stake_events,
@@ -345,10 +347,12 @@ impl Server {
                 chat::{
                     rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
+                    rpcs::SEND_BLOCK => handle_message_block.no_resp();
+                    rpcs::FETCH_CHAT_DATA => fetch_chat_data;
                     rpcs::SEND_MESSAGE => send_message.restore();
-                    rpcs::BLOCK_PROPOSAL => propose_msg_block;
-                    rpcs::MAJOR_BLOCK => receive_block;
-                    rpcs::FETCH_MINIMAL_CHAT_DATA => fetch_minimal_chat_data;
+                   // rpcs::BLOCK_PROPOSAL => propose_msg_block;
+                   // rpcs::MAJOR_BLOCK => receive_block;
+                   // rpcs::FETCH_MINIMAL_CHAT_DATA => fetch_minimal_chat_data;
                 };
                 profile::{
                     rpcs::CREATE_PROFILE => create;
@@ -390,7 +394,7 @@ impl Server {
                     return;
                 };
 
-                let Some(we_have_the_topic) = self.validate_topic(Some(topic)) else {
+                let Some(missing_topic) = self.validate_topic(Some(topic)) else {
                     log::warn!("received request with invalid topic: {:?}", topic);
                     return;
                 };
@@ -401,7 +405,7 @@ impl Server {
                     swarm: &mut self.swarm,
                     location: OnlineLocation::Remote(peer),
                     context: self.context,
-                    missing_topic: !we_have_the_topic,
+                    missing_topic,
                 });
             }
             SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Response(peer, id, body))) => {
@@ -428,17 +432,17 @@ impl Server {
         let req = match req {
             Ok(req) => req,
             Err(e) => {
-                log::info!("failed to read from client: {}", e);
+                log::warn!("failed to read from client: {}", e);
                 return;
             }
         };
 
         let Some(req) = chat_spec::Request::decode(&mut req.as_slice()) else {
-            log::info!("failed to decode client request: {:?}", req);
+            log::warn!("failed to decode client request: {:?}", req);
             return;
         };
 
-        let Some(we_have_the_topic) = self.validate_topic(req.topic) else {
+        let Some(missing_topic) = self.validate_topic(req.topic) else {
             log::warn!("client sent message with invalid topic: {:?}", req.topic);
             return;
         };
@@ -447,7 +451,7 @@ impl Server {
 
         if req.prefix == rpcs::SUBSCRIBE
             && let Some(topic) = req.topic
-            && we_have_the_topic
+            && missing_topic.is_none()
         {
             let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
             match topic {
@@ -460,14 +464,14 @@ impl Server {
                 swarm: &mut self.swarm,
                 location: OnlineLocation::Local(id),
                 context: self.context,
-                missing_topic: !we_have_the_topic,
+                missing_topic,
             });
         }
     }
 
-    fn validate_topic(&self, topic: Option<PossibleTopic>) -> Option<bool> {
+    fn validate_topic(&self, topic: Option<PossibleTopic>) -> Option<Option<MissingTopic>> {
         let Some(topic) = topic else {
-            return Some(false);
+            return Some(None);
         };
 
         if self
@@ -482,25 +486,25 @@ impl Server {
             return None;
         }
 
-        let mut we_have_the_topic = match topic {
-            PossibleTopic::Profile(prf) => self.context.profiles.contains_key(&prf),
-            PossibleTopic::Chat(chat) => self.context.chats.contains_key(&chat),
-        };
-
-        if !we_have_the_topic {
-            we_have_the_topic = !self.context.recovers.insert(topic);
-        } else {
-            self.context.recovers.remove(&topic);
-        }
-
-        Some(we_have_the_topic)
+        Some(match topic {
+            PossibleTopic::Profile(prf) if !self.context.profiles.contains_key(&prf) => {
+                Some(MissingTopic::Profile(prf))
+            }
+            PossibleTopic::Chat(name) if let Entry::Vacant(v) = self.context.chats.entry(name) => {
+                Some(MissingTopic::Chat {
+                    name,
+                    lock: v.insert(Default::default()).clone().try_write_owned().unwrap(),
+                })
+            }
+            _ => None,
+        })
     }
 
     fn handle_stake_event(&mut self, event: Result<chain_api::StakeEvent, chain_api::Error>) {
         let event = match event {
             Ok(event) => event,
             Err(e) => {
-                log::info!("failed to read from chain: {}", e);
+                log::warn!("failed to read from chain: {}", e);
                 return;
             }
         };
@@ -508,19 +512,19 @@ impl Server {
         match event {
             chain_api::StakeEvent::Joined(j) => {
                 let Ok(pk) = unpack_node_id(j.identity) else {
-                    log::info!("invalid node id");
+                    log::warn!("invalid node id");
                     return;
                 };
-                log::info!("node joined the network: {pk:?}");
+                log::debug!("node joined the network: {pk:?}");
                 let route = Route::new(pk, unpack_node_addr(j.addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
             chain_api::StakeEvent::Reclaimed(r) => {
                 let Ok(pk) = unpack_node_id(r.identity) else {
-                    log::info!("invalid node id");
+                    log::warn!("invalid node id");
                     return;
                 };
-                log::info!("node left the network: {pk:?}");
+                log::debug!("node left the network: {pk:?}");
                 self.swarm
                     .behaviour_mut()
                     .dht
@@ -529,10 +533,10 @@ impl Server {
             }
             chain_api::StakeEvent::AddrChanged(c) => {
                 let Ok(pk) = unpack_node_id(c.identity) else {
-                    log::info!("invalid node id");
+                    log::warn!("invalid node id");
                     return;
                 };
-                log::info!("node changed address: {pk:?}");
+                log::debug!("node changed address: {pk:?}");
                 let route = Route::new(pk, unpack_node_addr(c.addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
@@ -653,6 +657,29 @@ impl Server {
             handlers::Response::DontRespond => {}
         };
     }
+
+    fn handle_finalization_timeout(&self, _peer: PeerId, name: ChatName, block: BlockNumber) {
+        let cx = self.context;
+        let group = self
+            .swarm
+            .behaviour()
+            .dht
+            .table
+            .closest(name.as_bytes())
+            .take(REPLICATION_FACTOR.get() + 1)
+            .map(|r| r.id)
+            .collect::<ArrayVec<_, { REPLICATION_FACTOR.get() + 1 }>>();
+        tokio::task::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let Some(chat) = cx.chats.get(&name).map(|e| e.value().clone()) else { return };
+            let mut chat_guard = chat.write().await;
+            if chat_guard.number() != block {
+                return;
+            }
+            chat_guard.next_selector();
+            chat_guard.resolve_finalization(cx, &group, name).await;
+        });
+    }
 }
 
 impl Future for Server {
@@ -702,6 +729,9 @@ impl Future for Server {
                     RequestEvent::Rpc(peer, msg, resp) => self.handle_rpc(peer, msg, resp),
                     RequestEvent::ReplRpc(topic, msg, resp) => {
                         self.handle_repl_rpc(topic, msg, resp)
+                    }
+                    RequestEvent::FinalizationTimeout(peer, chat, block) => {
+                        self.handle_finalization_timeout(peer, chat, block)
                     }
                 }
                 did_something = true;
@@ -802,14 +832,15 @@ enum RequestEvent {
     Chat(ChatName, Vec<u8>),
     Rpc(PeerId, Vec<u8>, Option<oneshot::Sender<rpc::Result<Vec<u8>>>>),
     ReplRpc(PossibleTopic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
+    FinalizationTimeout(PeerId, ChatName, BlockNumber),
 }
 
 pub struct OwnedContext {
     profiles: DashMap<Identity, Profile>,
     online: DashMap<Identity, OnlineLocation>,
     chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
-    recovers: DashSet<PossibleTopic>,
     request_event_sink: mpsc::Sender<RequestEvent>,
+    local_peer_id: PeerId,
 }
 
 fn rpc<'a>(prefix: u8, topic: impl Into<PossibleTopic>, msg: impl Codec<'a>) -> Vec<u8> {
@@ -860,7 +891,7 @@ impl OwnedContext {
             .await;
     }
 
-    async fn replicate_rpc<'a>(
+    async fn repl_rpc<'a>(
         &self,
         topic: impl Into<PossibleTopic>,
         prefix: u8,
@@ -891,5 +922,13 @@ impl OwnedContext {
             .send(RequestEvent::Rpc(peer, rpc(send_mail, topic, mail), Some(sender)))
             .await;
         recv.await.unwrap_or(Err(rpc::Error::Timeout.into()))
+    }
+
+    async fn init_finalization_timer(&self, selected: PeerId, chat: ChatName, block: BlockNumber) {
+        _ = self
+            .request_event_sink
+            .clone()
+            .send(RequestEvent::FinalizationTimeout(selected, chat, block))
+            .await;
     }
 }

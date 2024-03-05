@@ -67,6 +67,16 @@ impl Buffer for Vec<u8> {
     }
 }
 
+impl<const SIZE: usize> Buffer for ArrayVec<u8, SIZE> {
+    fn extend_from_slice(&mut self, slice: &[u8]) -> Option<()> {
+        self.try_extend_from_slice(slice).ok()
+    }
+
+    fn push(&mut self, byte: u8) -> Option<()> {
+        self.try_push(byte).ok()
+    }
+}
+
 impl Buffer for &mut [u8] {
     fn extend_from_slice(&mut self, slice: &[u8]) -> Option<()> {
         self.take_mut(..slice.len())?.copy_from_slice(slice);
@@ -95,6 +105,32 @@ pub trait Codec<'a>: Sized {
         self.encode(&mut buffer).expect("to encode");
         buffer.splice(..4, encode_len(buffer.len() - 4));
         buffer
+    }
+
+    fn encoded_len(&self) -> usize {
+        struct LenCounter(usize);
+
+        impl Buffer for LenCounter {
+            fn extend_from_slice(&mut self, slice: &[u8]) -> Option<()> {
+                self.0 += slice.len();
+                Some(())
+            }
+
+            fn push(&mut self, _: u8) -> Option<()> {
+                self.0 += 1;
+                Some(())
+            }
+        }
+
+        impl AsMut<[u8]> for LenCounter {
+            fn as_mut(&mut self) -> &mut [u8] {
+                unreachable!("LenCounter is not a buffer")
+            }
+        }
+
+        let mut counter = LenCounter(0);
+        self.encode(&mut counter).expect("to encode");
+        counter.0
     }
 }
 

@@ -34,6 +34,7 @@ pub mod rpcs {
         FETCH_CHAT_DATA;
         FETCH_MESSAGES;
         SUBSCRIBE;
+        GIVE_UP_BLOCK;
 
         FETCH_PROFILE;
         FETCH_VAULT;

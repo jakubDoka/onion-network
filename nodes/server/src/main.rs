@@ -12,7 +12,10 @@
 #![feature(slice_take)]
 
 use {
-    self::handlers::{chat::Chat, MissingTopic},
+    self::handlers::{
+        chat::{select_finalizer, Chat},
+        MissingTopic,
+    },
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
@@ -658,7 +661,7 @@ impl Server {
         };
     }
 
-    fn handle_finalization_timeout(&self, _peer: PeerId, name: ChatName, block: BlockNumber) {
+    fn handle_finalization_timeout(&self, peer: PeerId, name: ChatName, block: BlockNumber) {
         let cx = self.context;
         let group = self
             .swarm
@@ -670,12 +673,14 @@ impl Server {
             .map(|r| r.id)
             .collect::<ArrayVec<_, { REPLICATION_FACTOR.get() + 1 }>>();
         tokio::task::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
             let Some(chat) = cx.chats.get(&name).map(|e| e.value().clone()) else { return };
             let mut chat_guard = chat.write().await;
             if chat_guard.number() != block {
                 return;
             }
+
+            log::warn!("finalization timeout for: {:?} {}", name, peer);
             chat_guard.next_selector();
             chat_guard.resolve_finalization(cx, &group, name).await;
         });

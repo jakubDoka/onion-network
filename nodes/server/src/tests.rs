@@ -264,15 +264,22 @@ async fn message_flooding() {
     log::info!("chat created");
     _ = tokio::time::timeout(Duration::from_millis(100), nodes.next()).await;
 
-    const MESSAGE_SIZE: usize = 40;
+    const MESSAGE_SIZE: usize = 100;
+    const MODULO: usize = 30;
 
     let topic = Some(PossibleTopic::Chat(chat));
-    for i in 0..100 {
-        log::warn!("sending message {}", i);
+    for i in 0..1000 {
+        log::info!("sending message {}", i);
         for (stream, user) in streams.iter_mut() {
             let msg = [i as u8; MESSAGE_SIZE];
             let body = (user.proof(chat), Reminder(&msg));
             stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
+        }
+
+        if i % MODULO == MODULO - 1 {
+            for node in nodes.iter_mut().take(2) {
+                node.context.chats.clear();
+            }
         }
 
         let join_all = futures::future::join_all(streams.iter_mut().map(|(s, _)| s.next()));
@@ -293,7 +300,7 @@ async fn message_flooding() {
             }
         }
 
-        _ = tokio::time::timeout(Duration::from_millis(20), nodes.next()).await;
+        //_ = tokio::time::timeout(Duration::from_millis(10), nodes.next()).await;
     }
 }
 

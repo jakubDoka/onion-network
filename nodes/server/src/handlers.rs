@@ -347,7 +347,7 @@ pub struct Restore<H> {
     pub handler: H,
 }
 
-pub type RestoreArgsArgs<A> = (Context, Option<MissingTopic>, FullReplGroup, A);
+pub type RestoreArgsArgs<A> = (Context, Option<MissingTopic>, A);
 
 impl<'a, H, A, R> Handler<'a, RestoreArgsArgs<A>, R> for Restore<H>
 where
@@ -358,16 +358,10 @@ where
 {
     type Future = impl Future<Output: IntoResponse> + Send;
 
-    fn call_computed(
-        self,
-        (cx, missing_topic, group, args): RestoreArgsArgs<A>,
-        req: R,
-    ) -> Self::Future {
+    fn call_computed(self, (cx, missing_topic, args): RestoreArgsArgs<A>, req: R) -> Self::Future {
         async move {
             let res = match missing_topic {
-                Some(MissingTopic::Chat { name, lock }) => {
-                    chat::recover(cx, name, group, lock).await
-                }
+                Some(MissingTopic::Chat { name, lock }) => chat::recover(cx, name, lock).await,
                 Some(MissingTopic::Profile(identity)) => profile::recover(cx, identity).await,
                 _ => Ok(()),
             };

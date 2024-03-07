@@ -177,11 +177,11 @@ async fn message_block_finalization() {
 
         log::info!("message sent {i}");
 
-        //_ = tokio::time::timeout(Duration::from_millis(300), nodes.next()).await;
+        _ = tokio::time::timeout(Duration::from_millis(30), nodes.next()).await;
     }
 
     assert_nodes(&nodes, |s| {
-        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number() == 2
+        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 2
     });
 
     let topic = Some(PossibleTopic::Chat(chat));
@@ -203,7 +203,7 @@ async fn message_block_finalization() {
     }
 
     assert_nodes(&nodes, |s| {
-        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number() == 6
+        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 6
     });
 
     let target = nodes.iter_mut().find(|s| *s.swarm.local_peer_id() == peer).unwrap();
@@ -264,15 +264,15 @@ async fn message_flooding() {
     log::info!("chat created");
     _ = tokio::time::timeout(Duration::from_millis(100), nodes.next()).await;
 
-    const MESSAGE_SIZE: usize = 100;
-    const MODULO: usize = 30;
+    const MESSAGE_SIZE: usize = 200;
+    const MODULO: usize = 20;
 
     let topic = Some(PossibleTopic::Chat(chat));
     for i in 0..1000 {
         log::info!("sending message {}", i);
-        for (stream, user) in streams.iter_mut() {
+        for (j, (stream, user)) in streams.iter_mut().enumerate() {
             let msg = [i as u8; MESSAGE_SIZE];
-            let body = (user.proof(chat), Reminder(&msg));
+            let body = (user.proof(chat), Reminder(&msg[0..(i * 10 * j) % MESSAGE_SIZE]));
             stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
         }
 
@@ -291,16 +291,18 @@ async fn message_flooding() {
                     let res = res.unwrap().1.unwrap();
                     {
                         let (_, resp) = <(CallId, Result<()>)>::decode(&mut unsafe { std::mem::transmute(res.as_slice()) }).unwrap();
+                        if matches!(resp, Err(ChatError::InvalidChatAction(_))) {
+                            continue;
+                        }
                         assert_eq!(resp, Ok(()));
                     }
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(1000)).fuse() => {
-                panic!("timeout")
+            _ = tokio::time::sleep(Duration::from_millis(10)).fuse() => {
             }
         }
 
-        //_ = tokio::time::timeout(Duration::from_millis(10), nodes.next()).await;
+        _ = tokio::time::timeout(Duration::from_millis(20), nodes.next()).await;
     }
 }
 

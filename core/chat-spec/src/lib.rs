@@ -12,7 +12,7 @@ use {
     std::num::NonZeroUsize,
 };
 
-pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
+pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(6) };
 
 pub type BlockNumber = u64;
 pub type Identity = crypto::Hash;

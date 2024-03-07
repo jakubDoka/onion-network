@@ -12,17 +12,12 @@
 #![feature(slice_take)]
 
 use {
-    self::handlers::{
-        chat::{select_finalizer, Chat},
-        MissingTopic,
-    },
+    self::handlers::{chat::Chat, MissingTopic},
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
-    chat_spec::{
-        rpcs, BlockNumber, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR,
-    },
-    component_utils::{arrayvec::ArrayVec, Codec, LinearMap, Reminder, ReminderOwned},
+    chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR},
+    component_utils::{Codec, LinearMap, Reminder, ReminderOwned},
     crypto::{enc, sign, TransmutationCircle},
     dashmap::{mapref::entry::Entry, DashMap},
     dht::Route,
@@ -30,7 +25,7 @@ use {
     libp2p::{
         core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
         futures::{self, channel::oneshot, SinkExt, StreamExt},
-        identity::{self, ed25519},
+        identity::ed25519,
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId, Transport,
     },
@@ -532,7 +527,7 @@ impl Server {
                     .behaviour_mut()
                     .dht
                     .table
-                    .remove(identity::PublicKey::from(pk).to_peer_id());
+                    .remove(libp2p::identity::PublicKey::from(pk).to_peer_id());
             }
             chain_api::StakeEvent::AddrChanged(c) => {
                 let Ok(pk) = unpack_node_id(c.identity) else {
@@ -660,31 +655,6 @@ impl Server {
             handlers::Response::DontRespond => {}
         };
     }
-
-    fn handle_finalization_timeout(&self, peer: PeerId, name: ChatName, block: BlockNumber) {
-        let cx = self.context;
-        let group = self
-            .swarm
-            .behaviour()
-            .dht
-            .table
-            .closest(name.as_bytes())
-            .take(REPLICATION_FACTOR.get() + 1)
-            .map(|r| r.id)
-            .collect::<ArrayVec<_, { REPLICATION_FACTOR.get() + 1 }>>();
-        tokio::task::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let Some(chat) = cx.chats.get(&name).map(|e| e.value().clone()) else { return };
-            let mut chat_guard = chat.write().await;
-            if chat_guard.number() != block {
-                return;
-            }
-
-            log::warn!("finalization timeout for: {:?} {}", name, peer);
-            chat_guard.next_selector();
-            chat_guard.resolve_finalization(cx, &group, name).await;
-        });
-    }
 }
 
 impl Future for Server {
@@ -734,9 +704,6 @@ impl Future for Server {
                     RequestEvent::Rpc(peer, msg, resp) => self.handle_rpc(peer, msg, resp),
                     RequestEvent::ReplRpc(topic, msg, resp) => {
                         self.handle_repl_rpc(topic, msg, resp)
-                    }
-                    RequestEvent::FinalizationTimeout(peer, chat, block) => {
-                        self.handle_finalization_timeout(peer, chat, block)
                     }
                 }
                 did_something = true;
@@ -799,8 +766,8 @@ impl Stream {
 
     #[cfg(test)]
     fn new_test() -> [Self; 2] {
-        let (input_s, input_r) = mpsc::channel(1);
-        let (output_s, output_r) = mpsc::channel(1);
+        let (input_s, input_r) = mpsc::channel(100);
+        let (output_s, output_r) = mpsc::channel(100);
         let id = PathId::new();
         [(input_r, output_s), (output_r, input_s)].map(|(a, b)| Self {
             id,
@@ -837,7 +804,6 @@ enum RequestEvent {
     Chat(ChatName, Vec<u8>),
     Rpc(PeerId, Vec<u8>, Option<oneshot::Sender<rpc::Result<Vec<u8>>>>),
     ReplRpc(PossibleTopic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
-    FinalizationTimeout(PeerId, ChatName, BlockNumber),
 }
 
 pub struct OwnedContext {
@@ -881,7 +847,7 @@ impl OwnedContext {
             .await;
     }
 
-    async fn send_rpc_no_resp<'a>(
+    async fn _send_rpc_no_resp<'a>(
         &self,
         topic: impl Into<PossibleTopic>,
         dest: PeerId,
@@ -927,13 +893,5 @@ impl OwnedContext {
             .send(RequestEvent::Rpc(peer, rpc(send_mail, topic, mail), Some(sender)))
             .await;
         recv.await.unwrap_or(Err(rpc::Error::Timeout.into()))
-    }
-
-    async fn init_finalization_timer(&self, selected: PeerId, chat: ChatName, block: BlockNumber) {
-        _ = self
-            .request_event_sink
-            .clone()
-            .send(RequestEvent::FinalizationTimeout(selected, chat, block))
-            .await;
     }
 }

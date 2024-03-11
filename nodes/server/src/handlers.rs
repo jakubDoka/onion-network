@@ -236,7 +236,7 @@ impl FromRequestOwned for () {
 pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::Codec<'a>>:
     Clone + Send + Sized + 'static
 {
-    type Future: Future + Send;
+    type Future: Future<Output = Response> + Send;
 
     fn call_computed(self, args: T, res: R) -> Self::Future;
 
@@ -244,13 +244,12 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
         self,
         req: Request,
         mut state: State,
-    ) -> Option<impl Future<Output = Response> + Send + 'static>
-    where
-        <Self::Future as Future>::Output: IntoResponse,
-    {
-        let args = T::from_request(req, &mut state)?;
+    ) -> impl Future<Output = Response> + Send + 'static {
+        let args = T::from_request(req, &mut state);
         let body = req.body.0.to_vec();
-        Some(async move {
+        async move {
+            let Some(args) = args else { return Response::DontRespond };
+
             // SAFETY: the lifetime of `body` is bound to the scope of the future, `r` does not
             // escape its scope. Extending lifetime here is only needed due to limitations of
             // compiler.
@@ -262,8 +261,8 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
                 );
                 return Response::DontRespond;
             };
-            self.call_computed(args, r).await.into_response()
-        })
+            self.call_computed(args, r).await
+        }
     }
 
     fn repl(self) -> Repl<Self> {
@@ -274,10 +273,7 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
         Restore { handler: self }
     }
 
-    fn no_resp(self) -> NoResp<Self>
-    where
-        Self::Future: Future<Output = Result<()>> + Send,
-    {
+    fn no_resp(self) -> NoResp<Self> {
         NoResp { handler: self }
     }
 }
@@ -296,7 +292,7 @@ where
     R: component_utils::Codec<'a> + Send + Clone,
     <H::Future as Future>::Output: IntoResponse,
 {
-    type Future = impl Future<Output: IntoResponse> + Send;
+    type Future = impl Future<Output = Response> + Send;
 
     fn call_computed(self, (topic, cx, prefix, args): ReplArgs<A>, req: R) -> Self::Future {
         async move {
@@ -356,7 +352,7 @@ where
     R: component_utils::Codec<'a> + Send + Clone,
     <H::Future as Future>::Output: IntoResponse,
 {
-    type Future = impl Future<Output: IntoResponse> + Send;
+    type Future = impl Future<Output = Response> + Send;
 
     fn call_computed(self, (cx, missing_topic, args): RestoreArgsArgs<A>, req: R) -> Self::Future {
         async move {
@@ -385,15 +381,19 @@ where
     H: Handler<'a, T, R>,
     T: FromRequestOwned + Send + 'static,
     R: component_utils::Codec<'a>,
-    H::Future: Future<Output = Result<()>> + Send,
 {
-    type Future = impl Future<Output = ()> + Send;
+    type Future = impl Future<Output = Response> + Send;
 
     fn call_computed(self, args: T, req: R) -> Self::Future {
         self.handler.call_computed(args, req).map(|e| {
-            if let Err(e) = e {
-                log::warn!("no response from {:?} {:?}", std::any::type_name::<Self>(), e);
+            if let Response::Failure(e) = e {
+                log::warn!(
+                    "no response from {:?} {:?}",
+                    std::any::type_name::<Self>(),
+                    <Result<()>>::decode(&mut e.as_slice())
+                );
             }
+            Response::DontRespond
         })
     }
 }
@@ -411,11 +411,11 @@ macro_rules! impl_handler {
             $( $ty: FromRequestOwned + Send + 'static, )*
             $last: component_utils::Codec<'a> + Send,
         {
-            type Future = Fut;
+            type Future = impl Future<Output = Response> + Send;
 
             fn call_computed(self, args: ($($ty,)*), req: $last) -> Self::Future {
                 let ($($ty,)*) = args;
-                self($($ty,)* req)
+                self($($ty,)* req).map(|r| r.into_response())
             }
         }
     };
@@ -429,8 +429,8 @@ impl_handler!([A, B, C, D], E);
 impl_handler!([A, B, C, D, E], G);
 
 pub type FinalResponse = (Response, OnlineLocation, CallId);
-pub type RouteRet = Pin<Box<dyn Future<Output = FinalResponse>>>;
-pub type Route = Box<dyn Fn(Request, State) -> RouteRet>;
+pub type RouteRet = Pin<Box<dyn Future<Output = FinalResponse> + Send>>;
+pub type Route = Box<dyn Fn(Request, State) -> RouteRet + Send>;
 
 #[derive(Default)]
 pub struct Router {
@@ -444,7 +444,6 @@ impl Router {
         H: Handler<'a, A, R>,
         A: FromRequestOwned + Send + 'static,
         R: component_utils::Codec<'a>,
-        <H::Future as Future>::Output: IntoResponse,
     {
         if self.routes.len() <= expected as usize {
             self.routes.resize_with(expected as usize + 1, || None);
@@ -452,17 +451,7 @@ impl Router {
         self.routes[expected as usize] = Some(Box::new(move |req, state| {
             let local_self = route.clone();
             let origin = state.location;
-            let f = local_self.call(req, state);
-            Box::pin(async move {
-                (
-                    match f {
-                        Some(f) => f.await.into_response(),
-                        None => Response::DontRespond,
-                    },
-                    origin,
-                    req.id,
-                )
-            })
+            Box::pin(local_self.call(req, state).map(move |r| (r, origin, req.id)))
         }));
     }
 

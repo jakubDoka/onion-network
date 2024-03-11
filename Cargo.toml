@@ -78,6 +78,7 @@ panic = "abort"
 
 [profile.dev.package.falcon]
 overflow-checks = false
+opt-level = 3
 
 [profile.dev.package.argon2]
 opt-level = 3

@@ -8,11 +8,11 @@
 #![feature(slice_from_ptr_range)]
 
 use {
-    component_utils::{arrayvec::ArrayVec, crypto::ToProofContext, Codec, Reminder},
+    component_utils::{arrayvec::ArrayVec, proof::ToProofContext, Codec, Reminder},
     std::num::NonZeroUsize,
 };
 
-pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(6) };
+pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
 
 pub type BlockNumber = u64;
 pub type Identity = crypto::Hash;
@@ -48,7 +48,7 @@ pub mod rpcs {
 
 pub use {
     chat::*,
-    component_utils::crypto::{Nonce, Proof},
+    component_utils::proof::{Nonce, Proof},
     profile::*,
     rpc::CallId,
 };

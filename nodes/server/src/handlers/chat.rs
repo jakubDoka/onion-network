@@ -1,31 +1,25 @@
 use {
     super::MissingTopic,
     chat_spec::{
-        advance_nonce, retain_messages, rpcs, unpack_messages_ref, BlockNumber, ChatError,
+        advance_nonce, retain_messages_in_vec, rpcs, unpack_messages_ref, BlockNumber, ChatError,
         ChatEvent, ChatName, Cursor, Identity, Member, Message, Proof, ReplVec, REPLICATION_FACTOR,
     },
-    component_utils::{arrayvec::ArrayVec, encode_len, Codec, Reminder},
+    component_utils::{encode_len, Codec, Reminder},
     dht::{try_peer_id_to_ed, U256},
     libp2p::{futures::StreamExt, PeerId},
     std::{
         collections::{HashMap, HashSet},
         ops::DerefMut,
-        time::Duration,
     },
     tokio::sync::OwnedRwLockWriteGuard,
 };
 
-const MAX_MESSAGE_SIZE: usize = 1024;
+const MAX_MESSAGE_SIZE: usize = 1024 - 40;
 const MESSAGE_FETCH_LIMIT: usize = 20;
-const BLOCK_SIZE: usize = if cfg!(test) { 1024 * 4 } else { 1024 * 128 };
-const FINALIZATION_TRIGGER_SIZE: usize = BLOCK_SIZE + BLOCK_SIZE / 2;
-const MAX_UNFINALIZED_BLOCKS: usize = 5;
+const BLOCK_SIZE: usize = if cfg!(test) { 1024 * 4 } else { 1024 * 64 };
+const MAX_UNFINALIZED_BLOCKS: usize = REPLICATION_FACTOR.get() / 2 + 1;
 const UNFINALIZED_BUFFER_CAP: usize = BLOCK_SIZE * MAX_UNFINALIZED_BLOCKS;
 const BLOCK_HISTORY: usize = 8;
-const FINALIZATION_TIMEOUT: Duration =
-    if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(10) };
-const INIT_TIMEOUT_DELAY: Duration =
-    if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(1) };
 
 type Result<T, E = ChatError> = std::result::Result<T, E>;
 
@@ -95,19 +89,17 @@ pub async fn send_message(
         let message = Message { identity, nonce, content: Reminder(msg) };
         let encoded_len = message.encoded_len();
 
-        if chat.buffer.len() + encoded_len + 4 > UNFINALIZED_BUFFER_CAP {
+        if chat.buffer.len() + encoded_len + 2 > UNFINALIZED_BUFFER_CAP {
             return Err(ChatError::MessageOverload);
         }
-
-        let should_fianlize = chat.buffer.len() / FINALIZATION_TRIGGER_SIZE
-            < (encoded_len + chat.buffer.len() + 2) / FINALIZATION_TRIGGER_SIZE;
 
         _ = message.encode(&mut chat.buffer);
         chat.buffer.extend(encode_len(encoded_len));
 
-        if should_fianlize {
-            chat.resolve_finalization_with_delay(cx, group, proof.context, INIT_TIMEOUT_DELAY)
-                .await;
+        if chat.buffer.len() % BLOCK_SIZE > BLOCK_SIZE / 2
+            && (chat.buffer.len() - encoded_len - 2) % BLOCK_SIZE < BLOCK_SIZE / 2
+        {
+            chat.resolve_finalization(cx, group, proof.context).await;
         }
     }
 
@@ -126,88 +118,60 @@ pub async fn handle_message_block(
     use {chat_spec::InvalidBlockReason::*, ChatError::*};
 
     let chat = cx.chats.get(&name).ok_or(NotFound)?.clone();
+    let compressed_origin =
+        dht::try_peer_id_to_ed(origin).map(U256::from).expect("its in the table");
 
     let mut chat = chat.write().await;
     let chat = chat.deref_mut();
 
     'a: {
-        if chat.selector == crypto::Hash::default() {
+        if chat.is_recovering() {
             break 'a;
         }
 
-        if decompress_peer_id(chat.prev_finalizer) == origin {
+        let finalizer = chat.select_finalizer(group.clone());
+        if finalizer == compressed_origin {
             break 'a;
         }
-
-        let (cache_selector, cache_prev_finalizer) = (chat.selector, chat.prev_finalizer);
-        assert!(chat.advance_selector(&group));
-
-        if decompress_peer_id(chat.prev_finalizer) == origin {
-            break 'a;
-        }
-
-        chat.selector = cache_selector;
-        chat.prev_finalizer = cache_prev_finalizer;
 
         log::warn!(
-            "not selected to finalize block: us: {} them: {} expected: {}",
+            "not selected to finalize block: us: {} them: {} expected: {} block_len: {}",
             cx.local_peer_id,
             origin,
-            decompress_peer_id(chat.select_finalizer(&group).unwrap()),
+            decompress_peer_id(finalizer),
+            chat.buffer.len()
         );
-        chat.resolve_finalization(cx, group, name).await;
         return Err(InvalidBlock(NotExpected));
     }
 
-    let proposed = unpack_messages_ref(block).map(crypto::hash::from_slice).collect::<HashSet<_>>();
-    let message_count = unpack_messages_ref(&chat.buffer)
-        .filter(|msg| proposed.contains(&crypto::hash::from_slice(msg)))
-        .count();
+    let proposed = unpack_messages_ref(block).collect::<HashSet<_>>();
+    let message_count =
+        unpack_messages_ref(&chat.buffer).filter(|msg| proposed.contains(msg)).count();
 
     if message_count == proposed.len() {
-        let kept_len = retain_messages(&mut chat.buffer, |msg| {
-            !proposed.contains(&crypto::hash::from_slice(msg))
-        })
-        .len();
-        chat.buffer.drain(..chat.buffer.len() - kept_len);
-
-        assert_eq!(chat.number, number, "block number mismatch {}", cx.local_peer_id);
-
-        chat.add_finalized_block(
-            block,
-            cx.local_peer_id,
-            try_peer_id_to_ed(origin).unwrap().into(),
-        );
-        chat.resolve_finalization(cx, group, name).await;
+        chat.naturally_created = true;
+        retain_messages_in_vec(&mut chat.buffer, |msg| !proposed.contains(msg));
+        chat.finalized[(number % BLOCK_HISTORY as u64) as usize] =
+            Block { hash: crypto::hash::from_slice(block), data: block.to_vec() };
+        chat.number += 1;
         return Ok(());
     }
 
-    if chat.selector != crypto::Hash::default() {
-        log::warn!(
-            "extra messages in block: message_count: {:?} proposed: {:?} us: {} them: {}",
-            message_count,
-            proposed.len(),
-            cx.local_peer_id,
-            origin,
-        );
-
-        if chat.buffer.len() >= BLOCK_SIZE {
-            chat.resolve_finalization(cx, group, name).await;
-            return Err(InvalidBlock(ExtraMessages));
-        }
-
-        log::warn!("how to fuck is this happening?");
+    if chat.is_recovering() {
+        chat.number = number + 1;
+        retain_messages_in_vec(&mut chat.buffer, |msg| !proposed.contains(msg));
+        return Ok(());
     }
 
-    log::warn!("outdated block: us: {} them: {}", cx.local_peer_id, origin);
+    log::warn!(
+        "extra messages in block: message_count: {:?} proposed: {:?} us: {} them: {}",
+        message_count,
+        proposed.len(),
+        cx.local_peer_id,
+        origin,
+    );
 
-    let retained_len =
-        retain_messages(&mut chat.buffer, |msg| !proposed.contains(&crypto::hash::from_slice(msg)))
-            .len();
-    chat.buffer.drain(..chat.buffer.len() - retained_len);
-    chat.number = number + 1;
-
-    Ok(())
+    Err(InvalidBlock(ExtraMessages))
 }
 
 pub async fn fetch_chat_data(cx: crate::Context, name: ChatName, _: ()) -> Result<MinimalChatData> {
@@ -310,8 +274,8 @@ pub async fn fetch_messages(
     }
 
     let block = match chat.number < cursor.block {
-        true => &chat.buffer[..chat.buffer.len()],
-        false => &chat.finalized[cursor.block as usize % BLOCK_HISTORY],
+        true => &chat.buffer,
+        false => &chat.finalized[cursor.block as usize % BLOCK_HISTORY].data,
     };
 
     if cursor.offset == 0 {
@@ -328,73 +292,32 @@ pub async fn fetch_messages(
     Ok((cursor, slice[cursor.offset..].to_vec()))
 }
 
-pub struct Chat {
-    pub members: HashMap<Identity, Member>,
-    pub finalized: [[u8; BLOCK_SIZE]; BLOCK_HISTORY],
-    pub number: BlockNumber,
-    pub buffer: ArrayVec<u8, UNFINALIZED_BUFFER_CAP>,
-    pub selector: crypto::Hash,
-    pub prev_finalizer: U256,
+#[derive(Default)]
+pub struct Block {
+    pub hash: crypto::Hash,
+    pub data: Vec<u8>,
 }
 
-impl Default for Chat {
-    fn default() -> Self {
-        Self {
-            members: Default::default(),
-            finalized: [[0; BLOCK_SIZE]; BLOCK_HISTORY],
-            number: 0,
-            buffer: Default::default(),
-            selector: Default::default(),
-            prev_finalizer: Default::default(),
-        }
-    }
+#[derive(Default)]
+pub struct Chat {
+    pub members: HashMap<Identity, Member>,
+    pub finalized: [Block; BLOCK_HISTORY],
+    pub number: BlockNumber,
+    pub buffer: Vec<u8>,
+    pub naturally_created: bool,
 }
 
 impl Chat {
-    pub fn new(id: Identity, name: ChatName) -> Self {
+    pub fn new(id: Identity, _: ChatName) -> Self {
         Self {
             members: [(id, Member::default())].into(),
-            selector: crypto::hash::from_slice(name.as_bytes()),
+            naturally_created: true,
             ..Default::default()
         }
     }
 
-    pub async fn resolve_finalization_low(
-        &mut self,
-        cx: crate::Context,
-        group: &[U256],
-        name: ChatName,
-    ) -> bool {
-        while self.buffer.len() >= FINALIZATION_TRIGGER_SIZE {
-            let Some(selected) = self.select_finalizer(group) else {
-                break;
-            };
-
-            self.prev_finalizer = selected;
-            self.selector = crypto::hash::from_slice(&self.selector);
-
-            if decompress_peer_id(selected) != cx.local_peer_id {
-                return true;
-            }
-
-            let number = self.number;
-            let block = self.finalize_block(cx.local_peer_id);
-            cx.repl_rpc_no_resp(name, rpcs::SEND_BLOCK, (number, Reminder(block))).await;
-        }
-
-        false
-    }
-
-    pub async fn resolve_finalization_with_delay(
-        &mut self,
-        cx: crate::Context,
-        group: super::FullReplGroup,
-        name: ChatName,
-        init_delay: Duration,
-    ) {
-        if self.resolve_finalization_low(cx, &group, name).await {
-            tokio::spawn(handle_timeouts(cx, name, self.selector, group, init_delay));
-        }
+    pub fn is_recovering(&self) -> bool {
+        !self.naturally_created
     }
 
     pub async fn resolve_finalization(
@@ -403,110 +326,67 @@ impl Chat {
         group: super::FullReplGroup,
         name: ChatName,
     ) {
-        self.resolve_finalization_with_delay(cx, group, name, Duration::default()).await;
-    }
+        if self.buffer.len() < BLOCK_SIZE {
+            return;
+        }
 
-    fn finalize_block(&mut self, us: PeerId) -> &[u8] {
-        log::error!("finalizing block: {:?} {}", self.number, us);
+        let selected = self.select_finalizer(group.clone());
+        if selected != try_peer_id_to_ed(cx.local_peer_id).map(U256::from).unwrap() {
+            return;
+        }
 
-        let block_len = {
+        let actual_block_size = {
+            let trashold = self.buffer.len() / BLOCK_SIZE * BLOCK_SIZE;
             let mut res = self.buffer.len();
             for msg in unpack_messages_ref(&self.buffer) {
                 res -= msg.len() + 2;
-                if res <= BLOCK_SIZE - 2 {
+                if res <= trashold {
                     break;
                 }
             }
             res
         };
 
-        let padding = BLOCK_SIZE - block_len - 2;
-        let dest = &mut self.finalized[self.number as usize % BLOCK_HISTORY];
-        self.selector = crypto::hash::from_slice(&self.buffer[..block_len]);
-        dest[..block_len].copy_from_slice(&self.buffer[..block_len]);
-        dest[BLOCK_SIZE - 2..].copy_from_slice(&encode_len(padding));
-        self.buffer.drain(..block_len);
-        self.number += 1;
-        dest[..block_len].as_ref()
-    }
-
-    fn add_finalized_block(&mut self, block: &[u8], us: PeerId, prev: U256) {
-        log::error!("adding finalized block: {:?} {}", self.number, us);
-
-        let padding = BLOCK_SIZE - block.len() - 2;
-        let dest = &mut self.finalized[self.number as usize % BLOCK_HISTORY];
-        self.selector = crypto::hash::from_slice(block);
-        if self.prev_finalizer != U256::default() {
-            assert_eq!(self.prev_finalizer, prev, "prev_finalizer mismatch");
-        }
-        self.prev_finalizer = prev;
-        dest[..block.len()].copy_from_slice(block);
-        dest[BLOCK_SIZE - 2..].copy_from_slice(&encode_len(padding));
-        self.number += 1;
-    }
-
-    #[must_use]
-    pub fn advance_selector(&mut self, group: &[U256]) -> bool {
-        let Some(next) = self.select_finalizer(group) else { return false };
-        self.prev_finalizer = next;
-        self.selector = crypto::hash::from_slice(&self.selector);
-        true
-    }
-
-    pub fn select_finalizer(&self, members: &[U256]) -> Option<U256> {
-        select_finalizer(members, self.prev_finalizer, self.selector)
-    }
-}
-
-pub async fn handle_timeouts(
-    cx: crate::Context,
-    name: ChatName,
-    mut selector: crypto::Hash,
-    group: super::FullReplGroup,
-    init_delay: Duration,
-) {
-    tokio::time::sleep(init_delay).await;
-
-    loop {
-        tokio::time::sleep(FINALIZATION_TIMEOUT).await;
-
-        let Some(chat) = cx.chats.get(&name).map(|e| e.value().clone()) else { return };
-        let mut chat = chat.write().await;
-        if chat.selector != selector {
-            return;
-        }
-
-        log::warn!(
-            "finalization timeout for: {:?} us: {} peer: {}",
+        cx.repl_rpc_no_resp(
             name,
-            cx.local_peer_id,
-            decompress_peer_id(chat.prev_finalizer)
-        );
-        assert_ne!(chat.prev_finalizer, U256::default());
+            rpcs::SEND_BLOCK,
+            (self.number, Reminder(&self.buffer[..actual_block_size])),
+        )
+        .await;
 
-        if !chat.resolve_finalization_low(cx, &group, name).await {
-            break;
-        }
+        self.finalized[(self.number % BLOCK_HISTORY as u64) as usize] = Block {
+            hash: crypto::hash::from_slice(&self.buffer[..actual_block_size]),
+            data: self.buffer.drain(..actual_block_size).collect(),
+        };
+        self.number += 1;
+    }
 
-        selector = chat.selector;
+    pub fn select_finalizer(&self, members: super::FullReplGroup) -> U256 {
+        let Some(last_block) = (self.number > 0)
+            .then(|| &self.finalized[((self.number - 1) % BLOCK_HISTORY as u64) as usize])
+        else {
+            return select_finalizer(members, crypto::Hash::default(), 0);
+        };
+        select_finalizer(members, last_block.hash, self.buffer.len() - BLOCK_SIZE)
     }
 }
 
-pub fn select_finalizer(members: &[U256], prev: U256, selector: crypto::Hash) -> Option<U256> {
-    if selector == crypto::Hash::default() {
-        return None;
+pub fn select_finalizer(
+    mut members: super::FullReplGroup,
+    selector: crypto::Hash,
+    block_len: usize,
+) -> U256 {
+    let selector = U256::from(selector);
+    let round_count = block_len / BLOCK_SIZE;
+
+    assert!(round_count < MAX_UNFINALIZED_BLOCKS);
+    for _ in 0..round_count {
+        let (index, _) =
+            members.iter().enumerate().max_by_key(|&(_, &member)| member ^ selector).unwrap();
+        members.swap_remove(index);
     }
 
-    assert!(prev == U256::default() || members.contains(&prev));
-
-    let selector = U256::from(selector);
-    let &closest = members
-        .iter()
-        .filter(|&&p| p != prev)
-        .min_by_key(|&&id| selector.abs_diff(id))
-        .expect("its always at least us");
-
-    Some(closest)
+    members.into_iter().max_by_key(|&member| member ^ selector).unwrap()
 }
 
 pub fn decompress_peer_id(compressed: U256) -> PeerId {

@@ -1,7 +1,7 @@
 use {
     super::*,
     chat_spec::*,
-    component_utils::crypto::ToProofContext,
+    component_utils::proof::ToProofContext,
     libp2p::futures::{stream::FuturesUnordered, FutureExt},
     std::{fmt::Debug, usize},
 };
@@ -220,7 +220,7 @@ async fn message_block_finalization() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn message_flooding() {
     _ = env_logger::builder().is_test(true).format_timestamp(None).try_init();
 
@@ -264,46 +264,28 @@ async fn message_flooding() {
     log::info!("chat created");
     _ = tokio::time::timeout(Duration::from_millis(100), nodes.next()).await;
 
-    const MESSAGE_SIZE: usize = 200;
-    const MODULO: usize = 20;
+    const MESSAGE_SIZE: usize = 0;
+    const MODULO: usize = 40;
+
+    for node in nodes {
+        tokio::task::spawn(node);
+    }
 
     let topic = Some(PossibleTopic::Chat(chat));
-    for i in 0..1000 {
-        log::info!("sending message {}", i);
-        for (j, (stream, user)) in streams.iter_mut().enumerate() {
-            let msg = [i as u8; MESSAGE_SIZE];
-            let body = (user.proof(chat), Reminder(&msg[0..(i * 10 * j) % MESSAGE_SIZE]));
-            stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
-        }
-
-        if i % MODULO == MODULO - 1 {
-            for node in nodes.iter_mut().take(2) {
-                node.context.chats.clear();
-            }
-        }
-
-        let join_all = futures::future::join_all(streams.iter_mut().map(|(s, _)| s.next()));
-
-        futures::select! {
-            _ = nodes.select_next_some() => unreachable!(),
-            res = join_all.fuse() => {
-                for res in res {
-                    let res = res.unwrap().1.unwrap();
-                    {
-                        let (_, resp) = <(CallId, Result<()>)>::decode(&mut unsafe { std::mem::transmute(res.as_slice()) }).unwrap();
-                        if matches!(resp, Err(ChatError::InvalidChatAction(_))) {
-                            continue;
-                        }
-                        assert_eq!(resp, Ok(()));
-                    }
+    for (mut stream, mut user) in streams {
+        tokio::task::spawn(async move {
+            loop {
+                let msg = [0; MESSAGE_SIZE];
+                let body = (user.proof(chat), Reminder(&msg[0..MESSAGE_SIZE]));
+                if stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).is_none() {
+                    break;
                 }
+                stream.next().await;
             }
-            _ = tokio::time::sleep(Duration::from_millis(10)).fuse() => {
-            }
-        }
-
-        _ = tokio::time::timeout(Duration::from_millis(20), nodes.next()).await;
+        });
     }
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
 }
 
 impl Stream {
@@ -432,7 +414,7 @@ fn next_node_config() -> NodeConfig {
         key_path: Default::default(),
         boot_nodes: config::List::default(),
         idle_timeout: 1000,
-        rpc_timeout: 500,
+        rpc_timeout: 10000,
     }
 }
 

@@ -86,7 +86,7 @@ macro_rules! gen_unique_id {
 }
 
 pub mod codec;
-pub mod crypto;
+pub mod proof;
 pub mod proximity;
 pub mod stream;
 

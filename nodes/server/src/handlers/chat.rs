@@ -71,7 +71,7 @@ pub async fn add_member(
 
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
-    let sender_id = crypto::hash::from_raw(&proof.pk);
+    let sender_id = crypto::hash::from_slice(&proof.pk);
     let sender = chat.members.get_mut(&sender_id).ok_or(ChatError::NotMember)?;
 
     sender.allocate_action(Permissions::INVITE)?;
@@ -132,7 +132,7 @@ pub async fn send_message(
         let mut chat_guard = chat.write().await;
         let chat = chat_guard.deref_mut();
 
-        let identity = crypto::hash::from_raw(&proof.pk);
+        let identity = crypto::hash::from_slice(&proof.pk);
         let sender = chat.members.get_mut(&identity).ok_or(ChatError::NotMember)?;
         let nonce = sender.action;
 

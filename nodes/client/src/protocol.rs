@@ -20,7 +20,7 @@ impl Clone for RequestDispatch {
 }
 
 pub fn proof_topic<T>(p: &Proof<T>) -> Topic {
-    crypto::hash::from_raw(&p.pk).into()
+    crypto::hash::from_slice(&p.pk).into()
 }
 
 impl RequestDispatch {

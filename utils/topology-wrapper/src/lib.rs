@@ -21,36 +21,108 @@ pub enum PacketKind {
 pub type ExtraEventAndMeta = (ExtraEvent, PeerIdWrapper, libp2p::swarm::ConnectionId);
 pub type PacketMeta = (PeerIdWrapper, usize, String);
 
+pub trait World: 'static {
+    fn handle_update(&mut self, peer: PeerId, update: Update);
+}
+
+#[cfg(not(feature = "disabled"))]
 const INIT_TAG: [u8; 32] = [0xff; 32];
 
-#[cfg(feature = "disabled")]
-pub mod report {
-    use crate::EventReceiver;
-    pub type Behaviour = libp2p::swarm::dummy::Behaviour;
+#[derive(Codec)]
+pub struct Update<'a> {
+    pub event: Event<'a>,
+    pub peer: PeerIdWrapper,
+    pub connection: usize,
+}
 
-    pub fn new(_: EventReceiver) -> Behaviour {
-        libp2p::swarm::dummy::Behaviour
-    }
+#[derive(Codec)]
+pub enum Event<'a> {
+    Stream(&'a str),
+    Packet(&'a str),
+    Closed(&'a str),
+    Disconnected,
 }
 
 #[cfg(feature = "disabled")]
-mod impls {
-    pub type EventSender = ();
-    pub type EventReceiver = ();
+pub mod collector {
+    use {
+        crate::World,
+        libp2p::{swarm::NetworkBehaviour, PeerId},
+        std::{convert::Infallible, marker::PhantomData},
+    };
 
-    pub type Behaviour<T> = T;
-    pub fn new<T>(inner: T, _: EventSender) -> T {
-        inner
+    pub fn new<W: World>(_: PeerId, _: W) -> Behaviour<W> {
+        Behaviour { world: PhantomData }
     }
-    pub fn channel() -> (EventSender, EventReceiver) {
-        ((), ())
+
+    pub struct Behaviour<T> {
+        world: PhantomData<T>,
+    }
+
+    impl<W: World> Behaviour<W> {
+        pub fn new(_: PeerId, _: W) -> Self {
+            Self { world: PhantomData }
+        }
+
+        pub fn world_mut(&mut self) -> &mut W {
+            unimplemented!()
+        }
+
+        pub fn add_peer(&mut self, _: PeerId) {
+            unimplemented!()
+        }
+    }
+
+    impl<W: World> NetworkBehaviour for Behaviour<W> {
+        type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
+        type ToSwarm = Infallible;
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _: libp2p::swarm::ConnectionId,
+            _: PeerId,
+            _: &libp2p::Multiaddr,
+            _: &libp2p::Multiaddr,
+        ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+            Ok(libp2p::swarm::dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _connection_id: libp2p::swarm::ConnectionId,
+            _peer: PeerId,
+            _addr: &libp2p::Multiaddr,
+            _role_override: libp2p::core::Endpoint,
+        ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+            Ok(libp2p::swarm::dummy::ConnectionHandler)
+        }
+
+        fn on_swarm_event(&mut self, _event: libp2p::swarm::FromSwarm) {}
+
+        fn on_connection_handler_event(
+            &mut self,
+            _peer_id: PeerId,
+            _connection_id: libp2p::swarm::ConnectionId,
+            _event: libp2p::swarm::THandlerOutEvent<Self>,
+        ) {
+        }
+
+        fn poll(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<
+            libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>,
+        > {
+            std::task::Poll::Pending
+        }
     }
 }
 
 #[cfg(not(feature = "disabled"))]
 pub mod collector {
+
     use {
-        crate::report::Update,
+        crate::{Update, World},
         component_utils::Codec,
         libp2p::{
             futures::{stream::SelectAll, StreamExt},
@@ -60,8 +132,8 @@ pub mod collector {
         std::{convert::Infallible, io},
     };
 
-    pub trait World: 'static {
-        fn handle_update(&mut self, peer: PeerId, update: Update);
+    pub fn new<W: World>(peer_id: PeerId, world: W) -> Behaviour<W> {
+        Behaviour::new(peer_id, world)
     }
 
     struct UpdateStream {
@@ -186,6 +258,13 @@ pub mod collector {
     }
 }
 
+#[cfg(feature = "disabled")]
+pub mod muxer {
+    pub fn new<T>(inner: T, _: crate::EventSender) -> T {
+        inner
+    }
+}
+
 #[cfg(not(feature = "disabled"))]
 pub mod muxer {
     use {
@@ -196,6 +275,10 @@ pub mod muxer {
         },
         std::pin::Pin,
     };
+
+    pub fn new<T>(inner: T, sender: crate::EventSender) -> Muxer<T> {
+        Muxer::new(inner, sender)
+    }
 
     pub struct Muxer<T> {
         inner: T,
@@ -339,13 +422,24 @@ pub mod muxer {
     }
 }
 
+#[cfg(feature = "disabled")]
+pub mod report {
+    use crate::EventReceiver;
+    pub type Behaviour = libp2p::swarm::dummy::Behaviour;
+    pub type Update<'a> = ();
+
+    pub fn new(_: EventReceiver) -> Behaviour {
+        libp2p::swarm::dummy::Behaviour
+    }
+}
+
 #[cfg(not(feature = "disabled"))]
 pub mod report {
     use {
-        crate::{EventReceiver, ExtraEvent, PeerIdWrapper},
-        component_utils::{Codec, PacketWriter},
+        crate::{Event, EventReceiver, ExtraEvent, PeerIdWrapper, Update},
+        component_utils::PacketWriter,
         libp2p::{
-            core::UpgradeInfo,
+            core::upgrade::ReadyUpgrade,
             futures::{stream::FuturesUnordered, StreamExt},
             swarm::{ConnectionHandler, NetworkBehaviour},
             PeerId, StreamProtocol,
@@ -360,21 +454,6 @@ pub mod report {
     #[must_use]
     pub fn new(recv: EventReceiver) -> Behaviour {
         Behaviour { listeners: Default::default(), topology: Default::default(), recv }
-    }
-
-    #[derive(Codec)]
-    pub struct Update<'a> {
-        pub event: Event<'a>,
-        pub peer: PeerIdWrapper,
-        pub connection: usize,
-    }
-
-    #[derive(Codec)]
-    pub enum Event<'a> {
-        Stream(&'a str),
-        Packet(&'a str),
-        Closed(&'a str),
-        Disconnected,
     }
 
     struct UpdateStream {
@@ -542,16 +621,16 @@ pub mod report {
     impl ConnectionHandler for Handler {
         type FromBehaviour = Infallible;
         type InboundOpenInfo = ();
-        type InboundProtocol = Protocol;
+        type InboundProtocol = ReadyUpgrade<StreamProtocol>;
         type OutboundOpenInfo = ();
-        type OutboundProtocol = Protocol;
+        type OutboundProtocol = ReadyUpgrade<StreamProtocol>;
         type ToBehaviour = libp2p::Stream;
 
         fn listen_protocol(
             &self,
         ) -> libp2p::swarm::SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo>
         {
-            libp2p::swarm::SubstreamProtocol::new(Protocol, ())
+            libp2p::swarm::SubstreamProtocol::new(ReadyUpgrade::new(ROUTING_PROTOCOL), ())
         }
 
         fn poll(
@@ -568,7 +647,10 @@ pub mod report {
                 self.connect = false;
                 return std::task::Poll::Ready(
                     libp2p::swarm::ConnectionHandlerEvent::OutboundSubstreamRequest {
-                        protocol: libp2p::swarm::SubstreamProtocol::new(Protocol, ()),
+                        protocol: libp2p::swarm::SubstreamProtocol::new(
+                            ReadyUpgrade::new(ROUTING_PROTOCOL),
+                            (),
+                        ),
                     },
                 );
             }
@@ -606,36 +688,22 @@ pub mod report {
     }
 
     component_utils::decl_stream_protocol!(ROUTING_PROTOCOL = "updt");
+}
 
-    pub struct Protocol;
+#[cfg(feature = "disabled")]
+mod impls {
+    pub type Behaviour<T> = T;
 
-    impl UpgradeInfo for Protocol {
-        type Info = StreamProtocol;
-        type InfoIter = std::iter::Once<Self::Info>;
+    #[derive(Clone)]
+    pub struct EventSender;
+    #[derive(Clone)]
+    pub struct EventReceiver;
 
-        fn protocol_info(&self) -> Self::InfoIter {
-            std::iter::once(ROUTING_PROTOCOL)
-        }
+    pub fn new<T>(inner: T, _: EventSender) -> T {
+        inner
     }
-
-    impl libp2p::core::upgrade::InboundUpgrade<libp2p::Stream> for Protocol {
-        type Error = Infallible;
-        type Future = std::future::Ready<Result<Self::Output, Self::Error>>;
-        type Output = libp2p::Stream;
-
-        fn upgrade_inbound(self, socket: libp2p::Stream, _: Self::Info) -> Self::Future {
-            std::future::ready(Ok(socket))
-        }
-    }
-
-    impl libp2p::core::upgrade::OutboundUpgrade<libp2p::Stream> for Protocol {
-        type Error = Infallible;
-        type Future = std::future::Ready<Result<Self::Output, Self::Error>>;
-        type Output = libp2p::Stream;
-
-        fn upgrade_outbound(self, socket: libp2p::Stream, _: Self::Info) -> Self::Future {
-            std::future::ready(Ok(socket))
-        }
+    pub fn channel() -> (EventSender, EventReceiver) {
+        (EventSender, EventReceiver)
     }
 }
 

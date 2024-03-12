@@ -48,7 +48,7 @@ pub async fn create(
 pub async fn set_vault(cx: super::Context, proof: Proof<Reminder<'_>>) -> Result<()> {
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
-    let identity = crypto::hash::from_raw(&proof.pk);
+    let identity = crypto::hash::from_slice(&proof.pk);
     let profile = cx.profiles.get_mut(&identity);
 
     crate::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
@@ -72,7 +72,7 @@ pub async fn read_mail(
 ) -> Result<ReminderOwned> {
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
-    let identity = crypto::hash::from_raw(&proof.pk);
+    let identity = crypto::hash::from_slice(&proof.pk);
     let profile = cx.profiles.get_mut(&identity);
 
     crate::ensure!(let Some(mut profile) = profile, ChatError::NotFound);

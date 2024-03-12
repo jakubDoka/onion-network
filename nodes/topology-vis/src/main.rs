@@ -299,8 +299,8 @@ fn by_peer_id(nodes: &Nodes, peer: PeerId) -> Option<usize> {
     nodes.iter().find_map(|(id, node)| (node.pid == peer).then_some(id))
 }
 
-impl topology_wrapper::collector::World for WorldRc {
-    fn handle_update(&mut self, peer: PeerId, update: topology_wrapper::report::Update) {
+impl topology_wrapper::World for WorldRc {
+    fn handle_update(&mut self, peer: PeerId, update: topology_wrapper::Update) {
         let mut s = self.0.borrow_mut();
 
         let (width, height) = (screen_width() / 2.0, screen_height() / 2.0);
@@ -314,7 +314,7 @@ impl topology_wrapper::collector::World for WorldRc {
             return;
         }
 
-        use topology_wrapper::report::Event as E;
+        use topology_wrapper::Event as E;
         let (protocol, brightness) = match update.event {
             E::Stream(p) => (p, 0.5),
             E::Packet(p) => (p, 1.0),

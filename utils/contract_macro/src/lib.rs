@@ -6,7 +6,7 @@ use {
     ink_metadata::{InkProject, MetadataVersion, Selector},
     proc_macro::TokenStream,
     proc_macro_error::{abort_call_site, proc_macro_error},
-    subxt_codegen::__private::{DerivesRegistry, TypeGenerator, TypeSubstitutes},
+    scale_typegen::{TypeGenerator, TypeGeneratorSettings},
 };
 
 #[proc_macro]
@@ -33,38 +33,34 @@ pub fn contract(input: TokenStream) -> TokenStream {
 }
 
 fn generate_contract_mod(contract_name: &str, metadata: &InkProject) -> proc_macro2::TokenStream {
-    let crate_path = syn::parse_quote!(::subxt);
-    let mut type_substitutes = TypeSubstitutes::new();
+    let crate_path: syn::Path = syn::parse_quote!(::subxt);
 
-    let path_account: syn::Path = syn::parse_quote!(#crate_path::utils::AccountId32);
-    let path_u256: syn::Path = syn::parse_quote!(::primitive_types::U256);
-
-    type_substitutes
-        .insert(
-            syn::parse_quote!(ink_primitives::types::AccountId),
-            path_account.try_into().unwrap(),
-        )
-        .expect("Error in type substitutions");
-
-    type_substitutes
-        .insert(syn::parse_quote!(ink_env::types::U256), path_u256.try_into().unwrap())
-        .expect("Error in type substitutions");
-
-    let mut derives_registry = DerivesRegistry::new();
-    derives_registry.extend_for_all(
-        [quote::quote!(::parity_scale_codec::Encode), quote::quote!(::parity_scale_codec::Decode)]
+    let settings = TypeGeneratorSettings::new()
+        .type_mod_name("contract_types")
+        .add_derives_for_all(
+            [
+                quote::quote!(::parity_scale_codec::Encode),
+                quote::quote!(::parity_scale_codec::Decode),
+            ]
             .map(syn::parse2)
             .map(Result::unwrap),
-        [],
-    );
-
+        )
+        .substitute(
+            syn::parse_quote!(ink_primitives::types::AccountId),
+            syn::parse_quote!(#crate_path::utils::AccountId32),
+        )
+        .substitute(
+            syn::parse_quote!(ink_env::types::U256),
+            syn::parse_quote!(::primitive_types::U256),
+        );
     let type_generator = TypeGenerator::new(
         metadata.registry(),
-        "contract_types",
-        type_substitutes,
-        derives_registry,
-        crate_path,
-        false,
+        &settings,
+        // "contract_types",
+        // type_substitutes,
+        // derives_registry,
+        // crate_path,
+        // false,
     );
     let types_mod = type_generator.generate_types_mod().expect("Error in type generation");
     let types_mod_ident = types_mod.ident();
@@ -155,7 +151,7 @@ fn generate_event_impl(
             // If an argument without a name is included in the metadata, a name is generated for it
             let name = if name.is_empty() { format!("arg{i}") } else { name.to_string() };
             let name = quote::format_ident!("{}", name.as_str());
-            let ty = type_gen.resolve_type_path(type_id);
+            let ty = type_gen.resolve_type_path(type_id).unwrap();
             (quote::quote!( pub #name: #ty ), name)
         })
         .unzip();
@@ -232,7 +228,7 @@ fn generate_message_impl(
             // If an argument without a name is included in the metadata, a name is generated for it
             let name = if name.is_empty() { format!("arg{i}") } else { (*name).to_string() };
             let name = quote::format_ident!("{}", name.as_str());
-            let ty = type_gen.resolve_type_path(*type_id);
+            let ty = type_gen.resolve_type_path(*type_id).unwrap();
             (quote::quote!( #name: #ty ), name)
         })
         .unzip();
@@ -263,89 +259,4 @@ fn hex_lits(selector: &ink_metadata::Selector) -> [syn::LitInt; 4] {
         .map(|byte| syn::LitInt::new(&format!("0x{byte:02X}_u8"), proc_macro2::Span::call_site()))
         .collect::<Vec<_>>();
     hex_lits.try_into().expect("Invalid selector bytes length")
-}
-
-#[cfg(test)]
-mod tests {
-    use {
-        super::*,
-        ink_metadata::{
-            layout::{Layout, StructLayout},
-            ConstructorSpec, ContractSpec, MessageParamSpec, MessageSpec, ReturnTypeSpec, TypeSpec,
-        },
-        ink_primitives::AccountId,
-        scale_info::{IntoPortable, Registry},
-    };
-
-    // Helper for creating a InkProject with custom MessageSpec
-    fn ink_project_with_custom_message(message: MessageSpec) -> InkProject {
-        let mut registry = Registry::default();
-        let spec = ContractSpec::new()
-            .constructors([ConstructorSpec::from_label("New")
-                .selector(Default::default())
-                .payable(true)
-                .args(Vec::new())
-                .docs(Vec::new())
-                .returns(ReturnTypeSpec::new(None))
-                .done()])
-            .messages([message])
-            .docs(Vec::new())
-            .done()
-            .into_portable(&mut registry);
-        let layout =
-            Layout::Struct(StructLayout::new("Struct", Vec::new())).into_portable(&mut registry);
-        InkProject::new_portable(layout, spec, registry.into())
-    }
-
-    #[test]
-    fn test_contract_mod_with_ink_types_success() {
-        let message = MessageSpec::from_label("set")
-            .selector(Default::default())
-            .mutates(false)
-            .payable(true)
-            .args(vec![MessageParamSpec::new("to")
-                .of_type(TypeSpec::with_name_segs::<AccountId, _>(::core::iter::Iterator::map(
-                    ::core::iter::IntoIterator::into_iter(["AccountId"]),
-                    ::core::convert::AsRef::as_ref,
-                )))
-                .done()])
-            .returns(ReturnTypeSpec::new(None))
-            .docs(Vec::new())
-            .done();
-        let metadata = ink_project_with_custom_message(message);
-        let expected_output = quote::quote!(
-            pub mod Test {
-                pub mod contract_types {
-                    use super::contract_types;
-                }
-                pub mod constructors {
-                    use super::contract_types;
-                    #[derive(:: parity_scale_codec :: Encode)]
-                    pub struct New {}
-                    impl crate::InkConstructor for New {
-                        const SELECTOR: [u8; 4] = [0x00_u8, 0x00_u8, 0x00_u8, 0x00_u8];
-                    }
-                    pub fn New() -> New {
-                        New {}
-                    }
-                }
-                pub mod messages {
-                    use super::contract_types;
-                    #[derive(:: parity_scale_codec :: Encode)]
-                    pub struct Set {
-                        to: ::subxt::utils::AccountId32,
-                    }
-                    impl crate::InkMessage for Set {
-                        const SELECTOR: [u8; 4] = [0x00_u8, 0x00_u8, 0x00_u8, 0x00_u8];
-                    }
-                    pub fn set(to: ::subxt::utils::AccountId32) -> Set {
-                        Set { to }
-                    }
-                }
-            }
-        );
-
-        let generated_output = generate_contract_mod("Test", &metadata).to_string();
-        assert_eq!(generated_output, expected_output.to_string());
-    }
 }

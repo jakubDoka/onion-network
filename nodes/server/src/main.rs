@@ -269,10 +269,10 @@ impl Server {
         )
         .map(move |t, _| match t {
             futures::future::Either::Left((p, m)) => {
-                (p, StreamMuxerBox::new(topology_wrapper::muxer::Muxer::new(m, sender)))
+                (p, StreamMuxerBox::new(topology_wrapper::muxer::new(m, sender)))
             }
             futures::future::Either::Right((p, m)) => {
-                (p, StreamMuxerBox::new(topology_wrapper::muxer::Muxer::new(m, sender)))
+                (p, StreamMuxerBox::new(topology_wrapper::muxer::new(m, sender)))
             }
         })
         .boxed();

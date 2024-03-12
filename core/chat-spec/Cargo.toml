@@ -21,6 +21,7 @@ chain-api = { workspace = true }
 component-utils = { workspace = true }
 crypto = { workspace = true }
 rpc = { workspace = true }
+bitflags = "2.4.2"
 
 [lints]
 workspace = true

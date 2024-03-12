@@ -420,6 +420,7 @@ async fn main() {
             .list(node_contract())
             .await
             .unwrap();
+        log::info!("detected {} nodes", nodes.len());
         for (node, ip) in nodes {
             let id = libp2p::identity::ed25519::PublicKey::try_from_bytes(&node.id).unwrap();
             let route = Route::new(id, unpack_node_addr(ip));

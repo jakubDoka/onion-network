@@ -15,14 +15,12 @@ type Result<T, E = ChatError> = std::result::Result<T, E>;
 
 pub async fn create(
     cx: super::Context,
+    identity: Identity,
     (proof, enc): (Proof<&[u8]>, crypto::Serialized<crypto::enc::PublicKey>),
 ) -> Result<()> {
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
-    let user_id = crypto::hash::from_raw(&proof.pk);
-    let entry = cx.profiles.entry(user_id);
-
-    match entry {
+    match cx.profiles.entry(identity) {
         Entry::Vacant(entry) => {
             entry.insert(Profile {
                 sign: proof.pk,
@@ -85,11 +83,16 @@ pub async fn read_mail(
     Ok(ReminderOwned(profile.read_mail().to_vec()))
 }
 
-pub async fn fetch_keys(cx: super::Context, identity: Identity) -> Result<FetchProfileResp> {
+pub async fn fetch_keys(cx: super::Context, identity: Identity, _: ()) -> Result<FetchProfileResp> {
     cx.profiles.get(&identity).ok_or(ChatError::NotFound).map(|p| FetchProfileResp::from(p.value()))
 }
 
-pub async fn fetch_vault(cx: super::Context, identity: Identity) -> Result<ReminderOwned> {
+pub async fn fetch_vault(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {
+    log::info!(
+        "fetching vault for {:?} {:?}",
+        identity,
+        cx.profiles.iter().map(|e| *e.key()).collect::<Vec<_>>()
+    );
     cx.profiles
         .get(&identity)
         .ok_or(ChatError::NotFound)
@@ -100,7 +103,7 @@ pub async fn fetch_vault(cx: super::Context, identity: Identity) -> Result<Remin
         .map(ReminderOwned)
 }
 
-pub async fn fetch_full(cx: super::Context, identity: Identity) -> Result<ReminderOwned> {
+pub async fn fetch_full(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {
     cx.profiles
         .get(&identity)
         .ok_or(ChatError::NotFound)
@@ -111,7 +114,8 @@ pub async fn fetch_full(cx: super::Context, identity: Identity) -> Result<Remind
 pub async fn send_mail(
     cx: super::Context,
     origin: OnlineLocation,
-    (for_who, Reminder(mail)): (Identity, Reminder<'_>),
+    for_who: Identity,
+    Reminder(mail): Reminder<'_>,
 ) -> Result<()> {
     let push_mail = || {
         let mut profile = cx.profiles.get_mut(&for_who).ok_or(ChatError::NotFound)?;
@@ -134,9 +138,7 @@ pub async fn send_mail(
                 break 'b;
             }
 
-            let Ok(resp) =
-                cx.send_rpc(for_who, peer, rpcs::SEND_MAIL, (for_who, Reminder(mail))).await
-            else {
+            let Ok(resp) = cx.send_rpc(for_who, peer, rpcs::SEND_MAIL, Reminder(mail)).await else {
                 break 'b;
             };
 
@@ -157,9 +159,17 @@ pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
     let mut profiles = cx.repl_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity).await;
     let mut latest_profile = None::<Profile>;
     while let Some((peer, Ok(resp))) = profiles.next().await {
-        let Some(Ok(profile)) = Result::<BorrowedProfile>::decode(&mut resp.as_slice()) else {
+        let Some(profile_res) = Result::<BorrowedProfile>::decode(&mut resp.as_slice()) else {
             log::warn!("invalid profile encoding from {:?}", peer);
             continue;
+        };
+
+        let profile = match profile_res {
+            Ok(profile) => profile,
+            Err(e) => {
+                log::warn!("invalid profile from {:?}: {:?}", peer, e);
+                continue;
+            }
         };
 
         if crypto::hash::from_slice(&profile.sign) != identity {

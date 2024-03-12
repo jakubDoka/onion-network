@@ -3,10 +3,10 @@ use {
     anyhow::Context,
     chain_api::RawUserName,
     chat_spec::{
-        username_to_raw, CallId, ChatName, CreateProfile, FetchVault, Identity, Nonce,
-        PossibleTopic, Proof, RawChatName, Repl, UserName, REPLICATION_FACTOR,
+        rpcs, username_to_raw, CallId, ChatName, Identity, Nonce, Proof, RawChatName, Topic,
+        UserName, REPLICATION_FACTOR,
     },
-    component_utils::{futures, Codec, FindAndRemove, LinearMap, Reminder},
+    component_utils::{Codec, FindAndRemove, LinearMap, Reminder},
     crypto::{
         decrypt,
         enc::{self, ChoosenCiphertext, Ciphertext},
@@ -19,7 +19,7 @@ use {
         futures::{SinkExt, StreamExt},
         identity::ed25519,
         swarm::{NetworkBehaviour, SwarmEvent},
-        PeerId, Swarm, *,
+        *,
     },
     onion::{EncryptedStream, PathId, SharedSecret},
     rand::{rngs::OsRng, seq::IteratorRandom},
@@ -317,18 +317,29 @@ impl Node {
 
         set_state!(VaultLoad);
         let (mut vault_nonce, mail_action, Reminder(vault)) = match request_dispatch
-            .dispatch_direct::<FetchVault>(&mut profile_stream, &profile_hash.sign)
+            .dispatch_direct::<(Nonce, Nonce, Reminder)>(
+                &mut profile_stream,
+                rpcs::FETCH_VAULT,
+                Topic::Profile(profile_hash.sign),
+                (),
+            )
             .await
         {
             Ok((vn, m, v)) => (vn + 1, m + 1, v),
-            Err(_) => Default::default(),
+            Err(e) => {
+                log::info!("cannot access vault: {e} {:?}", profile_hash.sign);
+                Default::default()
+            }
         };
+
         let vault = if vault.is_empty() && vault_nonce == 0 {
             set_state!(ProfileCreate);
             let proof = Proof::new(&keys.sign, &mut vault_nonce, &[][..], OsRng);
             request_dispatch
-                .dispatch_direct::<Repl<CreateProfile>>(
+                .dispatch_direct(
                     &mut profile_stream,
+                    rpcs::CREATE_PROFILE,
+                    Topic::Profile(profile_hash.sign),
                     &(proof, keys.enc.public_key().into_bytes()),
                 )
                 .await
@@ -348,7 +359,7 @@ impl Node {
         let mut profile_sub = Subscription {
             id: profile_stream_id,
             peer_id: profile_stream_peer,
-            topics: [PossibleTopic::Profile(profile_hash.sign)].into(),
+            topics: [Topic::Profile(profile_hash.sign)].into(),
             subscriptions: Default::default(),
             stream: profile_stream,
         };
@@ -422,7 +433,7 @@ impl Node {
             subscriptions.push(Subscription {
                 id,
                 peer_id,
-                topics: subs.into_iter().map(PossibleTopic::Chat).collect(),
+                topics: subs.into_iter().map(Topic::Chat).collect(),
                 subscriptions: Default::default(),
                 stream,
             });
@@ -462,6 +473,7 @@ impl Node {
             .iter_mut()
             .find(|(_, v)| v.iter().any(|c| c.topic() == search_key))
         {
+            log::debug!("search already in progress");
             l.push(command);
             return;
         }
@@ -503,23 +515,35 @@ impl Node {
             return;
         };
 
-        assert!(!req.payload.is_empty());
+        let request = chat_spec::Request {
+            prefix: req.prefix,
+            id: req.id,
+            topic: req.topic,
+            body: Reminder(&req.payload),
+        };
 
-        sub.stream.write_bytes(&req.payload).unwrap();
+        sub.stream.write(request).unwrap();
         self.pending_requests.insert(req.id, req.channel);
         log::debug!("request sent, {:?}", req.id);
     }
 
     fn handle_subscription_request(&mut self, sub: SubscriptionInit) {
+        log::info!("Subscribing to {:?}", sub.topic);
         let Some(subs) = self.subscriptions.iter_mut().find(|s| s.topics.contains(&sub.topic))
         else {
             self.handle_topic_search(RequestInit::Subscription(sub));
             return;
         };
 
-        assert!(!sub.payload.is_empty());
+        log::info!("Creating Subsctiption request to {:?}", sub.topic);
+        let request = chat_spec::Request {
+            prefix: rpcs::SUBSCRIBE,
+            id: sub.id,
+            topic: Some(sub.topic),
+            body: Reminder(&[]),
+        };
 
-        subs.stream.write_bytes(&sub.payload).unwrap();
+        subs.stream.write(request).unwrap();
         subs.subscriptions.insert(sub.id, sub.channel);
         log::debug!("subscription request sent, {:?}", sub.id);
     }
@@ -528,14 +552,6 @@ impl Node {
         match command {
             RequestInit::Request(req) => self.handle_request(req),
             RequestInit::Subscription(sub) => self.handle_subscription_request(sub),
-            RequestInit::CloseSubscription(id) => {
-                let Some(sub) =
-                    self.subscriptions.iter_mut().find(|s| s.subscriptions.contains_key(&id))
-                else {
-                    return;
-                };
-                sub.subscriptions.remove(&id);
-            }
         }
     }
 
@@ -572,7 +588,8 @@ impl Node {
         };
 
         if let Some(channel) = self.pending_requests.remove(&cid) {
-            _ = channel.send(msg);
+            log::debug!("response recieved, {:?}", cid);
+            _ = channel.send(content.to_owned());
             return;
         }
 
@@ -616,7 +633,7 @@ type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 struct Subscription {
     id: PathId,
     peer_id: PeerId,
-    topics: Vec<PossibleTopic>,
+    topics: Vec<Topic>,
     subscriptions: LinearMap<CallId, libp2p::futures::channel::mpsc::Sender<SubscriptionMessage>>,
     stream: EncryptedStream,
 }

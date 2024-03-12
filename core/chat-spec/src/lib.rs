@@ -36,6 +36,7 @@ pub mod rpcs {
         SUBSCRIBE;
         GIVE_UP_BLOCK;
         VOTE_BLOCK;
+        FETCH_MEMBER;
 
         FETCH_PROFILE;
         FETCH_VAULT;
@@ -58,7 +59,7 @@ pub use {
 pub enum ChatError {
     #[error("outdated")]
     Outdated,
-    #[error("account not found")]
+    #[error("not found")]
     NotFound,
     #[error("invalid proof")]
     InvalidProof,
@@ -94,6 +95,23 @@ pub enum ChatError {
     AlreadyVoted,
     #[error("vote not found")]
     VoteNotFound,
+    #[error("no permission")]
+    NoPermission,
+    #[error("rate limited for next {0}ms")]
+    RateLimited(u64),
+    #[error("connection dropped mid request")]
+    ChannelClosed,
+    #[error("invalid response")]
+    InvalidResponse,
+}
+
+impl ChatError {
+    pub fn recover(self) -> Result<(), Self> {
+        match self {
+            Self::SentDirectly => Ok(()),
+            e => Err(e),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
@@ -107,12 +125,12 @@ pub enum InvalidBlockReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Codec)]
-pub enum PossibleTopic {
+pub enum Topic {
     Profile(Identity),
     Chat(ChatName),
 }
 
-impl PossibleTopic {
+impl Topic {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         match self {
@@ -122,13 +140,13 @@ impl PossibleTopic {
     }
 }
 
-impl From<ChatName> for PossibleTopic {
+impl From<ChatName> for Topic {
     fn from(c: ChatName) -> Self {
         Self::Chat(c)
     }
 }
 
-impl From<Identity> for PossibleTopic {
+impl From<Identity> for Topic {
     fn from(i: Identity) -> Self {
         Self::Profile(i)
     }
@@ -146,7 +164,7 @@ pub fn advance_nonce(current: &mut Nonce, new: Nonce) -> bool {
 pub struct Request<'a> {
     pub prefix: u8,
     pub id: CallId,
-    pub topic: Option<PossibleTopic>,
+    pub topic: Option<Topic>,
     pub body: Reminder<'a>,
 }
 

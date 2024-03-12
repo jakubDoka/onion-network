@@ -28,9 +28,7 @@ macro_rules! ensure {
 use {
     self::chat::Chat,
     crate::{Context, OnlineLocation},
-    chat_spec::{
-        ChatError, ChatName, Identity, PossibleTopic, ReplVec, Request, REPLICATION_FACTOR,
-    },
+    chat_spec::{ChatError, ChatName, Identity, ReplVec, Request, Topic, REPLICATION_FACTOR},
     component_utils::{arrayvec::ArrayVec, Codec},
     dht::U256,
     libp2p::{
@@ -44,7 +42,6 @@ use {
 
 pub mod chat;
 pub mod profile;
-//mod retry;
 
 type Result<T, E = ChatError> = std::result::Result<T, E>;
 
@@ -84,8 +81,8 @@ where
 {
     fn into_response(self) -> Response {
         match self {
-            Ok(_) => Response::Success(self.to_bytes()),
-            Err(_) => Response::Failure(self.to_bytes()),
+            Ok(_) => Response::Success(dbg!(self.to_bytes())),
+            Err(_) => Response::Failure(dbg!(self.to_bytes())),
         }
     }
 }
@@ -161,7 +158,7 @@ impl FromRequestOwned for FullReplGroup {
     }
 }
 
-impl FromRequestOwned for PossibleTopic {
+impl FromRequestOwned for Topic {
     fn from_request(req: Request, _: &mut State) -> Option<Self> {
         req.topic
     }
@@ -170,7 +167,7 @@ impl FromRequestOwned for PossibleTopic {
 impl FromRequestOwned for Identity {
     fn from_request(req: Request, _: &mut State) -> Option<Self> {
         match req.topic? {
-            PossibleTopic::Profile(i) => Some(i),
+            Topic::Profile(i) => Some(i),
             _ => None,
         }
     }
@@ -179,7 +176,7 @@ impl FromRequestOwned for Identity {
 impl FromRequestOwned for ChatName {
     fn from_request(req: Request, _: &mut State) -> Option<Self> {
         match req.topic? {
-            PossibleTopic::Chat(c) => Some(c),
+            Topic::Chat(c) => Some(c),
             _ => None,
         }
     }
@@ -248,7 +245,14 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
         let args = T::from_request(req, &mut state);
         let body = req.body.0.to_vec();
         async move {
-            let Some(args) = args else { return Response::DontRespond };
+            let Some(args) = args else {
+                log::warn!(
+                    "invalid request from {:?} for handler {:?}",
+                    state.location,
+                    std::any::type_name::<Self>()
+                );
+                return Response::DontRespond;
+            };
 
             // SAFETY: the lifetime of `body` is bound to the scope of the future, `r` does not
             // escape its scope. Extending lifetime here is only needed due to limitations of
@@ -283,7 +287,7 @@ pub struct Repl<H> {
     pub handler: H,
 }
 
-pub type ReplArgs<A> = (PossibleTopic, Context, Prefix, A);
+pub type ReplArgs<A> = (Topic, Context, Prefix, A);
 
 impl<'a, H, A, R> Handler<'a, ReplArgs<A>, R> for Repl<H>
 where

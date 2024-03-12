@@ -90,8 +90,8 @@ async fn direct_messaging() {
         .test_req(
             &mut nodes,
             rpcs::SUBSCRIBE,
-            PossibleTopic::Profile(user2.identity()),
-            PossibleTopic::Profile(user2.identity()),
+            Topic::Profile(user2.identity()),
+            Topic::Profile(user2.identity()),
             (),
         )
         .await;
@@ -170,7 +170,7 @@ async fn message_block_finalization() {
                 &mut nodes,
                 rpcs::SEND_MESSAGE,
                 chat,
-                (user.proof(chat), Reminder(&cons)),
+                user.proof(Reminder(&cons)),
                 Ok(()),
             )
             .await;
@@ -184,11 +184,11 @@ async fn message_block_finalization() {
         s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 2
     });
 
-    let topic = Some(PossibleTopic::Chat(chat));
+    let topic = Some(Topic::Chat(chat));
 
     for i in 0..50 * MULTIPLIER {
         let msg = [i as u8; MESSAGE_SIZE / MULTIPLIER];
-        let body = (user.proof(chat), Reminder(&msg));
+        let body = user.proof(Reminder(&msg));
         stream1.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
         let msg = [(i as u8).wrapping_mul(6); MESSAGE_SIZE / MULTIPLIER];
         let body = (user2.proof(chat), Reminder(&msg));
@@ -214,7 +214,7 @@ async fn message_block_finalization() {
             &mut nodes,
             rpcs::SEND_MESSAGE,
             chat,
-            (user.proof(chat), Reminder(&[0xff])),
+            user.proof(Reminder(&[0xff])),
             Ok(()),
         )
         .await;
@@ -281,12 +281,12 @@ async fn message_flooding() {
         }
     }
 
-    let topic = Some(PossibleTopic::Chat(chat));
+    let topic = Some(Topic::Chat(chat));
     for (mut stream, mut user) in streams {
         tokio::task::spawn(async move {
             loop {
                 let msg = [0; MESSAGE_SIZE];
-                let body = (user.proof(chat), Reminder(&msg[0..MESSAGE_SIZE]));
+                let body = user.proof(Reminder(&msg[0..MESSAGE_SIZE]));
                 if stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).is_none() {
                     break;
                 }
@@ -304,7 +304,7 @@ impl Stream {
         &mut self,
         nodes: &mut FuturesUnordered<Server>,
         prefix: u8,
-        topic: impl Into<Option<PossibleTopic>>,
+        topic: impl Into<Option<Topic>>,
         body: impl Codec<'a>,
         expected: R,
     ) {
@@ -316,7 +316,7 @@ impl Stream {
         &mut self,
         nodes: &mut FuturesUnordered<Server>,
         prefix: u8,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         body: impl Codec<'a>,
         expected: Result<R>,
     ) {
@@ -327,7 +327,7 @@ impl Stream {
         self.test_req(
             nodes,
             rpcs::CREATE_PROFILE,
-            PossibleTopic::Profile(user.identity()),
+            Topic::Profile(user.identity()),
             (user.proof(&[][..]), user.enc.public_key().into_bytes()),
             Ok::<(), ChatError>(()),
         )

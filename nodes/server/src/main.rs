@@ -16,7 +16,7 @@ use {
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
-    chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR},
+    chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     component_utils::{Codec, LinearMap, Reminder, ReminderOwned},
     crypto::{enc, sign, TransmutationCircle},
     dashmap::{mapref::entry::Entry, DashMap},
@@ -29,7 +29,7 @@ use {
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId, Transport,
     },
-    onion::{EncryptedStream, PathId},
+    onion::{key_share, EncryptedStream, PathId},
     rand_core::OsRng,
     rpc::CallId,
     std::{
@@ -232,6 +232,10 @@ impl Server {
 
         let (sender, receiver) = topology_wrapper::channel();
         let behaviour = Behaviour {
+            key_share: topology_wrapper::new(
+                key_share::Behaviour::new(keys.enc.public_key()),
+                sender.clone(),
+            ),
             onion: topology_wrapper::new(
                 onion::Behaviour::new(
                     onion::Config::new(keys.enc.into(), peer_id)
@@ -331,6 +335,7 @@ impl Server {
                     rpcs::ADD_MEMBER => add_member.repl().restore();
                     rpcs::SEND_MESSAGE => send_message.repl().restore();
                     rpcs::FETCH_MESSAGES => fetch_messages.restore();
+                    rpcs::FETCH_MEMBER => fetch_members.restore();
                 };
                 profile::{
                     rpcs::CREATE_PROFILE => create.repl();
@@ -346,7 +351,7 @@ impl Server {
                     rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
                     rpcs::SEND_BLOCK => handle_message_block.restore().no_resp();
-                    rpcs::FETCH_CHAT_DATA => fetch_chat_data.restore();
+                    rpcs::FETCH_CHAT_DATA => fetch_chat_data;
                     rpcs::SEND_MESSAGE => send_message.restore();
                     rpcs::VOTE_BLOCK => vote.restore().no_resp();
                 };
@@ -355,7 +360,7 @@ impl Server {
                     rpcs::SEND_MAIL => send_mail.restore();
                     rpcs::READ_MAIL => read_mail.restore();
                     rpcs::SET_VAULT => set_vault.restore();
-                    rpcs::FETCH_PROFILE_FULL => fetch_full.restore();
+                    rpcs::FETCH_PROFILE_FULL => fetch_full;
                 };
             ),
             pending_rpcs: Default::default(),
@@ -384,7 +389,7 @@ impl Server {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Request(peer, id, body))) => {
                 let Some((prefix, topic, body)) =
-                    <(u8, PossibleTopic, Reminder)>::decode(&mut body.as_slice())
+                    <(u8, Topic, Reminder)>::decode(&mut body.as_slice())
                 else {
                     log::warn!("received invalid internal rpc request");
                     return;
@@ -417,9 +422,7 @@ impl Server {
             ))) => {
                 self.clients.push(Stream::new(id, inner));
             }
-            SwarmEvent::Behaviour(_ev) => {
-                todo!()
-            }
+            SwarmEvent::Behaviour(_ev) => {}
             e => log::debug!("{e:?}"),
         }
     }
@@ -443,18 +446,22 @@ impl Server {
             return;
         };
 
-        log::debug!("received message from client: {:?} {:?}", req.id, req.prefix);
+        log::info!("received message from client: {:?} {:?}", req.id, req.prefix);
 
-        if req.prefix == rpcs::SUBSCRIBE
-            && let Some(topic) = req.topic
-            && missing_topic.is_none()
-        {
+        if req.prefix == rpcs::SUBSCRIBE {
             let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
-            match topic {
-                PossibleTopic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
-                PossibleTopic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
+            if let Some(topic) = req.topic
+                && missing_topic.is_none()
+            {
+                log::info!("client subscribed to topic: {:?}", topic);
+                match topic {
+                    Topic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
+                    Topic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
+                }
+                _ = client.inner.write((req.id, Ok::<(), ChatError>(())));
+            } else {
+                _ = client.inner.write((req.id, Err::<(), ChatError>(ChatError::NotFound)));
             }
-            _ = client.inner.write((req.id, ()));
         } else {
             self.client_router.handle(req, handlers::State {
                 swarm: &mut self.swarm,
@@ -465,7 +472,7 @@ impl Server {
         }
     }
 
-    fn validate_topic(&self, topic: Option<PossibleTopic>) -> Option<Option<MissingTopic>> {
+    fn validate_topic(&self, topic: Option<Topic>) -> Option<Option<MissingTopic>> {
         let Some(topic) = topic else {
             return Some(None);
         };
@@ -483,10 +490,10 @@ impl Server {
         }
 
         Some(match topic {
-            PossibleTopic::Profile(prf) if !self.context.profiles.contains_key(&prf) => {
+            Topic::Profile(prf) if !self.context.profiles.contains_key(&prf) => {
                 Some(MissingTopic::Profile(prf))
             }
-            PossibleTopic::Chat(name) if let Entry::Vacant(v) = self.context.chats.entry(name) => {
+            Topic::Chat(name) if let Entry::Vacant(v) = self.context.chats.entry(name) => {
                 Some(MissingTopic::Chat {
                     name,
                     lock: v.insert(Default::default()).clone().try_write_owned().unwrap(),
@@ -562,10 +569,12 @@ impl Server {
 
     fn handle_chat_event(&mut self, chat: ChatName, event: Vec<u8>) {
         for client in self.clients.iter_mut() {
+            log::info!("sending chat event to client: {:?}", chat);
             let Some(call) = client.subscriptions.get(&chat) else {
                 continue;
             };
 
+            log::info!("sending chat event to client: {:?}", chat);
             _ = client.inner.write((call, Reminder(&event)));
         }
     }
@@ -615,7 +624,7 @@ impl Server {
 
     fn handle_repl_rpc(
         &mut self,
-        topic: PossibleTopic,
+        topic: Topic,
         msg: Vec<u8>,
         mut resp: Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>,
     ) {
@@ -720,6 +729,7 @@ struct Behaviour {
     dht: dht::Behaviour,
     rpc: topology_wrapper::Behaviour<rpc::Behaviour>,
     report: topology_wrapper::report::Behaviour,
+    key_share: topology_wrapper::Behaviour<key_share::Behaviour>,
 }
 
 enum InnerStream {
@@ -803,7 +813,7 @@ enum RequestEvent {
     Profile(Identity, Vec<u8>, oneshot::Sender<()>),
     Chat(ChatName, Vec<u8>),
     Rpc(PeerId, Vec<u8>, Option<oneshot::Sender<rpc::Result<Vec<u8>>>>),
-    ReplRpc(PossibleTopic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
+    ReplRpc(Topic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
 }
 
 pub struct OwnedContext {
@@ -814,7 +824,7 @@ pub struct OwnedContext {
     local_peer_id: PeerId,
 }
 
-fn rpc<'a>(prefix: u8, topic: impl Into<PossibleTopic>, msg: impl Codec<'a>) -> Vec<u8> {
+fn rpc<'a>(prefix: u8, topic: impl Into<Topic>, msg: impl Codec<'a>) -> Vec<u8> {
     (prefix, topic.into(), msg).to_bytes()
 }
 
@@ -833,12 +843,7 @@ impl OwnedContext {
         recv.await.is_ok()
     }
 
-    async fn repl_rpc_no_resp<'a>(
-        &self,
-        topic: impl Into<PossibleTopic>,
-        prefix: u8,
-        msg: impl Codec<'a>,
-    ) {
+    async fn repl_rpc_no_resp<'a>(&self, topic: impl Into<Topic>, prefix: u8, msg: impl Codec<'a>) {
         let topic = topic.into();
         _ = self
             .request_event_sink
@@ -849,7 +854,7 @@ impl OwnedContext {
 
     async fn _send_rpc_no_resp<'a>(
         &self,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         dest: PeerId,
         prefix: u8,
         msg: impl Codec<'a>,
@@ -864,7 +869,7 @@ impl OwnedContext {
 
     async fn repl_rpc<'a>(
         &self,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         prefix: u8,
         msg: impl Codec<'a>,
     ) -> impl futures::Stream<Item = (PeerId, rpc::Result<Vec<u8>>)> {
@@ -880,7 +885,7 @@ impl OwnedContext {
 
     async fn send_rpc<'a>(
         &self,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         peer: PeerId,
         send_mail: u8,
         mail: impl Codec<'a>,

@@ -156,6 +156,31 @@ impl Codec<'_> for Infallible {
     }
 }
 
+impl<'a, K: Codec<'a> + Ord, V: Codec<'a>> Codec<'a> for std::collections::BTreeMap<K, V> {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        self.len().encode(buffer)?;
+        for (k, v) in self {
+            k.encode(buffer)?;
+            v.encode(buffer)?;
+        }
+        Some(())
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let len = usize::decode(buffer)?;
+        if len * 2 > buffer.len() {
+            return None;
+        }
+        let mut s = Self::new();
+        for _ in 0..len {
+            let k = K::decode(buffer)?;
+            let v = V::decode(buffer)?;
+            s.insert(k, v);
+        }
+        Some(s)
+    }
+}
+
 impl<'a, T: Codec<'a>> Codec<'a> for std::collections::VecDeque<T> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;

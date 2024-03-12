@@ -4,7 +4,6 @@ use {
     chat_spec::UserName,
     leptos::*,
     std::str::FromStr,
-    web_sys::js_sys::wasm_bindgen,
 };
 
 pub async fn node(name: UserName) -> Result<chain_api::Client<WebSigner>, chain_api::Error> {

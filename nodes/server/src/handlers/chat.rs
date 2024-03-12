@@ -1,22 +1,24 @@
 use {
     super::MissingTopic,
+    chain_api::Nonce,
     chat_spec::{
-        advance_nonce, retain_messages, rpcs, unpack_messages_ref, BlockNumber, ChatError,
-        ChatEvent, ChatName, Cursor, Identity, Member, Message, Proof, ReplVec, REPLICATION_FACTOR,
+        retain_messages, rpcs, unpack_messages_ref, BlockNumber, ChatError, ChatEvent, ChatName,
+        Cursor, Identity, Member, Message, Permissions, Proof, ReplVec, REPLICATION_FACTOR,
     },
     component_utils::{encode_len, Codec, Reminder},
     dht::{try_peer_id_to_ed, U256},
     libp2p::{futures::StreamExt, PeerId},
     std::{
-        collections::{HashMap, HashSet, VecDeque},
+        collections::{btree_map, BTreeMap, HashMap, HashSet, VecDeque},
         ops::DerefMut,
+        sync::Arc,
     },
-    tokio::sync::OwnedRwLockWriteGuard,
+    tokio::sync::{OwnedRwLockWriteGuard, RwLock},
 };
 
 const MAX_MESSAGE_SIZE: usize = 1024 - 40;
 const MESSAGE_FETCH_LIMIT: usize = 20;
-const BLOCK_SIZE: usize = 1024 * 4;
+const BLOCK_SIZE: usize = 1024 * 32;
 const MAX_UNFINALIZED_BLOCKS: usize = 5;
 const UNFINALIZED_BUFFER_CAP: usize = BLOCK_SIZE * MAX_UNFINALIZED_BLOCKS;
 const BLOCK_HISTORY: usize = 8;
@@ -27,23 +29,42 @@ fn default<T: Default>() -> T {
     T::default()
 }
 
-pub async fn create(
-    missing_topic: MissingTopic,
-    (name, identity): (ChatName, Identity),
-) -> Result<()> {
-    crate::ensure!(
-        let MissingTopic::Chat { mut lock, .. } = missing_topic,
-        ChatError::AlreadyExists
-    );
+fn advance_nonce(nonce: &mut Nonce, new_nonce: Nonce) -> Result<()> {
+    if new_nonce <= *nonce {
+        return Err(ChatError::InvalidChatAction(*nonce));
+    }
+    *nonce = new_nonce;
+    Ok(())
+}
 
-    *lock = Chat::new(identity, name);
+pub async fn create(
+    cx: crate::Context,
+    missing_topic: Option<MissingTopic>,
+    name: ChatName,
+    identity: Identity,
+) -> Result<()> {
+    if let Some(missing_topic) = missing_topic {
+        crate::ensure!(
+            let MissingTopic::Chat { mut lock, .. } = missing_topic,
+            ChatError::AlreadyExists
+        );
+
+        *lock = Chat::new(identity, name);
+    } else {
+        crate::ensure!(
+            let dashmap::mapref::entry::Entry::Vacant(v) = cx.chats.entry(name),
+            ChatError::AlreadyExists
+        );
+
+        v.insert(Arc::new(RwLock::new(Chat::new(identity, name))));
+    }
 
     Ok(())
 }
 
 pub async fn add_member(
     cx: crate::Context,
-    (proof, identity): (Proof<ChatName>, Identity),
+    (proof, identity, member): (Proof<ChatName>, Identity, Member),
 ) -> Result<()> {
     let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
     let mut chat = chat.write().await;
@@ -53,48 +74,70 @@ pub async fn add_member(
     let sender_id = crypto::hash::from_raw(&proof.pk);
     let sender = chat.members.get_mut(&sender_id).ok_or(ChatError::NotMember)?;
 
-    crate::ensure!(
-        advance_nonce(&mut sender.action, proof.nonce),
-        ChatError::InvalidChatAction(sender.action)
-    );
+    sender.allocate_action(Permissions::INVITE)?;
+    advance_nonce(&mut sender.action, proof.nonce)?;
 
-    crate::ensure!(
-        chat.members.try_insert(identity, Member::default()).is_ok(),
-        ChatError::AlreadyMember
-    );
+    let member = Member {
+        rank: sender.rank + member.rank,
+        permissions: member.permissions & sender.permissions,
+        action_cooldown_ms: sender.action_cooldown_ms.max(member.action_cooldown_ms),
+        ..default()
+    };
+
+    match chat.members.entry(identity) {
+        btree_map::Entry::Occupied(existing) if existing.get().rank < member.rank => {
+            let existing = existing.into_mut();
+            existing.rank = member.rank;
+            existing.permissions = member.permissions;
+            existing.action_cooldown_ms = member.action_cooldown_ms;
+        }
+        btree_map::Entry::Vacant(v) => _ = v.insert(member),
+        _ => return Err(ChatError::NoPermission),
+    }
 
     Ok(())
+}
+
+pub async fn fetch_members(
+    cx: crate::Context,
+    name: ChatName,
+    (identity, count): (Identity, usize),
+) -> Result<Vec<Member>> {
+    Ok(cx
+        .chats
+        .get(&name)
+        .ok_or(ChatError::NotFound)?
+        .read()
+        .await
+        .members
+        .range(identity..)
+        .take(count.min(50))
+        .map(|(_, member)| *member)
+        .collect::<Vec<_>>())
 }
 
 pub async fn send_message(
     cx: crate::Context,
     group: super::FullReplGroup,
-    (proof, Reminder(msg)): (Proof<ChatName>, Reminder<'_>),
+    name: ChatName,
+    proof: Proof<Reminder<'_>>,
 ) -> Result<()> {
+    let msg = proof.context.0;
+    crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatError::MessageTooLarge);
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
-    let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
+    let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
 
     {
         let mut chat_guard = chat.write().await;
         let chat = chat_guard.deref_mut();
 
         let identity = crypto::hash::from_raw(&proof.pk);
-        let sender = match chat.members.get_mut(&identity).ok_or(ChatError::NotMember) {
-            Ok(sender) => sender,
-            Err(e) => {
-                log::warn!("not a member: {:?} {:?}", e, chat.members);
-                return Err(e);
-            }
-        };
+        let sender = chat.members.get_mut(&identity).ok_or(ChatError::NotMember)?;
         let nonce = sender.action;
 
-        crate::ensure!(
-            advance_nonce(&mut sender.action, proof.nonce),
-            ChatError::InvalidChatAction(sender.action)
-        );
-
-        crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatError::MessageTooLarge);
+        sender.allocate_action(Permissions::SEND)?;
+        advance_nonce(&mut sender.action, proof.nonce)?;
 
         let message = Message { identity, nonce, content: Reminder(msg) };
         let encoded_len = message.encoded_len();
@@ -110,11 +153,11 @@ pub async fn send_message(
             && chat.buffer.len() % BLOCK_SIZE > BLOCK_SIZE / 2
             && (chat.buffer.len() - encoded_len - 2) % BLOCK_SIZE < BLOCK_SIZE / 2
         {
-            chat.resolve_finalization(cx, group, proof.context).await;
+            chat.resolve_finalization(cx, group, name).await;
         }
     }
 
-    cx.push_chat_event(proof.context, ChatEvent::Message(proof, Reminder(msg))).await;
+    cx.push_chat_event(name, ChatEvent::Message(name, proof)).await;
 
     Ok(())
 }
@@ -130,7 +173,8 @@ pub async fn vote(
         return Err(ChatError::NoReplicator);
     }
 
-    let compressed = dht::try_peer_id_to_ed(origin).map(U256::from).unwrap();
+    let compressed =
+        dht::try_peer_id_to_ed(origin).map(U256::from).ok_or(ChatError::NoReplicator)?;
     let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
     let mut chat = chat.write().await;
     let chat = chat.deref_mut();
@@ -161,7 +205,7 @@ pub async fn vote(
 
     let number = vote.number;
     vote.votes.push(compressed);
-    let decision = vote.vote(agrees);
+    let decision = vote.vote(agrees as usize, !agrees as usize);
     chat.process_vote_decision(cx.local_peer_id, i, number, decision);
 
     Ok(())
@@ -176,9 +220,22 @@ pub async fn handle_message_block(
 ) -> Result<()> {
     use {chat_spec::InvalidBlockReason::*, ChatError::*};
 
+    async fn apply_vote(chat: &mut Chat, cx: crate::Context, name: ChatName, vote: BlockVote) {
+        cx.repl_rpc_no_resp(name, rpcs::VOTE_BLOCK, (vote.block.hash, vote.number, vote.no == 0))
+            .await;
+        if let Some((i, v)) =
+            chat.votes.iter_mut().enumerate().find(|(_, v)| v.block.hash == vote.block.hash)
+        {
+            v.block = vote.block;
+            let decision = v.vote(vote.yes, vote.no);
+            chat.process_vote_decision(cx.local_peer_id, i, vote.number, decision);
+        } else {
+            chat.votes.push_back(vote);
+        }
+    }
+
+    let compressed_origin = dht::try_peer_id_to_ed(origin).map(U256::from).ok_or(NoReplicator)?;
     let chat = cx.chats.get(&name).ok_or(NotFound)?.clone();
-    let compressed_origin =
-        dht::try_peer_id_to_ed(origin).map(U256::from).expect("its in the table");
 
     let block = Block::from(block);
     let vote = BlockVote {
@@ -196,13 +253,10 @@ pub async fn handle_message_block(
         return Err(ChatError::Outdated);
     }
 
-    if base_hash != chat.get_latest_hash(number).unwrap_or_default() {
-        log::warn!(
-            "block not based on latest hash: us:\ne: {:?}\ng: {:?}",
-            chat.get_latest_hash(number).unwrap_or_default(),
-            base_hash,
-        );
-        chat.vote(cx, name, BlockVote { no: 1, ..vote }).await;
+    let latest_hash = chat.get_latest_hash(number).unwrap_or_default();
+    if base_hash != latest_hash {
+        log::warn!("block not based on latest hash: us:\ne: {:?}\ng: {:?}", latest_hash, base_hash,);
+        apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
         return Err(ChatError::Outdated);
     }
 
@@ -219,7 +273,7 @@ pub async fn handle_message_block(
             decompress_peer_id(finalizer),
             chat.buffer.len()
         );
-        chat.vote(cx, name, BlockVote { no: 1, ..vote }).await;
+        apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
         return Err(InvalidBlock(NotExpected));
     }
 
@@ -235,11 +289,11 @@ pub async fn handle_message_block(
             cx.local_peer_id,
             origin,
         );
-        chat.vote(cx, name, BlockVote { no: 1, ..vote }).await;
+        apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
         return Err(InvalidBlock(ExtraMessages));
     }
 
-    chat.vote(cx, name, BlockVote { yes: 2, ..vote }).await;
+    apply_vote(chat, cx, name, BlockVote { yes: 2, ..vote }).await;
     Ok(())
 }
 
@@ -247,6 +301,54 @@ pub async fn fetch_chat_data(cx: crate::Context, name: ChatName, _: ()) -> Resul
     let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
     let chat = chat.read().await;
     Ok(MinimalChatData { number: chat.number, members: chat.members.clone() })
+}
+
+pub async fn fetch_messages(
+    cx: crate::Context,
+    name: ChatName,
+    mut cursor: Cursor,
+) -> Result<(Cursor, Vec<u8>)> {
+    let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
+    let chat = chat.read().await;
+
+    if cursor == Cursor::INIT {
+        cursor.block = chat.number + 1;
+        cursor.offset = chat.buffer.len();
+    }
+
+    let bail = Ok((Cursor::INIT, vec![]));
+
+    if cursor.offset == 0 {
+        if cursor.block == 0 {
+            return bail;
+        }
+        cursor.block -= 1;
+    }
+
+    let block = loop {
+        let block = match chat.number <= cursor.block {
+            true => &chat.buffer,
+            false => &chat.finalized[cursor.block as usize % BLOCK_HISTORY].data,
+        };
+        if cursor.offset <= block.len() {
+            break block;
+        }
+        cursor.block += 1;
+        cursor.offset -= block.len();
+    };
+
+    if cursor.offset == 0 {
+        cursor.offset = block.len();
+    }
+
+    let Some(slice) = block.get(..cursor.offset) else { return bail };
+    let len = unpack_messages_ref(slice)
+        .take(MESSAGE_FETCH_LIMIT)
+        .map(|msg| msg.len() + 2)
+        .sum::<usize>();
+    cursor.offset -= len;
+
+    Ok((cursor, slice[cursor.offset..].to_vec()))
 }
 
 pub async fn recover(
@@ -302,7 +404,7 @@ fn reconstruct_chat(block_data: &mut ReplVec<(PeerId, MinimalChatData)>) -> Mini
 
     fn retain_members(
         block_data: &mut ReplVec<(PeerId, MinimalChatData)>,
-    ) -> HashMap<Identity, Member> {
+    ) -> BTreeMap<Identity, Member> {
         let mut member_count_map = HashMap::<Identity, ReplVec<Member>>::new();
         for (id, other) in block_data.iter().flat_map(|(_, data)| &data.members) {
             member_count_map.entry(*id).or_default().push(*other);
@@ -319,46 +421,6 @@ fn reconstruct_chat(block_data: &mut ReplVec<(PeerId, MinimalChatData)>) -> Mini
     let members = retain_members(block_data);
     let number = block_data.first().map(|(_, data)| data.number).unwrap_or(0);
     MinimalChatData { number, members }
-}
-
-pub async fn fetch_messages(
-    cx: crate::Context,
-    (chat, mut cursor): (ChatName, Cursor),
-) -> Result<(Cursor, Vec<u8>)> {
-    let chat = cx.chats.get(&chat).ok_or(ChatError::NotFound)?.clone();
-    let chat = chat.read().await;
-
-    if cursor == Cursor::INIT {
-        cursor.block = chat.number + 1;
-        cursor.offset = chat.buffer.len();
-    }
-
-    let bail = Ok((Cursor::INIT, vec![]));
-
-    if cursor.offset == 0 {
-        if cursor.block == 0 {
-            return bail;
-        }
-        cursor.block += 1;
-    }
-
-    let block = match chat.number < cursor.block {
-        true => &chat.buffer,
-        false => &chat.finalized[cursor.block as usize % BLOCK_HISTORY].data,
-    };
-
-    if cursor.offset == 0 {
-        cursor.offset = block.len();
-    }
-
-    let Some(slice) = block.get(..cursor.offset) else { return bail };
-    let len = unpack_messages_ref(slice)
-        .take(MESSAGE_FETCH_LIMIT)
-        .map(|msg| msg.len() + 2)
-        .sum::<usize>();
-    cursor.offset -= len;
-
-    Ok((cursor, slice[cursor.offset..].to_vec()))
 }
 
 #[derive(Default)]
@@ -383,26 +445,22 @@ pub struct BlockVote {
 }
 
 impl BlockVote {
-    fn vote(&mut self, agrees: bool) -> Option<Option<Block>> {
-        if agrees {
-            self.yes += 1;
-            if self.yes > REPLICATION_FACTOR.get() / 2 && !self.block.data.is_empty() {
-                return Some(Some(std::mem::take(&mut self.block)));
-            }
-        } else {
-            self.no += 1;
-            if self.no > REPLICATION_FACTOR.get() / 2 {
-                return Some(None);
-            }
+    fn vote(&mut self, yes: usize, no: usize) -> Option<Option<Block>> {
+        self.yes += yes;
+        if self.yes > REPLICATION_FACTOR.get() / 2 && !self.block.data.is_empty() {
+            return Some(Some(std::mem::take(&mut self.block)));
         }
-
+        self.no += no;
+        if self.no > REPLICATION_FACTOR.get() / 2 {
+            return Some(None);
+        }
         None
     }
 }
 
 #[derive(Default)]
 pub struct Chat {
-    pub members: HashMap<Identity, Member>,
+    pub members: BTreeMap<Identity, Member>,
     pub finalized: VecDeque<Block>,
     pub number: BlockNumber,
     pub buffer: Vec<u8>,
@@ -411,7 +469,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(id: Identity, _: ChatName) -> Self {
-        Self { members: [(id, Member::default())].into(), ..Default::default() }
+        Self { members: [(id, Member::best())].into(), ..Default::default() }
     }
 
     pub async fn resolve_finalization(
@@ -422,7 +480,8 @@ impl Chat {
     ) {
         let selected =
             self.select_finalizer(group.clone(), self.number, self.buffer.len() - BLOCK_SIZE);
-        if selected != try_peer_id_to_ed(cx.local_peer_id).map(U256::from).unwrap() {
+        let us = try_peer_id_to_ed(cx.local_peer_id).map(U256::from).expect("we can trust us");
+        if selected != us {
             return;
         }
 
@@ -510,27 +569,6 @@ impl Chat {
             .map(|b| b.hash)
     }
 
-    async fn vote(&mut self, cx: crate::Context, name: ChatName, vote: BlockVote) {
-        cx.repl_rpc_no_resp(name, rpcs::VOTE_BLOCK, (vote.block.hash, vote.number, vote.no == 0))
-            .await;
-        if let Some((i, v)) =
-            self.votes.iter_mut().enumerate().find(|(_, v)| v.block.hash == vote.block.hash)
-        {
-            v.block = vote.block;
-            let number = vote.number;
-            let mut decision = None;
-            for _ in 0..vote.yes {
-                decision = decision.or(v.vote(true));
-            }
-            for _ in 0..vote.no {
-                decision = decision.or(v.vote(false));
-            }
-            self.process_vote_decision(cx.local_peer_id, i, number, decision);
-        } else {
-            self.votes.push_back(vote);
-        }
-    }
-
     fn process_vote_decision(
         &mut self,
         us: PeerId,
@@ -543,9 +581,7 @@ impl Chat {
                 self.finalize_block(us, number, block);
                 self.votes.drain(..i + 1);
             }
-            Some(None) => {
-                self.votes.remove(i);
-            }
+            Some(None) => _ = self.votes.remove(i),
             None => {}
         }
     }
@@ -579,5 +615,5 @@ pub fn decompress_peer_id(compressed: U256) -> PeerId {
 #[derive(component_utils::Codec)]
 pub struct MinimalChatData {
     pub number: BlockNumber,
-    pub members: HashMap<Identity, Member>,
+    pub members: BTreeMap<Identity, Member>,
 }

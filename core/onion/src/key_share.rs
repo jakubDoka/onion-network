@@ -1,20 +1,27 @@
 use {
     crypto::{enc, TransmutationCircle},
-    futures::{AsyncReadExt, Future},
+    futures::{AsyncReadExt, AsyncWriteExt, Future},
     libp2p::{
-        core::{upgrade::DeniedUpgrade, UpgradeInfo},
+        core::UpgradeInfo,
         swarm::{ConnectionHandler, NetworkBehaviour, SubstreamProtocol},
-        OutboundUpgrade, PeerId, StreamProtocol,
+        InboundUpgrade, OutboundUpgrade, PeerId, StreamProtocol,
     },
-    std::{collections::HashMap, convert::Infallible, io, iter, mem},
+    std::{collections::HashMap, convert::Infallible, io, iter},
 };
 
 component_utils::decl_stream_protocol!(KEY_SHARE_PROTOCOL = "ksr");
 
 #[derive(Default)]
 pub struct Behaviour {
+    local_key: Option<enc::PublicKey>,
     pub keys: HashMap<PeerId, enc::PublicKey>,
     new_keys: Vec<(PeerId, enc::PublicKey)>,
+}
+
+impl Behaviour {
+    pub fn new(local_key: enc::PublicKey) -> Self {
+        Self { local_key: Some(local_key), ..Default::default() }
+    }
 }
 
 impl NetworkBehaviour for Behaviour {
@@ -28,7 +35,10 @@ impl NetworkBehaviour for Behaviour {
         _local_addr: &libp2p::Multiaddr,
         _remote_addr: &libp2p::Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(Handler { connect: false, key: None })
+        Ok(match self.local_key {
+            Some(key) => Handler::Sharing(key),
+            None => Handler::Done,
+        })
     }
 
     fn handle_established_outbound_connection(
@@ -38,7 +48,10 @@ impl NetworkBehaviour for Behaviour {
         _addr: &libp2p::Multiaddr,
         _role_override: libp2p::core::Endpoint,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(Handler { connect: !self.keys.contains_key(&peer), key: None })
+        Ok(match self.keys.contains_key(&peer) {
+            true => Handler::Done,
+            false => Handler::Fesh,
+        })
     }
 
     fn on_swarm_event(&mut self, _event: libp2p::swarm::FromSwarm) {}
@@ -66,21 +79,32 @@ impl NetworkBehaviour for Behaviour {
     }
 }
 
-pub struct Handler {
-    connect: bool,
-    key: Option<enc::PublicKey>,
+pub enum Handler {
+    Fesh,
+    Waiting,
+    Received(enc::PublicKey),
+    Sharing(enc::PublicKey),
+    Done,
 }
 
 impl ConnectionHandler for Handler {
     type FromBehaviour = Infallible;
     type InboundOpenInfo = ();
-    type InboundProtocol = DeniedUpgrade;
+    type InboundProtocol = InboundProtocol;
     type OutboundOpenInfo = ();
     type OutboundProtocol = Protocol;
     type ToBehaviour = enc::PublicKey;
 
     fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
-        SubstreamProtocol::new(DeniedUpgrade, ())
+        SubstreamProtocol::new(
+            InboundProtocol {
+                key: match self {
+                    Handler::Sharing(key) => Some(*key),
+                    _ => None,
+                },
+            },
+            (),
+        )
     }
 
     fn poll(
@@ -93,16 +117,21 @@ impl ConnectionHandler for Handler {
             Self::ToBehaviour,
         >,
     > {
-        if mem::take(&mut self.connect) {
-            std::task::Poll::Ready(
-                libp2p::swarm::ConnectionHandlerEvent::OutboundSubstreamRequest {
-                    protocol: SubstreamProtocol::new(Protocol, ()),
-                },
-            )
-        } else if let Some(key) = self.key.take() {
-            std::task::Poll::Ready(libp2p::swarm::ConnectionHandlerEvent::NotifyBehaviour(key))
-        } else {
-            std::task::Poll::Pending
+        match self {
+            Handler::Fesh => {
+                *self = Handler::Waiting;
+                std::task::Poll::Ready(
+                    libp2p::swarm::ConnectionHandlerEvent::OutboundSubstreamRequest {
+                        protocol: SubstreamProtocol::new(Protocol, ()),
+                    },
+                )
+            }
+            Handler::Received(key) => {
+                let key = *key;
+                *self = Handler::Done;
+                std::task::Poll::Ready(libp2p::swarm::ConnectionHandlerEvent::NotifyBehaviour(key))
+            }
+            _ => std::task::Poll::Pending,
         }
     }
 
@@ -120,7 +149,7 @@ impl ConnectionHandler for Handler {
         >,
     ) {
         if let libp2p::swarm::handler::ConnectionEvent::FullyNegotiatedOutbound(o) = event {
-            self.key = Some(o.protocol);
+            *self = Handler::Received(o.protocol);
         }
     }
 }
@@ -147,6 +176,34 @@ impl OutboundUpgrade<libp2p::Stream> for Protocol {
             let mut key = [0; std::mem::size_of::<enc::PublicKey>()];
             socket.read_exact(&mut key).await?;
             Ok(enc::PublicKey::from_bytes(key))
+        }
+    }
+}
+
+pub struct InboundProtocol {
+    key: Option<enc::PublicKey>,
+}
+
+impl UpgradeInfo for InboundProtocol {
+    type Info = StreamProtocol;
+    type InfoIter = std::iter::Once<Self::Info>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        iter::once(KEY_SHARE_PROTOCOL)
+    }
+}
+
+impl InboundUpgrade<libp2p::Stream> for InboundProtocol {
+    type Error = io::Error;
+    type Output = ();
+
+    type Future = impl Future<Output = Result<Self::Output, Self::Error>>;
+
+    fn upgrade_inbound(self, mut socket: libp2p::Stream, _: Self::Info) -> Self::Future {
+        async move {
+            let Some(key) = self.key else { return Ok(()) };
+            socket.write_all(key.as_bytes()).await?;
+            Ok(())
         }
     }
 }

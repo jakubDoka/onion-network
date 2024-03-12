@@ -36,6 +36,7 @@ fn main() {
                 .env("NODE_ACCOUNT", "//Alice")
                 .env("KEY_PATH", format!("node_keys/node{i}.keys"))
                 .env("NONCE", i.to_string())
+                .env("RPC_TIMEOUT", "1000")
                 .stdout(process::Stdio::piped())
                 .stderr(process::Stdio::piped())
                 .spawn()

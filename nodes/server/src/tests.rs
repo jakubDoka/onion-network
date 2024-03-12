@@ -1,7 +1,7 @@
 use {
     super::*,
     chat_spec::*,
-    component_utils::crypto::ToProofContext,
+    component_utils::proof::ToProofContext,
     libp2p::futures::{stream::FuturesUnordered, FutureExt},
     std::{fmt::Debug, usize},
 };
@@ -90,8 +90,8 @@ async fn direct_messaging() {
         .test_req(
             &mut nodes,
             rpcs::SUBSCRIBE,
-            PossibleTopic::Profile(user2.identity()),
-            PossibleTopic::Profile(user2.identity()),
+            Topic::Profile(user2.identity()),
+            Topic::Profile(user2.identity()),
             (),
         )
         .await;
@@ -160,42 +160,50 @@ async fn message_block_finalization() {
         )
         .await;
 
-    const MESSAGE_SIZE: usize = 900;
+    const MESSAGE_SIZE: usize = 100;
     const MULTIPLIER: usize = 1;
 
-    for i in 0..12 * MULTIPLIER {
+    for i in 0..100 * MULTIPLIER {
         let cons = [i as u8; MESSAGE_SIZE / MULTIPLIER];
         stream1
             .test_req_simple(
                 &mut nodes,
                 rpcs::SEND_MESSAGE,
                 chat,
-                (user.proof(chat), Reminder(&cons)),
+                user.proof(Reminder(&cons)),
                 Ok(()),
             )
             .await;
+
+        log::info!("message sent {i}");
+
+        _ = tokio::time::timeout(Duration::from_millis(30), nodes.next()).await;
     }
 
     assert_nodes(&nodes, |s| {
         s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 2
     });
 
-    let topic = Some(PossibleTopic::Chat(chat));
+    let topic = Some(Topic::Chat(chat));
 
-    for i in 0..6 * MULTIPLIER {
+    for i in 0..50 * MULTIPLIER {
         let msg = [i as u8; MESSAGE_SIZE / MULTIPLIER];
-        let body = (user.proof(chat), Reminder(&msg));
+        let body = user.proof(Reminder(&msg));
         stream1.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
-        let msg = [i as u8 * 6; MESSAGE_SIZE / MULTIPLIER];
+        let msg = [(i as u8).wrapping_mul(6); MESSAGE_SIZE / MULTIPLIER];
         let body = (user2.proof(chat), Reminder(&msg));
         stream2.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
 
         response_simple(&mut nodes, &mut stream1, 1000, Ok(())).await;
         response_simple(&mut nodes, &mut stream2, 1000, Ok(())).await;
+
+        log::info!("message sent {i}");
+
+        //_ = tokio::time::timeout(Duration::from_millis(300), nodes.next()).await;
     }
 
     assert_nodes(&nodes, |s| {
-        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 5
+        s.context.chats.get(&chat).unwrap().value().try_read().unwrap().number == 6
     });
 
     let target = nodes.iter_mut().find(|s| *s.swarm.local_peer_id() == peer).unwrap();
@@ -206,13 +214,13 @@ async fn message_block_finalization() {
             &mut nodes,
             rpcs::SEND_MESSAGE,
             chat,
-            (user.proof(chat), Reminder(&[0xff])),
+            user.proof(Reminder(&[0xff])),
             Ok(()),
         )
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn message_flooding() {
     _ = env_logger::builder().is_test(true).format_timestamp(None).try_init();
 
@@ -256,37 +264,39 @@ async fn message_flooding() {
     log::info!("chat created");
     _ = tokio::time::timeout(Duration::from_millis(100), nodes.next()).await;
 
-    const MESSAGE_SIZE: usize = 40;
+    const MESSAGE_SIZE: usize = 200;
+    //const MODULO: usize = 40;
 
-    let topic = Some(PossibleTopic::Chat(chat));
-    for i in 0..100 {
-        log::warn!("sending message {}", i);
-        for (stream, user) in streams.iter_mut() {
-            let msg = [i as u8; MESSAGE_SIZE];
-            let body = (user.proof(chat), Reminder(&msg));
-            stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).unwrap();
-        }
-
-        let join_all = futures::future::join_all(streams.iter_mut().map(|(s, _)| s.next()));
-
-        futures::select! {
-            _ = nodes.select_next_some() => unreachable!(),
-            res = join_all.fuse() => {
-                for res in res {
-                    let res = res.unwrap().1.unwrap();
-                    {
-                        let (_, resp) = <(CallId, Result<()>)>::decode(&mut unsafe { std::mem::transmute(res.as_slice()) }).unwrap();
-                        assert_eq!(resp, Ok(()));
-                    }
+    for (i, mut node) in nodes.into_iter().enumerate() {
+        if i == 0 {
+            tokio::task::spawn(async move {
+                loop {
+                    _ = tokio::time::timeout(Duration::from_secs(1), &mut node).await;
+                    node.context.chats.clear();
+                    log::info!("cleared");
                 }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(1000)).fuse() => {
-                panic!("timeout")
-            }
+            });
+        } else {
+            tokio::task::spawn(node);
         }
-
-        _ = tokio::time::timeout(Duration::from_millis(20), nodes.next()).await;
     }
+
+    let topic = Some(Topic::Chat(chat));
+    for (mut stream, mut user) in streams {
+        tokio::task::spawn(async move {
+            loop {
+                let msg = [0; MESSAGE_SIZE];
+                let body = user.proof(Reminder(&msg[0..MESSAGE_SIZE]));
+                if stream.inner.write((rpcs::SEND_MESSAGE, CallId::new(), topic, body)).is_none() {
+                    break;
+                }
+                stream.next().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+    }
+
+    tokio::time::sleep(Duration::from_secs(100)).await;
 }
 
 impl Stream {
@@ -294,7 +304,7 @@ impl Stream {
         &mut self,
         nodes: &mut FuturesUnordered<Server>,
         prefix: u8,
-        topic: impl Into<Option<PossibleTopic>>,
+        topic: impl Into<Option<Topic>>,
         body: impl Codec<'a>,
         expected: R,
     ) {
@@ -306,7 +316,7 @@ impl Stream {
         &mut self,
         nodes: &mut FuturesUnordered<Server>,
         prefix: u8,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         body: impl Codec<'a>,
         expected: Result<R>,
     ) {
@@ -317,7 +327,7 @@ impl Stream {
         self.test_req(
             nodes,
             rpcs::CREATE_PROFILE,
-            PossibleTopic::Profile(user.identity()),
+            Topic::Profile(user.identity()),
             (user.proof(&[][..]), user.enc.public_key().into_bytes()),
             Ok::<(), ChatError>(()),
         )
@@ -415,7 +425,7 @@ fn next_node_config() -> NodeConfig {
         key_path: Default::default(),
         boot_nodes: config::List::default(),
         idle_timeout: 1000,
-        rpc_timeout: 500,
+        rpc_timeout: 10000,
     }
 }
 

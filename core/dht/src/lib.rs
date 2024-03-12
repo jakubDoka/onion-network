@@ -1,5 +1,6 @@
 #![feature(trait_alias)]
 #![feature(let_chains)]
+pub use primitive_types::U256;
 use {
     libp2p::{
         identity::{ed25519, PublicKey},
@@ -7,7 +8,6 @@ use {
         swarm::NetworkBehaviour,
         Multiaddr, PeerId,
     },
-    primitive_types::U256,
     std::{convert::Infallible, iter},
 };
 
@@ -186,7 +186,7 @@ pub fn try_peer_id_to_ed(id: PeerId) -> Option<[u8; 32]> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
-    id: U256,
+    pub id: U256,
     pub addr: Multiaddr,
 }
 

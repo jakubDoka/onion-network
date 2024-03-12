@@ -12,24 +12,24 @@
 #![feature(slice_take)]
 
 use {
-    self::handlers::chat::Chat,
+    self::handlers::{chat::Chat, MissingTopic},
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
     chain_api::{ContractId, NodeAddress, NodeData},
-    chat_spec::{rpcs, ChatName, Identity, PossibleTopic, Profile, Request, REPLICATION_FACTOR},
+    chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     component_utils::{Codec, LinearMap, Reminder, ReminderOwned},
     crypto::{enc, sign, TransmutationCircle},
-    dashmap::{DashMap, DashSet},
+    dashmap::{mapref::entry::Entry, DashMap},
     dht::Route,
     futures::channel::mpsc,
     libp2p::{
         core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
         futures::{self, channel::oneshot, SinkExt, StreamExt},
-        identity::{self, ed25519},
+        identity::ed25519,
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId, Transport,
     },
-    onion::{EncryptedStream, PathId},
+    onion::{key_share, EncryptedStream, PathId},
     rand_core::OsRng,
     rpc::CallId,
     std::{
@@ -232,6 +232,10 @@ impl Server {
 
         let (sender, receiver) = topology_wrapper::channel();
         let behaviour = Behaviour {
+            key_share: topology_wrapper::new(
+                key_share::Behaviour::new(keys.enc.public_key()),
+                sender.clone(),
+            ),
             onion: topology_wrapper::new(
                 onion::Behaviour::new(
                     onion::Config::new(keys.enc.into(), peer_id)
@@ -265,10 +269,10 @@ impl Server {
         )
         .map(move |t, _| match t {
             futures::future::Either::Left((p, m)) => {
-                (p, StreamMuxerBox::new(topology_wrapper::muxer::Muxer::new(m, sender)))
+                (p, StreamMuxerBox::new(topology_wrapper::muxer::new(m, sender)))
             }
             futures::future::Either::Right((p, m)) => {
-                (p, StreamMuxerBox::new(topology_wrapper::muxer::Muxer::new(m, sender)))
+                (p, StreamMuxerBox::new(topology_wrapper::muxer::new(m, sender)))
             }
         })
         .boxed();
@@ -314,14 +318,14 @@ impl Server {
         let (request_event_sink, request_events) = mpsc::channel(100);
 
         Ok(Self {
-            swarm,
             context: Box::leak(Box::new(OwnedContext {
                 profiles: Default::default(),
                 online: Default::default(),
                 chats: Default::default(),
-                recovers: Default::default(),
                 request_event_sink,
+                local_peer_id: *swarm.local_peer_id(),
             })),
+            swarm,
             request_events,
             clients: Default::default(),
             stake_events,
@@ -331,6 +335,7 @@ impl Server {
                     rpcs::ADD_MEMBER => add_member.repl().restore();
                     rpcs::SEND_MESSAGE => send_message.repl().restore();
                     rpcs::FETCH_MESSAGES => fetch_messages.restore();
+                    rpcs::FETCH_MEMBER => fetch_members.restore();
                 };
                 profile::{
                     rpcs::CREATE_PROFILE => create.repl();
@@ -345,10 +350,10 @@ impl Server {
                 chat::{
                     rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
+                    rpcs::SEND_BLOCK => handle_message_block.restore().no_resp();
+                    rpcs::FETCH_CHAT_DATA => fetch_chat_data;
                     rpcs::SEND_MESSAGE => send_message.restore();
-                    rpcs::BLOCK_PROPOSAL => propose_msg_block;
-                    rpcs::MAJOR_BLOCK => receive_block;
-                    rpcs::FETCH_MINIMAL_CHAT_DATA => fetch_minimal_chat_data;
+                    rpcs::VOTE_BLOCK => vote.restore().no_resp();
                 };
                 profile::{
                     rpcs::CREATE_PROFILE => create;
@@ -384,13 +389,13 @@ impl Server {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Request(peer, id, body))) => {
                 let Some((prefix, topic, body)) =
-                    <(u8, PossibleTopic, Reminder)>::decode(&mut body.as_slice())
+                    <(u8, Topic, Reminder)>::decode(&mut body.as_slice())
                 else {
                     log::warn!("received invalid internal rpc request");
                     return;
                 };
 
-                let Some(we_have_the_topic) = self.validate_topic(Some(topic)) else {
+                let Some(missing_topic) = self.validate_topic(Some(topic)) else {
                     log::warn!("received request with invalid topic: {:?}", topic);
                     return;
                 };
@@ -401,7 +406,7 @@ impl Server {
                     swarm: &mut self.swarm,
                     location: OnlineLocation::Remote(peer),
                     context: self.context,
-                    missing_topic: !we_have_the_topic,
+                    missing_topic,
                 });
             }
             SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Response(peer, id, body))) => {
@@ -417,9 +422,7 @@ impl Server {
             ))) => {
                 self.clients.push(Stream::new(id, inner));
             }
-            SwarmEvent::Behaviour(_ev) => {
-                todo!()
-            }
+            SwarmEvent::Behaviour(_ev) => {}
             e => log::debug!("{e:?}"),
         }
     }
@@ -428,46 +431,50 @@ impl Server {
         let req = match req {
             Ok(req) => req,
             Err(e) => {
-                log::info!("failed to read from client: {}", e);
+                log::warn!("failed to read from client: {}", e);
                 return;
             }
         };
 
         let Some(req) = chat_spec::Request::decode(&mut req.as_slice()) else {
-            log::info!("failed to decode client request: {:?}", req);
+            log::warn!("failed to decode client request: {:?}", req);
             return;
         };
 
-        let Some(we_have_the_topic) = self.validate_topic(req.topic) else {
+        let Some(missing_topic) = self.validate_topic(req.topic) else {
             log::warn!("client sent message with invalid topic: {:?}", req.topic);
             return;
         };
 
-        log::debug!("received message from client: {:?} {:?}", req.id, req.prefix);
+        log::info!("received message from client: {:?} {:?}", req.id, req.prefix);
 
-        if req.prefix == rpcs::SUBSCRIBE
-            && let Some(topic) = req.topic
-            && we_have_the_topic
-        {
+        if req.prefix == rpcs::SUBSCRIBE {
             let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
-            match topic {
-                PossibleTopic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
-                PossibleTopic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
+            if let Some(topic) = req.topic
+                && missing_topic.is_none()
+            {
+                log::info!("client subscribed to topic: {:?}", topic);
+                match topic {
+                    Topic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
+                    Topic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
+                }
+                _ = client.inner.write((req.id, Ok::<(), ChatError>(())));
+            } else {
+                _ = client.inner.write((req.id, Err::<(), ChatError>(ChatError::NotFound)));
             }
-            _ = client.inner.write((req.id, ()));
         } else {
             self.client_router.handle(req, handlers::State {
                 swarm: &mut self.swarm,
                 location: OnlineLocation::Local(id),
                 context: self.context,
-                missing_topic: !we_have_the_topic,
+                missing_topic,
             });
         }
     }
 
-    fn validate_topic(&self, topic: Option<PossibleTopic>) -> Option<bool> {
+    fn validate_topic(&self, topic: Option<Topic>) -> Option<Option<MissingTopic>> {
         let Some(topic) = topic else {
-            return Some(false);
+            return Some(None);
         };
 
         if self
@@ -482,25 +489,25 @@ impl Server {
             return None;
         }
 
-        let mut we_have_the_topic = match topic {
-            PossibleTopic::Profile(prf) => self.context.profiles.contains_key(&prf),
-            PossibleTopic::Chat(chat) => self.context.chats.contains_key(&chat),
-        };
-
-        if !we_have_the_topic {
-            we_have_the_topic = !self.context.recovers.insert(topic);
-        } else {
-            self.context.recovers.remove(&topic);
-        }
-
-        Some(we_have_the_topic)
+        Some(match topic {
+            Topic::Profile(prf) if !self.context.profiles.contains_key(&prf) => {
+                Some(MissingTopic::Profile(prf))
+            }
+            Topic::Chat(name) if let Entry::Vacant(v) = self.context.chats.entry(name) => {
+                Some(MissingTopic::Chat {
+                    name,
+                    lock: v.insert(Default::default()).clone().try_write_owned().unwrap(),
+                })
+            }
+            _ => None,
+        })
     }
 
     fn handle_stake_event(&mut self, event: Result<chain_api::StakeEvent, chain_api::Error>) {
         let event = match event {
             Ok(event) => event,
             Err(e) => {
-                log::info!("failed to read from chain: {}", e);
+                log::warn!("failed to read from chain: {}", e);
                 return;
             }
         };
@@ -508,31 +515,31 @@ impl Server {
         match event {
             chain_api::StakeEvent::Joined(j) => {
                 let Ok(pk) = unpack_node_id(j.identity) else {
-                    log::info!("invalid node id");
+                    log::warn!("invalid node id");
                     return;
                 };
-                log::info!("node joined the network: {pk:?}");
+                log::debug!("node joined the network: {pk:?}");
                 let route = Route::new(pk, unpack_node_addr(j.addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
             chain_api::StakeEvent::Reclaimed(r) => {
                 let Ok(pk) = unpack_node_id(r.identity) else {
-                    log::info!("invalid node id");
+                    log::warn!("invalid node id");
                     return;
                 };
-                log::info!("node left the network: {pk:?}");
+                log::debug!("node left the network: {pk:?}");
                 self.swarm
                     .behaviour_mut()
                     .dht
                     .table
-                    .remove(identity::PublicKey::from(pk).to_peer_id());
+                    .remove(libp2p::identity::PublicKey::from(pk).to_peer_id());
             }
             chain_api::StakeEvent::AddrChanged(c) => {
                 let Ok(pk) = unpack_node_id(c.identity) else {
-                    log::info!("invalid node id");
+                    log::warn!("invalid node id");
                     return;
                 };
-                log::info!("node changed address: {pk:?}");
+                log::debug!("node changed address: {pk:?}");
                 let route = Route::new(pk, unpack_node_addr(c.addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
@@ -562,10 +569,12 @@ impl Server {
 
     fn handle_chat_event(&mut self, chat: ChatName, event: Vec<u8>) {
         for client in self.clients.iter_mut() {
+            log::info!("sending chat event to client: {:?}", chat);
             let Some(call) = client.subscriptions.get(&chat) else {
                 continue;
             };
 
+            log::info!("sending chat event to client: {:?}", chat);
             _ = client.inner.write((call, Reminder(&event)));
         }
     }
@@ -615,7 +624,7 @@ impl Server {
 
     fn handle_repl_rpc(
         &mut self,
-        topic: PossibleTopic,
+        topic: Topic,
         msg: Vec<u8>,
         mut resp: Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>,
     ) {
@@ -634,6 +643,8 @@ impl Server {
                 Err(e) => {
                     if let Some(resp) = &mut resp {
                         _ = resp.try_send((peer, Err(e)));
+                    } else {
+                        log::warn!("failed to send rpc to {:?}: {}", peer, e);
                     }
                     continue;
                 }
@@ -718,6 +729,7 @@ struct Behaviour {
     dht: dht::Behaviour,
     rpc: topology_wrapper::Behaviour<rpc::Behaviour>,
     report: topology_wrapper::report::Behaviour,
+    key_share: topology_wrapper::Behaviour<key_share::Behaviour>,
 }
 
 enum InnerStream {
@@ -764,8 +776,8 @@ impl Stream {
 
     #[cfg(test)]
     fn new_test() -> [Self; 2] {
-        let (input_s, input_r) = mpsc::channel(1);
-        let (output_s, output_r) = mpsc::channel(1);
+        let (input_s, input_r) = mpsc::channel(100);
+        let (output_s, output_r) = mpsc::channel(100);
         let id = PathId::new();
         [(input_r, output_s), (output_r, input_s)].map(|(a, b)| Self {
             id,
@@ -801,18 +813,18 @@ enum RequestEvent {
     Profile(Identity, Vec<u8>, oneshot::Sender<()>),
     Chat(ChatName, Vec<u8>),
     Rpc(PeerId, Vec<u8>, Option<oneshot::Sender<rpc::Result<Vec<u8>>>>),
-    ReplRpc(PossibleTopic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
+    ReplRpc(Topic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
 }
 
 pub struct OwnedContext {
     profiles: DashMap<Identity, Profile>,
     online: DashMap<Identity, OnlineLocation>,
     chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
-    recovers: DashSet<PossibleTopic>,
     request_event_sink: mpsc::Sender<RequestEvent>,
+    local_peer_id: PeerId,
 }
 
-fn rpc<'a>(prefix: u8, topic: impl Into<PossibleTopic>, msg: impl Codec<'a>) -> Vec<u8> {
+fn rpc<'a>(prefix: u8, topic: impl Into<Topic>, msg: impl Codec<'a>) -> Vec<u8> {
     (prefix, topic.into(), msg).to_bytes()
 }
 
@@ -831,12 +843,7 @@ impl OwnedContext {
         recv.await.is_ok()
     }
 
-    async fn repl_rpc_no_resp<'a>(
-        &self,
-        topic: impl Into<PossibleTopic>,
-        prefix: u8,
-        msg: impl Codec<'a>,
-    ) {
+    async fn repl_rpc_no_resp<'a>(&self, topic: impl Into<Topic>, prefix: u8, msg: impl Codec<'a>) {
         let topic = topic.into();
         _ = self
             .request_event_sink
@@ -845,9 +852,9 @@ impl OwnedContext {
             .await;
     }
 
-    async fn send_rpc_no_resp<'a>(
+    async fn _send_rpc_no_resp<'a>(
         &self,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         dest: PeerId,
         prefix: u8,
         msg: impl Codec<'a>,
@@ -860,9 +867,9 @@ impl OwnedContext {
             .await;
     }
 
-    async fn replicate_rpc<'a>(
+    async fn repl_rpc<'a>(
         &self,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         prefix: u8,
         msg: impl Codec<'a>,
     ) -> impl futures::Stream<Item = (PeerId, rpc::Result<Vec<u8>>)> {
@@ -878,7 +885,7 @@ impl OwnedContext {
 
     async fn send_rpc<'a>(
         &self,
-        topic: impl Into<PossibleTopic>,
+        topic: impl Into<Topic>,
         peer: PeerId,
         send_mail: u8,
         mail: impl Codec<'a>,

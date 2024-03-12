@@ -26,22 +26,22 @@ macro_rules! ensure {
 }
 
 use {
+    self::chat::Chat,
     crate::{Context, OnlineLocation},
-    chat_spec::{
-        ChatError, ChatName, Identity, PossibleTopic, ReplVec, Request, REPLICATION_FACTOR,
-    },
+    chat_spec::{ChatError, ChatName, Identity, ReplVec, Request, Topic, REPLICATION_FACTOR},
     component_utils::{arrayvec::ArrayVec, Codec},
+    dht::U256,
     libp2p::{
-        futures::{stream::FuturesUnordered, StreamExt},
+        futures::{stream::FuturesUnordered, FutureExt, StreamExt},
         PeerId, Swarm,
     },
     rpc::CallId,
     std::{future::Future, pin::Pin},
+    tokio::sync::OwnedRwLockWriteGuard,
 };
 
 pub mod chat;
 pub mod profile;
-//mod retry;
 
 type Result<T, E = ChatError> = std::result::Result<T, E>;
 
@@ -55,7 +55,7 @@ pub struct State<'a> {
     pub swarm: &'a mut Swarm<crate::Behaviour>,
     pub location: OnlineLocation,
     pub context: Context,
-    pub missing_topic: bool,
+    pub missing_topic: Option<MissingTopic>,
 }
 
 pub trait IntoResponse {
@@ -81,8 +81,8 @@ where
 {
     fn into_response(self) -> Response {
         match self {
-            Ok(_) => Response::Success(self.to_bytes()),
-            Err(_) => Response::Failure(self.to_bytes()),
+            Ok(_) => Response::Success(dbg!(self.to_bytes())),
+            Err(_) => Response::Failure(dbg!(self.to_bytes())),
         }
     }
 }
@@ -122,8 +122,7 @@ impl FromRequestOwned for Context {
     }
 }
 
-pub type ReplGroup = ArrayVec<PeerId, { REPLICATION_FACTOR.get() + 1 }>;
-
+pub type ReplGroup = ArrayVec<PeerId, { REPLICATION_FACTOR.get() }>;
 impl FromRequestOwned for ReplGroup {
     fn from_request(req: Request, state: &mut State) -> Option<Self> {
         let us = *state.swarm.local_peer_id();
@@ -142,7 +141,24 @@ impl FromRequestOwned for ReplGroup {
     }
 }
 
-impl FromRequestOwned for PossibleTopic {
+pub type FullReplGroup = ArrayVec<U256, { REPLICATION_FACTOR.get() + 1 }>;
+impl FromRequestOwned for FullReplGroup {
+    fn from_request(req: Request, state: &mut State) -> Option<Self> {
+        Some(
+            state
+                .swarm
+                .behaviour_mut()
+                .dht
+                .table
+                .closest(req.topic?.as_bytes())
+                .take(REPLICATION_FACTOR.get() + 1)
+                .map(|r| r.id)
+                .collect(),
+        )
+    }
+}
+
+impl FromRequestOwned for Topic {
     fn from_request(req: Request, _: &mut State) -> Option<Self> {
         req.topic
     }
@@ -151,7 +167,7 @@ impl FromRequestOwned for PossibleTopic {
 impl FromRequestOwned for Identity {
     fn from_request(req: Request, _: &mut State) -> Option<Self> {
         match req.topic? {
-            PossibleTopic::Profile(i) => Some(i),
+            Topic::Profile(i) => Some(i),
             _ => None,
         }
     }
@@ -160,17 +176,26 @@ impl FromRequestOwned for Identity {
 impl FromRequestOwned for ChatName {
     fn from_request(req: Request, _: &mut State) -> Option<Self> {
         match req.topic? {
-            PossibleTopic::Chat(c) => Some(c),
+            Topic::Chat(c) => Some(c),
             _ => None,
         }
     }
 }
 
-pub struct MissingTopic(pub bool);
+impl<T: FromRequestOwned> FromRequestOwned for Option<T> {
+    fn from_request(req: Request, state: &mut State) -> Option<Self> {
+        Some(T::from_request(req, state))
+    }
+}
+
+pub enum MissingTopic {
+    Chat { name: ChatName, lock: OwnedRwLockWriteGuard<Chat> },
+    Profile(Identity),
+}
 
 impl FromRequestOwned for MissingTopic {
     fn from_request(_: Request, s: &mut State) -> Option<Self> {
-        Some(MissingTopic(s.missing_topic))
+        s.missing_topic.take()
     }
 }
 
@@ -199,10 +224,16 @@ impl FromRequestOwned for Origin {
     }
 }
 
+impl FromRequestOwned for () {
+    fn from_request(_: Request, _: &mut State) -> Option<Self> {
+        Some(())
+    }
+}
+
 pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::Codec<'a>>:
     Clone + Send + Sized + 'static
 {
-    type Future: Future + Send;
+    type Future: Future<Output = Response> + Send;
 
     fn call_computed(self, args: T, res: R) -> Self::Future;
 
@@ -210,13 +241,19 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
         self,
         req: Request,
         mut state: State,
-    ) -> Option<impl Future<Output = Response> + Send + 'static>
-    where
-        <Self::Future as Future>::Output: IntoResponse,
-    {
-        let args = T::from_request(req, &mut state)?;
+    ) -> impl Future<Output = Response> + Send + 'static {
+        let args = T::from_request(req, &mut state);
         let body = req.body.0.to_vec();
-        Some(async move {
+        async move {
+            let Some(args) = args else {
+                log::warn!(
+                    "invalid request from {:?} for handler {:?}",
+                    state.location,
+                    std::any::type_name::<Self>()
+                );
+                return Response::DontRespond;
+            };
+
             // SAFETY: the lifetime of `body` is bound to the scope of the future, `r` does not
             // escape its scope. Extending lifetime here is only needed due to limitations of
             // compiler.
@@ -228,8 +265,8 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
                 );
                 return Response::DontRespond;
             };
-            self.call_computed(args, r).await.into_response()
-        })
+            self.call_computed(args, r).await
+        }
     }
 
     fn repl(self) -> Repl<Self> {
@@ -239,6 +276,10 @@ pub trait Handler<'a, T: FromRequestOwned + Send + 'static, R: component_utils::
     fn restore(self) -> Restore<Self> {
         Restore { handler: self }
     }
+
+    fn no_resp(self) -> NoResp<Self> {
+        NoResp { handler: self }
+    }
 }
 
 #[derive(Clone)]
@@ -246,7 +287,7 @@ pub struct Repl<H> {
     pub handler: H,
 }
 
-pub type ReplArgs<A> = (PossibleTopic, Context, Prefix, A);
+pub type ReplArgs<A> = (Topic, Context, Prefix, A);
 
 impl<'a, H, A, R> Handler<'a, ReplArgs<A>, R> for Repl<H>
 where
@@ -255,7 +296,7 @@ where
     R: component_utils::Codec<'a> + Send + Clone,
     <H::Future as Future>::Output: IntoResponse,
 {
-    type Future = impl Future<Output: IntoResponse> + Send;
+    type Future = impl Future<Output = Response> + Send;
 
     fn call_computed(self, (topic, cx, prefix, args): ReplArgs<A>, req: R) -> Self::Future {
         async move {
@@ -264,7 +305,7 @@ where
                 resp => return resp,
             };
 
-            let mut repl = cx.replicate_rpc(topic, prefix, req).await;
+            let mut repl = cx.repl_rpc(topic, prefix, req).await;
             let mut counter = ReplVec::<(crypto::Hash, u8)>::new();
 
             counter.push((crypto::hash::from_slice(&bytes), 1));
@@ -274,11 +315,12 @@ where
 
                 let Some((_, count)) = counter.iter_mut().find(|(h, _)| h == &hash) else {
                     log::warn!(
-                        "unexpected response from {:?} {:?} {:?} {:?}",
+                        "unexpected response from {:?} {:?} {:?} {} {}",
                         std::any::type_name::<<H::Future as Future>::Output>(),
                         Result::<(), ChatError>::decode(&mut resp.as_slice()),
                         resp,
                         peer,
+                        cx.local_peer_id,
                     );
                     counter.push((hash, 1));
                     continue;
@@ -286,11 +328,7 @@ where
 
                 *count += 1;
                 if *count as usize > REPLICATION_FACTOR.get() / 2 {
-                    if hash != crypto::hash::from_slice(&bytes) {
-                        todo!("for some reason we have different opinion, this should initiate recovery");
-                    }
-
-                    //while repl.next().await.is_some() {}
+                    while repl.next().await.is_some() {}
                     return Response::Success(resp);
                 }
             }
@@ -305,7 +343,7 @@ pub struct Restore<H> {
     pub handler: H,
 }
 
-pub type RestoreArgsArgs<A> = (PossibleTopic, Context, MissingTopic, A);
+pub type RestoreArgsArgs<A> = (Context, Option<MissingTopic>, A);
 
 impl<'a, H, A, R> Handler<'a, RestoreArgsArgs<A>, R> for Restore<H>
 where
@@ -314,27 +352,49 @@ where
     R: component_utils::Codec<'a> + Send + Clone,
     <H::Future as Future>::Output: IntoResponse,
 {
-    type Future = impl Future<Output: IntoResponse> + Send;
+    type Future = impl Future<Output = Response> + Send;
 
-    fn call_computed(
-        self,
-        (topic, cx, missing_topic, args): RestoreArgsArgs<A>,
-        req: R,
-    ) -> Self::Future {
+    fn call_computed(self, (cx, missing_topic, args): RestoreArgsArgs<A>, req: R) -> Self::Future {
         async move {
-            if missing_topic.0 {
-                let res = match topic {
-                    PossibleTopic::Profile(identity) => profile::recover(cx, identity).await,
-                    PossibleTopic::Chat(name) => chat::recover(cx, name).await,
-                };
+            let res = match missing_topic {
+                Some(MissingTopic::Chat { name, lock }) => chat::recover(cx, name, lock).await,
+                Some(MissingTopic::Profile(identity)) => profile::recover(cx, identity).await,
+                _ => Ok(()),
+            };
 
-                if res.is_err() {
-                    return Response::Failure(res.to_bytes());
-                }
+            if res.is_err() {
+                return Response::Failure(res.to_bytes());
             }
 
             self.handler.call_computed(args, req).await.into_response()
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct NoResp<H> {
+    handler: H,
+}
+
+impl<'a, H, T, R> Handler<'a, T, R> for NoResp<H>
+where
+    H: Handler<'a, T, R>,
+    T: FromRequestOwned + Send + 'static,
+    R: component_utils::Codec<'a>,
+{
+    type Future = impl Future<Output = Response> + Send;
+
+    fn call_computed(self, args: T, req: R) -> Self::Future {
+        self.handler.call_computed(args, req).map(|e| {
+            if let Response::Failure(e) = e {
+                log::warn!(
+                    "no response from {:?} {:?}",
+                    std::any::type_name::<Self>(),
+                    <Result<()>>::decode(&mut e.as_slice())
+                );
+            }
+            Response::DontRespond
+        })
     }
 }
 
@@ -351,16 +411,17 @@ macro_rules! impl_handler {
             $( $ty: FromRequestOwned + Send + 'static, )*
             $last: component_utils::Codec<'a> + Send,
         {
-            type Future = Fut;
+            type Future = impl Future<Output = Response> + Send;
 
             fn call_computed(self, args: ($($ty,)*), req: $last) -> Self::Future {
                 let ($($ty,)*) = args;
-                self($($ty,)* req)
+                self($($ty,)* req).map(|r| r.into_response())
             }
         }
     };
 }
 
+impl_handler!([], B);
 impl_handler!([A], B);
 impl_handler!([A, B], C);
 impl_handler!([A, B, C], D);
@@ -368,8 +429,8 @@ impl_handler!([A, B, C, D], E);
 impl_handler!([A, B, C, D, E], G);
 
 pub type FinalResponse = (Response, OnlineLocation, CallId);
-pub type RouteRet = Pin<Box<dyn Future<Output = FinalResponse>>>;
-pub type Route = Box<dyn Fn(Request, State) -> RouteRet>;
+pub type RouteRet = Pin<Box<dyn Future<Output = FinalResponse> + Send>>;
+pub type Route = Box<dyn Fn(Request, State) -> RouteRet + Send>;
 
 #[derive(Default)]
 pub struct Router {
@@ -383,7 +444,6 @@ impl Router {
         H: Handler<'a, A, R>,
         A: FromRequestOwned + Send + 'static,
         R: component_utils::Codec<'a>,
-        <H::Future as Future>::Output: IntoResponse,
     {
         if self.routes.len() <= expected as usize {
             self.routes.resize_with(expected as usize + 1, || None);
@@ -391,17 +451,7 @@ impl Router {
         self.routes[expected as usize] = Some(Box::new(move |req, state| {
             let local_self = route.clone();
             let origin = state.location;
-            let f = local_self.call(req, state);
-            Box::pin(async move {
-                (
-                    match f {
-                        Some(f) => f.await.into_response(),
-                        None => Response::DontRespond,
-                    },
-                    origin,
-                    req.id,
-                )
-            })
+            Box::pin(local_self.call(req, state).map(move |r| (r, origin, req.id)))
         }));
     }
 

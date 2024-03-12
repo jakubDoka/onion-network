@@ -8,7 +8,7 @@
 #![feature(slice_from_ptr_range)]
 
 use {
-    component_utils::{arrayvec::ArrayVec, crypto::ToProofContext, Codec, Reminder},
+    component_utils::{arrayvec::ArrayVec, proof::ToProofContext, Codec, Reminder},
     std::num::NonZeroUsize,
 };
 
@@ -30,10 +30,13 @@ pub mod rpcs {
         ADD_MEMBER;
         SEND_MESSAGE;
         BLOCK_PROPOSAL;
-        MAJOR_BLOCK;
-        FETCH_MINIMAL_CHAT_DATA;
+        SEND_BLOCK;
+        FETCH_CHAT_DATA;
         FETCH_MESSAGES;
         SUBSCRIBE;
+        GIVE_UP_BLOCK;
+        VOTE_BLOCK;
+        FETCH_MEMBER;
 
         FETCH_PROFILE;
         FETCH_VAULT;
@@ -47,14 +50,16 @@ pub mod rpcs {
 
 pub use {
     chat::*,
-    component_utils::crypto::{Nonce, Proof},
+    component_utils::proof::{Nonce, Proof},
     profile::*,
     rpc::CallId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
 pub enum ChatError {
-    #[error("account not found")]
+    #[error("outdated")]
+    Outdated,
+    #[error("not found")]
     NotFound,
     #[error("invalid proof")]
     InvalidProof,
@@ -77,7 +82,7 @@ pub enum ChatError {
     #[error("message too large")]
     MessageTooLarge,
     #[error("latest message block is still being finalized")]
-    MessageBlockNotFinalized,
+    MessageOverload,
     #[error("no blocks even though past block was proposed")]
     NoBlocks,
     #[error("The sending node is not among replicators")]
@@ -86,12 +91,33 @@ pub enum ChatError {
     InvalidBlock(InvalidBlockReason),
     #[error("no majority to confirm the request")]
     NoMajority,
+    #[error("already voted")]
+    AlreadyVoted,
+    #[error("vote not found")]
+    VoteNotFound,
+    #[error("no permission")]
+    NoPermission,
+    #[error("rate limited for next {0}ms")]
+    RateLimited(u64),
+    #[error("connection dropped mid request")]
+    ChannelClosed,
+    #[error("invalid response")]
+    InvalidResponse,
+}
+
+impl ChatError {
+    pub fn recover(self) -> Result<(), Self> {
+        match self {
+            Self::SentDirectly => Ok(()),
+            e => Err(e),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
 pub enum InvalidBlockReason {
     #[error("does not match majority")]
-    MajorityMismatch,
+    ExtraMessages,
     #[error("is uotdated for us")]
     Outdated,
     #[error("not expected at this point")]
@@ -99,12 +125,12 @@ pub enum InvalidBlockReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Codec)]
-pub enum PossibleTopic {
+pub enum Topic {
     Profile(Identity),
     Chat(ChatName),
 }
 
-impl PossibleTopic {
+impl Topic {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         match self {
@@ -114,13 +140,13 @@ impl PossibleTopic {
     }
 }
 
-impl From<ChatName> for PossibleTopic {
+impl From<ChatName> for Topic {
     fn from(c: ChatName) -> Self {
         Self::Chat(c)
     }
 }
 
-impl From<Identity> for PossibleTopic {
+impl From<Identity> for Topic {
     fn from(i: Identity) -> Self {
         Self::Profile(i)
     }
@@ -138,7 +164,7 @@ pub fn advance_nonce(current: &mut Nonce, new: Nonce) -> bool {
 pub struct Request<'a> {
     pub prefix: u8,
     pub id: CallId,
-    pub topic: Option<PossibleTopic>,
+    pub topic: Option<Topic>,
     pub body: Reminder<'a>,
 }
 

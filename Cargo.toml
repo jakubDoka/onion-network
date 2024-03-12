@@ -11,7 +11,6 @@ members = [
 exclude = [
 	"forked/node-template",
 	"utils/falcon",
-	"nodes/client",
 ]
 
 [workspace.lints.clippy]
@@ -78,6 +77,7 @@ panic = "abort"
 
 [profile.dev.package.falcon]
 overflow-checks = false
+opt-level = 3
 
 [profile.dev.package.argon2]
 opt-level = 3

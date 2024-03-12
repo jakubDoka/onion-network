@@ -139,7 +139,7 @@ impl Behaviour {
             self.streaming.create_stream(peer);
             self.pending_requests.push((peer, call, packet.into(), ignore_resonse));
         }
-        if ignore_resonse {
+        if !ignore_resonse {
             self.timeouts.enqueue(call, std::time::Instant::now() + self.config.request_timeout);
         }
         Ok(call)
@@ -224,7 +224,7 @@ impl NetworkBehaviour for Behaviour {
                     let Some((_, peer)) =
                         self.ongoing_requests.find_and_remove(|(c, ..)| *c == cid)
                     else {
-                        log::warn!("unexpected response {:?}", cid);
+                        log::warn!("unexpected response {:?} {:?} {:?}", cid, pid, content);
                         continue;
                     };
                     if pid != peer {
@@ -251,6 +251,7 @@ impl NetworkBehaviour for Behaviour {
             else {
                 continue;
             };
+            log::warn!("timeout for {:?} {:?}", call, peer);
             self.events.push(Event::Response(peer, call, Err(StreamUpgradeError::Timeout.into())));
         }
 
@@ -327,13 +328,13 @@ impl DelayStream {
     fn spawn_worker(state: Weak<DelayStreamInner>) -> JoinHandle<()> {
         std::thread::spawn(move || {
             while let Some(inner) = state.upgrade() {
-                let now = std::time::Instant::now();
                 let Some((call, time)) = inner.queued.lock().unwrap().pop_front() else {
                     std::thread::park();
                     continue;
                 };
 
-                if time < now {
+                let now = std::time::Instant::now();
+                if time <= now {
                     inner.pending.lock().unwrap().push(call);
                     inner.waker.wake();
                 } else {
@@ -376,7 +377,7 @@ component_utils::gen_config! {
     ;;
     emmit_search_requests: bool = false,
     max_cached_connections: usize = 10,
-    buffer_size: usize = 1 << 14,
+    buffer_size: usize = 1 << 16,
     request_timeout: std::time::Duration = std::time::Duration::from_secs(10),
 }
 

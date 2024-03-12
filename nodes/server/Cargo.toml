@@ -21,8 +21,9 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 smallvec = "1.11.1"
 thiserror = "1.0.50"
 tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
+dashmap = "5.5.3"
 
-topology-wrapper = { workspace = true }
+topology-wrapper = { workspace = true, features = ["disabled"] }
 chain-api = { workspace = true, features = ["native"] }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
@@ -31,7 +32,6 @@ rpc = { workspace = true }
 crypto = { workspace = true }
 dht = { workspace = true }
 onion = { workspace = true }
-dashmap = "5.5.3"
 
 [lints]
 workspace = true

@@ -86,8 +86,7 @@ macro_rules! gen_unique_id {
 }
 
 pub mod codec;
-pub mod crypto;
-pub mod proximity;
+pub mod proof;
 pub mod stream;
 
 use core::task::Waker;

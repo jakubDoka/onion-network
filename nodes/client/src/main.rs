@@ -4,6 +4,7 @@
 #![feature(macro_metavar_expr)]
 #![feature(slice_take)]
 #![allow(clippy::multiple_crate_versions, clippy::future_not_send)]
+#![allow(clippy::empty_docs)]
 
 use {
     self::{protocol::RequestDispatch, web_sys::wasm_bindgen::JsValue},
@@ -12,15 +13,11 @@ use {
         login::{Login, Register},
         node::{ChatMeta, HardenedChatInvitePayload, JoinRequestPayload, Mail, MemberMeta, Node},
         profile::Profile,
-        protocol::SubsOwner,
     },
     anyhow::Context,
     argon2::Argon2,
     chain_api::UserIdentity,
-    chat_spec::{
-        username_to_raw, ChatName, FetchProfile, Identity, Nonce, Proof, ReadMail, SetVault,
-        UserName,
-    },
+    chat_spec::{username_to_raw, ChatName, Identity, Nonce, Proof, UserName},
     component_utils::{Codec, Reminder},
     crypto::{
         enc::{self, ChoosenCiphertext, Ciphertext},
@@ -150,6 +147,25 @@ impl State {
             .flatten()
     }
 
+    fn next_chat_message_proof<'a>(
+        &self,
+        name: ChatName,
+        message: &'a [u8],
+        nonce: Option<Nonce>,
+    ) -> Option<chat_spec::Proof<Reminder<'a>>> {
+        self.keys
+            .try_with_untracked(|keys| {
+                let keys = keys.as_ref()?;
+                self.vault.try_update(|vault| {
+                    let chat = vault.chats.get_mut(&name)?;
+                    chat.action_no = nonce.map_or(chat.action_no, |n| n + 1);
+                    Some(Proof::new(&keys.sign, &mut chat.action_no, Reminder(message), OsRng))
+                })
+            })
+            .flatten()
+            .flatten()
+    }
+
     pub fn next_profile_proof(self, vault: &[u8]) -> Option<chat_spec::Proof<Reminder>> {
         self.keys
             .try_with_untracked(|keys| {
@@ -193,10 +209,7 @@ fn App() -> impl IntoView {
             .get_profile_by_name(chain::user_contract(), username_to_raw(name))
             .await?
             .context("user not found")?;
-        let pf = dispatch
-            .dispatch::<FetchProfile>(identity_hashes.sign)
-            .await
-            .context("fetching profile")?;
+        let pf = dispatch.fetch_keys(identity_hashes.sign).await.context("fetching profile")?;
 
         let (cp, secret) = enc.encapsulate(&enc::PublicKey::from_bytes(pf.enc), OsRng);
 
@@ -206,21 +219,19 @@ fn App() -> impl IntoView {
             identity,
         }
         .into_bytes();
-        let invite = Mail::HardenedJoinRequest {
-            cp: cp.into_bytes(),
-            payload: unsafe {
-                std::mem::transmute(FixedAesPayload::new(
-                    payload,
-                    &secret,
-                    crypto::ASOC_DATA,
-                    OsRng,
-                ))
-            },
-        }
-        .to_bytes();
 
         dispatch
-            .dispatch_mail((identity_hashes.sign, Reminder(&invite)))
+            .send_mail(identity_hashes.sign, Mail::HardenedJoinRequest {
+                cp: cp.into_bytes(),
+                payload: unsafe {
+                    std::mem::transmute(FixedAesPayload::new(
+                        payload,
+                        &secret,
+                        crypto::ASOC_DATA,
+                        OsRng,
+                    ))
+                },
+            })
             .await
             .context("sending invite")?;
 
@@ -242,7 +253,7 @@ fn App() -> impl IntoView {
         crate::encrypt(&mut vault_bytes, keys.vault);
         handled_spawn_local("saving vault", async move {
             let proof = state.next_profile_proof(&vault_bytes).expect("logged in");
-            ed.dispatch::<SetVault>(proof).await.context("setting vault")?;
+            ed.set_vault(proof).await.context("setting vault")?;
             log::debug!("saved vault");
             Ok(())
         });
@@ -274,7 +285,7 @@ fn App() -> impl IntoView {
                             my_name: UserName,
                             new_messages: &mut Vec<db::Message>| {
         let Some(mail) = Mail::decode(&mut raw_mail) else {
-            anyhow::bail!("failed to decode chat message");
+            anyhow::bail!("faild to decode mail, {raw_mail:?}");
         };
         assert!(raw_mail.is_empty());
 
@@ -378,7 +389,6 @@ fn App() -> impl IntoView {
         Ok(())
     };
 
-    let account_sub = store_value(None::<SubsOwner<Identity>>);
     create_effect(move |_| {
         let Some(keys) = state.keys.get() else {
             return;
@@ -391,7 +401,7 @@ fn App() -> impl IntoView {
         handled_spawn_local("initializing node", async move {
             navigate_to("/");
             let identity = keys.identity_hash();
-            let (node, vault, mut dispatch, vault_version, mail_action) =
+            let (node, vault, dispatch, vault_version, mail_action) =
                 Node::new(keys, wboot_phase).await.inspect_err(|_| navigate_to("/login"))?;
 
             let mut dispatch_clone = dispatch.clone();
@@ -399,7 +409,7 @@ fn App() -> impl IntoView {
             handled_spawn_local("reading mail", async move {
                 let proof = state.next_mail_proof().unwrap();
                 let inner_dispatch = dispatch_clone.clone();
-                let Reminder(list) = dispatch_clone.dispatch::<ReadMail>(proof).await?;
+                let Reminder(list) = dispatch_clone.read_mail(proof).await?;
 
                 let mut new_messages = Vec::new();
                 for mail in chat_spec::unpack_mail(list) {
@@ -418,15 +428,15 @@ fn App() -> impl IntoView {
                 db::save_messages(new_messages).await
             });
 
-            let (mut account, id) = dispatch.subscribe(identity).unwrap();
-            let dispatch_clone = dispatch.clone();
-            account_sub.set_value(Some(id));
+            let mut dispatch_clone = dispatch.clone();
             let listen = async move {
-                while let Some(Reminder(mail)) = account.next().await {
+                let mut account =
+                    dispatch_clone.subscribe(identity).await.context("subscribing to profile")?;
+                while let Some(mail) = account.next().await {
                     let mut new_messages = Vec::new();
                     handle_error(
                         handle_mail(
-                            mail,
+                            &mail,
                             &dispatch_clone,
                             enc.clone(),
                             my_id,
@@ -439,6 +449,10 @@ fn App() -> impl IntoView {
                 }
 
                 anyhow::Result::Ok(())
+            };
+            let listen = async move {
+                handle_error(listen.await);
+                std::future::pending().await
             };
 
             state.requests.set_value(Some(dispatch));
@@ -694,4 +708,3 @@ fn encrypt(data: &mut Vec<u8>, secret: crypto::SharedSecret) {
     let arr = crypto::encrypt(data, secret, OsRng);
     data.extend(arr);
 }
-

@@ -1,26 +1,96 @@
 use {
     super::Nonce,
-    crate::{BlockNumber, Identity, Proof},
+    crate::{BlockNumber, ChatError, Identity, Proof},
     component_utils::{arrayvec::ArrayString, Codec, Reminder},
-    std::{iter, ops::Range},
+    std::{iter, ops::Range, time::SystemTime},
 };
 
 pub const CHAT_NAME_CAP: usize = 32;
 
-#[derive(Codec, Default, Clone, Copy)]
+pub type Rank = u32;
+
+#[derive(Codec, Default, Clone, Copy, Debug)]
 pub struct Member {
     pub action: Nonce,
+    pub permissions: Permissions,
+    pub rank: Rank,
+    pub action_cooldown_ms: u32,
+    #[codec(skip)]
+    pub frozen_until: u64,
 }
 
 impl Member {
-    pub fn max(self, other: Self) -> Self {
-        Self { action: self.action.max(other.action) }
+    pub fn best() -> Member {
+        Member {
+            action: 0,
+            permissions: Permissions::all(),
+            rank: 0,
+            action_cooldown_ms: 0,
+            frozen_until: 0,
+        }
+    }
+
+    pub fn allocate_action(&mut self, permission: Permissions) -> Result<(), ChatError> {
+        let current_ms =
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+        if self.frozen_until > current_ms {
+            return Err(ChatError::RateLimited(self.frozen_until - current_ms));
+        }
+        self.frozen_until = current_ms + self.action_cooldown_ms as u64;
+
+        self.permissions.contains(permission).then_some(()).ok_or(ChatError::NoPermission)
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Permissions: u32 {
+        const SEND = 1 << 0;
+        const INVITE = 1 << 1;
+        const KICK = 1 << 2;
+        const RATE_LIMIT = 1 << 3;
+    }
+}
+
+impl<'a> Codec<'a> for Permissions {
+    fn encode(&self, buffer: &mut impl component_utils::Buffer) -> Option<()> {
+        self.bits().encode(buffer)?;
+        Some(())
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        u32::decode(buffer).and_then(Self::from_bits)
+    }
+}
+
+impl Member {
+    pub fn combine(list: &mut [Member]) -> Member {
+        assert!(!list.is_empty());
+
+        fn most_common<T: Ord>(list: &mut [Member], f: impl Fn(&Member) -> T) -> T {
+            list.sort_by_cached_key(&f);
+            f(&list.chunk_by(|a, b| f(a) == f(b)).max_by_key(|chunk| chunk.len()).unwrap()[0])
+        }
+
+        fn median<T: Ord>(list: &mut [Member], f: impl Fn(&Member) -> T) -> T {
+            list.sort_by_cached_key(&f);
+            f(&list[list.len() / 2])
+        }
+
+        Member {
+            action: list.iter().map(|m| m.action).max().unwrap(),
+            permissions: most_common(list, |m| m.permissions),
+            rank: most_common(list, |m| m.rank),
+            action_cooldown_ms: most_common(list, |m| m.action_cooldown_ms),
+            frozen_until: median(list, |m| m.frozen_until),
+        }
     }
 }
 
 #[derive(Clone, Copy, Codec)]
 pub struct Message<'a> {
-    pub identiy: Identity,
+    pub identity: Identity,
     pub nonce: Nonce,
     pub content: Reminder<'a>,
 }
@@ -32,7 +102,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    pub const INIT: Self = Self { block: u64::MAX, offset: 0 };
+    pub const INIT: Self = Self { block: BlockNumber::MAX, offset: 0 };
 }
 
 pub type ChatName = ArrayString<CHAT_NAME_CAP>;
@@ -40,7 +110,7 @@ pub type RawChatName = [u8; CHAT_NAME_CAP];
 
 #[derive(Codec)]
 pub enum ChatEvent<'a> {
-    Message(Proof<ChatName>, Reminder<'a>),
+    Message(ChatName, Proof<Reminder<'a>>),
 }
 
 #[derive(Codec)]

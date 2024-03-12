@@ -9,11 +9,6 @@ pub fn new<T: TransmutationCircle>(data: &T) -> Hash {
 }
 
 #[must_use]
-pub fn from_raw(data: &[u8]) -> Hash {
-    blake3::hash(data).into()
-}
-
-#[must_use]
 pub fn combine(left: Hash, right: Hash) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(left.as_ref());

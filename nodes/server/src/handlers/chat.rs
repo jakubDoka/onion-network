@@ -325,6 +325,10 @@ pub async fn fetch_messages(
         cursor.block -= 1;
     }
 
+    if cursor.offset > UNFINALIZED_BUFFER_CAP {
+        return bail;
+    }
+
     let block = loop {
         let block = match chat.number <= cursor.block {
             true => &chat.buffer,

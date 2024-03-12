@@ -9,7 +9,6 @@
 #![feature(extract_if)]
 
 mod behaviour;
-pub mod key_share;
 mod packet;
 
 #[cfg(test)]

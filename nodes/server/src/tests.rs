@@ -264,11 +264,21 @@ async fn message_flooding() {
     log::info!("chat created");
     _ = tokio::time::timeout(Duration::from_millis(100), nodes.next()).await;
 
-    const MESSAGE_SIZE: usize = 0;
-    const MODULO: usize = 40;
+    const MESSAGE_SIZE: usize = 200;
+    //const MODULO: usize = 40;
 
-    for node in nodes {
-        tokio::task::spawn(node);
+    for (i, mut node) in nodes.into_iter().enumerate() {
+        if i == 0 {
+            tokio::task::spawn(async move {
+                loop {
+                    _ = tokio::time::timeout(Duration::from_secs(1), &mut node).await;
+                    node.context.chats.clear();
+                    log::info!("cleared");
+                }
+            });
+        } else {
+            tokio::task::spawn(node);
+        }
     }
 
     let topic = Some(PossibleTopic::Chat(chat));
@@ -281,11 +291,12 @@ async fn message_flooding() {
                     break;
                 }
                 stream.next().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         });
     }
 
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(100)).await;
 }
 
 impl Stream {

@@ -35,6 +35,7 @@ pub mod rpcs {
         FETCH_MESSAGES;
         SUBSCRIBE;
         GIVE_UP_BLOCK;
+        VOTE_BLOCK;
 
         FETCH_PROFILE;
         FETCH_VAULT;
@@ -55,6 +56,8 @@ pub use {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
 pub enum ChatError {
+    #[error("outdated")]
+    Outdated,
     #[error("account not found")]
     NotFound,
     #[error("invalid proof")]
@@ -87,6 +90,10 @@ pub enum ChatError {
     InvalidBlock(InvalidBlockReason),
     #[error("no majority to confirm the request")]
     NoMajority,
+    #[error("already voted")]
+    AlreadyVoted,
+    #[error("vote not found")]
+    VoteNotFound,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]

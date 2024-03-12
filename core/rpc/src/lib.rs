@@ -377,7 +377,7 @@ component_utils::gen_config! {
     ;;
     emmit_search_requests: bool = false,
     max_cached_connections: usize = 10,
-    buffer_size: usize = 1 << 14,
+    buffer_size: usize = 1 << 16,
     request_timeout: std::time::Duration = std::time::Duration::from_secs(10),
 }
 

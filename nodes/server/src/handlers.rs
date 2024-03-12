@@ -324,11 +324,7 @@ where
 
                 *count += 1;
                 if *count as usize > REPLICATION_FACTOR.get() / 2 {
-                    if hash != crypto::hash::from_slice(&bytes) {
-                        todo!("for some reason we have different opinion, this should initiate recovery");
-                    }
-
-                    //while repl.next().await.is_some() {}
+                    while repl.next().await.is_some() {}
                     return Response::Success(resp);
                 }
             }

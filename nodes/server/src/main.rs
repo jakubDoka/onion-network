@@ -345,19 +345,17 @@ impl Server {
                 chat::{
                     rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
-                    rpcs::SEND_BLOCK => handle_message_block.no_resp();
-                    rpcs::FETCH_CHAT_DATA => fetch_chat_data;
+                    rpcs::SEND_BLOCK => handle_message_block.restore().no_resp();
+                    rpcs::FETCH_CHAT_DATA => fetch_chat_data.restore();
                     rpcs::SEND_MESSAGE => send_message.restore();
-                   // rpcs::BLOCK_PROPOSAL => propose_msg_block;
-                   // rpcs::MAJOR_BLOCK => receive_block;
-                   // rpcs::FETCH_MINIMAL_CHAT_DATA => fetch_minimal_chat_data;
+                    rpcs::VOTE_BLOCK => vote.restore().no_resp();
                 };
                 profile::{
                     rpcs::CREATE_PROFILE => create;
                     rpcs::SEND_MAIL => send_mail.restore();
                     rpcs::READ_MAIL => read_mail.restore();
                     rpcs::SET_VAULT => set_vault.restore();
-                    rpcs::FETCH_PROFILE_FULL => fetch_full;
+                    rpcs::FETCH_PROFILE_FULL => fetch_full.restore();
                 };
             ),
             pending_rpcs: Default::default(),
@@ -636,6 +634,8 @@ impl Server {
                 Err(e) => {
                     if let Some(resp) = &mut resp {
                         _ = resp.try_send((peer, Err(e)));
+                    } else {
+                        log::warn!("failed to send rpc to {:?}: {}", peer, e);
                     }
                     continue;
                 }

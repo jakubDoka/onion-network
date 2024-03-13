@@ -624,11 +624,6 @@ fn Nav(my_name: UserName) -> impl IntoView {
     }
 }
 
-fn report_validity(elem: NodeRef<Input>, message: impl Display) {
-    elem.get_untracked().unwrap().set_custom_validity(&format!("{message:#}"));
-    elem.get_untracked().unwrap().report_validity();
-}
-
 fn get_value(elem: NodeRef<Input>) -> String {
     elem.get_untracked().unwrap().value()
 }

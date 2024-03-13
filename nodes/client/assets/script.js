@@ -114,3 +114,81 @@ function resize_textarea() {
         let bottom = getComputedStyle(mi).getPropertyValue('padding-bottom');
         mi.style.height = (mi.scrollHeight - parseInt(top) - parseInt(bottom)) + 'px';
 }
+
+/**
+ * @param {HTMLElement} elem
+ * @returns {boolean}
+ */
+function triggersInsertMode(elem) {
+        return (elem.tagName === "INPUT" && (elem.type === "text" || elem.type === "password"))
+                || (elem.tagName === "TEXTAREA");
+}
+
+const specialKeys = {
+        ["Escape"]: "<esc>",
+        ["Enter"]: "",
+};
+let keyBuffer = "";
+document.addEventListener("keydown", function (e) {
+        const shortcutElems = document.querySelectorAll("[shortcut]");
+        const matched = [];
+
+        for (const elem of shortcutElems) {
+                elem.classList.remove("sel");
+        }
+
+        const key = specialKeys[e.key] || e.key;
+        if (triggersInsertMode(document.activeElement)) {
+                if (key === "<esc>") {
+                        document.getElementById("loose-focus").focus();
+                }
+                return;
+        }
+
+        keyBuffer += key;
+
+        for (const elem of shortcutElems) {
+                if (elem.getAttribute("shortcut").startsWith(keyBuffer)
+                        && getComputedStyle(elem).display !== "none")
+                        matched.push(elem);
+        }
+
+        for (const elem of matched) {
+                elem.classList.add("sel");
+        }
+
+        const complete = key == "";
+        let collision = false;
+        let bestPriority = -1;
+        let bestMatch = undefined;
+        for (const elem of matched) {
+                let [sequence, priority] = elem.getAttribute("shortcut").split(" ");
+                priority = parseInt(priority ?? "0");
+                if (sequence !== keyBuffer || complete) continue;
+                if (priority < bestPriority) continue;
+                collision = bestPriority === priority && !complete;
+                bestPriority = priority;
+                bestMatch = elem;
+        }
+
+        if (bestMatch && !collision) {
+                bestMatch.classList.remove("sel");
+                console.log("Best match", bestMatch);
+                if (triggersInsertMode(bestMatch)) {
+                        console.log("Focus", bestMatch);
+                        e.preventDefault();
+                        bestMatch.focus();
+                } else {
+                        console.log("Click", bestMatch);
+                        bestMatch.click();
+                }
+        }
+
+        if (bestMatch || matched.length === 0) {
+                keyBuffer = "";
+        }
+
+        const keyDisplay = document.getElementById("key-display");
+        keyDisplay.textContent = keyBuffer;
+        keyDisplay.hidden = keyBuffer.length === 0;
+});

@@ -242,7 +242,13 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             Ok(())
         });
         let selected = move || current_chat.get() == Some(chat);
-        view! { <div class="sb tac bp toe" class:hc=selected class:hov=crate::not(selected) on:click=select_chat> {chat.to_string()} </div> }
+        let shortcut_prefix = if hardened { "sh" } else { "sn" };
+        view! {
+            <div class="sb tac bp toe" class:hc=selected
+                shortcut=format!("{shortcut_prefix}{chat}")
+                class:hov=crate::not(selected) on:click=select_chat>
+                {chat.to_string()} </div>
+        }
     };
 
     let (create_normal_chat_button, create_normal_chat_poppup) = popup(
@@ -250,6 +256,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             placeholder: "chat name...",
             button_style: "hov sf pc lsm",
             button: "+",
+            shortcut: "cn",
             confirm: "create",
             maxlength: 32,
         },
@@ -277,6 +284,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             placeholder: "hardened chat name...",
             button_style: "hov sf pc lsm",
             button: "+",
+            shortcut: "ch",
             confirm: "create",
             maxlength: 32,
         },
@@ -364,6 +372,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             placeholder: "user to invite...",
             button_style: "fg0 hov pc",
             button: "+",
+            shortcut: "im",
             confirm: "invite",
             maxlength: 32,
         },
@@ -543,6 +552,7 @@ struct PoppupStyle {
     button_style: &'static str,
     button: &'static str,
     confirm: &'static str,
+    shortcut: &'static str,
     maxlength: usize,
 }
 
@@ -559,43 +569,33 @@ fn popup<F: Future<Output = anyhow::Result<()>>>(
         input.get_untracked().unwrap().focus().unwrap();
         set_hidden(false);
     };
-    let close = move |_| set_hidden(true);
+    let hide = move |_| set_hidden(true);
     let on_confirm = move |e: SubmitEvent| {
         e.prevent_default();
-        let content = crate::get_value(input);
-        if content.is_empty() || content.len() > style.maxlength {
-            return;
-        }
-
-        spawn_local(async move {
+        handled_spawn_local(style.button, async move {
             set_controls_disabled(true);
-            match on_confirm(content).await {
-                Ok(()) => set_hidden(true),
-                Err(e) => crate::report_validity(input, e),
-            }
+            let res = on_confirm(crate::get_value(input)).await;
             set_controls_disabled(false);
+            if res.is_ok() {
+                set_hidden(true);
+            }
+            res
         })
     };
 
-    let handle_esc = move |e: web_sys::KeyboardEvent| {
-        if e.key_code() == 27 && !hidden.get_untracked() {
-            set_hidden(true);
-        }
-    };
-
     let button = view! {
-        <button class=style.button_style disabled=crate::not(enabled)
+        <button class=style.button_style shortcut=style.shortcut disabled=crate::not(enabled)
             on:click=show> {style.button}</button>
     };
     let popup = view! {
-        <div class="fsc flx blr sb" hidden=hidden on:keydown=handle_esc>
+        <div class="fsc flx blr sb" hidden=hidden>
             <form class="sc flx fdc bp ma bsha" on:submit=on_confirm>
                 <input class="pc hov bp" type="text" placeholder=style.placeholder
-                    maxlength=style.maxlength required node_ref=input/>
+                    maxlength=style.maxlength required node_ref=input shortcut="i 1"/>
                 <input class="pc hov bp tbm" type="submit" value=style.confirm
                     disabled=controls_disabled />
                 <input class="pc hov bp tbm" type="button" value="cancel"
-                    on:click=close />
+                    on:click=hide shortcut="<esc>" />
             </form>
         </div>
     };

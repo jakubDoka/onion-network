@@ -4,6 +4,7 @@
 	--highlight-color: #ffffff;
 	--font-color: #ffffff;
 	--error-color: #ff0000;
+	--selection-color: #ffff00;
 
 	--color-transition: 0.3s;
 	--sidebar-width: 250px;
@@ -165,6 +166,11 @@
 .ec.hov:hover:not(:active):not([disabled]) {
 	background-color: var(--primary-color);
 	color: var(--error-color);
+}
+
+.sel {
+	background-color: var(--selection-color);
+	color: var(--primary-color);
 }
 
 .lsb {

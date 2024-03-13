@@ -29,7 +29,7 @@ pub fn Login(state: State) -> impl IntoView {
         <div class="sc flx fdc bp ma">
             <Nav/>
             <form class="flx fdc" on:submit=on_login>
-                <input class="pc hov bp tbm" type="text" style:width="250px"
+                <input attr:shortcut="i" class="pc hov bp tbm" type="text" style:width="250px"
                     node_ref=username required maxlength="32" placeholder="username" />
                 <input class="pc hov bp tbm" type="password" style:width="250px"
                     node_ref=password placeholder="password" />

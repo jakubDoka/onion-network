@@ -33,6 +33,7 @@ onion = { workspace = true }
 crypto = { workspace = true }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
+instant = "0.1.12"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
 version = "0.1.0"

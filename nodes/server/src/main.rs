@@ -335,7 +335,7 @@ impl Server {
                     rpcs::ADD_MEMBER => add_member.repl().restore();
                     rpcs::SEND_MESSAGE => send_message.repl().restore();
                     rpcs::FETCH_MESSAGES => fetch_messages.restore();
-                    rpcs::FETCH_MEMBER => fetch_members.restore();
+                    rpcs::FETCH_MEMBERS => fetch_members.restore();
                 };
                 profile::{
                     rpcs::CREATE_PROFILE => create.repl();
@@ -461,6 +461,17 @@ impl Server {
                 _ = client.inner.write((req.id, Ok::<(), ChatError>(())));
             } else {
                 _ = client.inner.write((req.id, Err::<(), ChatError>(ChatError::NotFound)));
+            }
+        } else if req.prefix == rpcs::UNSUBSCRIBE {
+            let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
+            if let Some(topic) = req.topic
+                && missing_topic.is_none()
+            {
+                log::info!("client unsubscribed from topic: {:?}", topic);
+                match topic {
+                    Topic::Profile(_) => client.profile_sub = None,
+                    Topic::Chat(chat) => _ = client.subscriptions.remove(&chat),
+                }
             }
         } else {
             self.client_router.handle(req, handlers::State {

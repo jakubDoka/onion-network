@@ -1,10 +1,10 @@
 use {
     crate::{
-        db, handled_async_closure, handled_callback, handled_spawn_local,
+        db, handled_async_callback, handled_async_closure, handled_callback, handled_spawn_local,
         node::{self, HardenedChatInvitePayload, Mail, MessageContent, RawChatMessage},
     },
     anyhow::Context,
-    chat_spec::{username_to_raw, ChatEvent, ChatName, Member, UserName},
+    chat_spec::{ChatEvent, ChatName, Member, UserName},
     component_utils::{Codec, DropFn, Reminder},
     crypto::{enc, TransmutationCircle},
     leptos::{
@@ -16,10 +16,9 @@ use {
     rand::{rngs::OsRng, Rng},
     std::{
         future::Future,
-        ops::Deref,
         sync::atomic::{AtomicBool, Ordering},
     },
-    wasm_bindgen_futures::wasm_bindgen::JsValue,
+    web_sys::{js_sys::eval, SubmitEvent},
 };
 
 fn is_at_bottom(messages_div: HtmlElement<leptos::html::Div>) -> bool {
@@ -29,20 +28,6 @@ fn is_at_bottom(messages_div: HtmlElement<leptos::html::Div>) -> bool {
 
     let prediction = 200;
     scroll_height - client_height <= scroll_bottom + prediction
-}
-
-fn resize_input(mi: HtmlElement<Textarea>) -> Result<(), JsValue> {
-    let outher_height = window()
-        .get_computed_style(&mi)?
-        .ok_or("element does not have computed stile")?
-        .get_property_value("height")?
-        .strip_suffix("px")
-        .ok_or("height is not in pixels")?
-        .parse::<i32>()
-        .map_err(|e| format!("height is not a number: {e}"))?;
-    let diff = outher_height - mi.client_height();
-    mi.deref().style().set_property("height", "0px")?;
-    mi.deref().style().set_property("height", format!("{}px", mi.scroll_height() + diff).as_str())
 }
 
 #[leptos::component]
@@ -66,6 +51,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     }
 
     let (current_chat, set_current_chat) = create_signal(selected);
+    let (current_member, set_current_member) = create_signal(Member::best());
     let (show_chat, set_show_chat) = create_signal(false);
     let (is_hardened, set_is_hardened) = create_signal(false);
     let messages = create_node_ref::<leptos::html::Div>();
@@ -87,13 +73,13 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         }
     };
     let append_message = move |username: UserName, content: MessageContent| {
-        let messages = messages.get_untracked().expect("layout invariants");
         let message = message_view(username, content);
+        let messages = messages.get_untracked().expect("layout invariants");
         messages.append_child(&message).unwrap();
     };
     let prepend_message = move |username: UserName, content: MessageContent| {
-        let messages = messages.get_untracked().expect("layout invariants");
         let message = message_view(username, content);
+        let messages = messages.get_untracked().expect("layout invariants");
         messages
             .insert_before(&message, messages.first_child().as_ref())
             .expect("layout invariants");
@@ -165,19 +151,22 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         Ok(())
     });
 
-    create_effect(move |_| {
-        let Some(chat) = current_chat() else {
-            return;
-        };
+    on_cleanup(move || {
+        if let Some(chat) = current_chat.get_untracked() {
+            requests().unsubscribe(chat);
+        }
+    });
 
-        if is_hardened.get_untracked() {
-            return;
+    create_effect(move |prev_chat| {
+        if let Some(Some(prev_chat)) = prev_chat {
+            requests().unsubscribe(prev_chat);
         }
 
-        let Some(secret) = state.chat_secret(chat) else {
-            log::warn!("received message for chat we are not part of");
-            return;
-        };
+        let chat = current_chat()?;
+        if is_hardened.get_untracked() {
+            return None;
+        }
+        let secret = state.chat_secret(chat)?;
 
         handled_spawn_local("reading chat messages", async move {
             let mut sub = requests().subscribe(chat).await?;
@@ -214,7 +203,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             }
 
             Ok(())
-        })
+        });
+
+        Some(chat)
     });
 
     create_effect(move |_| {
@@ -234,7 +225,10 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     });
 
     let side_chat = move |chat: ChatName, hardened: bool| {
-        let select_chat = move |_| {
+        let select_chat = handled_async_callback("switching chat", move |_| async move {
+            let my_user =
+                requests().fetch_my_member(chat, my_id).await.context("fetching our member")?;
+            set_current_member(my_user);
             set_show_chat(true);
             set_red_all_messages(false);
             set_cursor(Cursor::Normal(chat_spec::Cursor::INIT));
@@ -244,7 +238,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             let messages = messages.get_untracked().expect("universe to work");
             messages.set_inner_html("");
             fetch_messages();
-        };
+
+            Ok(())
+        });
         let selected = move || current_chat.get() == Some(chat);
         view! { <div class="sb tac bp toe" class:hc=selected class:hov=crate::not(selected) on:click=select_chat> {chat.to_string()} </div> }
     };
@@ -257,6 +253,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             confirm: "create",
             maxlength: 32,
         },
+        move || true,
         move |chat| async move {
             let Ok(chat) = ChatName::try_from(chat.as_str()) else {
                 anyhow::bail!("invalid chat name");
@@ -283,6 +280,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             confirm: "create",
             maxlength: 32,
         },
+        move || true,
         move |chat| async move {
             let Ok(chat) = ChatName::try_from(chat.as_str()) else {
                 anyhow::bail!("invalid chat name");
@@ -299,35 +297,18 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     );
 
     let add_normal_user = move |name: String| async move {
-        let Ok(name) = UserName::try_from(name.as_str()) else {
-            anyhow::bail!("invalid user name");
-        };
-
-        let Some(chat) = current_chat.get_untracked() else {
-            anyhow::bail!("no chat selected");
-        };
-
-        let client = crate::chain::node(my_name).await?;
-        let invitee = match client
-            .get_profile_by_name(crate::chain::user_contract(), username_to_raw(name))
-            .await
-        {
-            Ok(Some(u)) => u,
-            Ok(None) => anyhow::bail!("user {name} does not exist"),
-            Err(e) => anyhow::bail!("failed to fetch user: {e}"),
-        };
+        let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
+        let chat = current_chat.get_untracked().context("no chat selected")?;
+        let secret = state.chat_secret(chat).context("we are nor part of this chat")?;
+        let invitee = crate::chain::fetch_profile(my_name, name).await?;
 
         let mut requests = requests();
         requests
-            .add_member(state, chat, invitee.sign, Member::best())
+            .add_member(state, chat, invitee.sign, Member::default())
             .await
             .context("adding user")?;
 
         let user_data = requests.fetch_keys(invitee.sign).await.context("fetching user profile")?;
-
-        let Some(secret) = state.chat_secret(chat) else {
-            anyhow::bail!("we are not part of this chat");
-        };
 
         let cp = enc::Keypair::from_bytes(my_enc)
             .encapsulate_choosen(enc::PublicKey::from_ref(&user_data.enc), secret, OsRng)
@@ -341,33 +322,16 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     };
 
     let add_hardened_user = move |name: String| async move {
-        let Ok(name) = UserName::try_from(name.as_str()) else {
-            anyhow::bail!("invalid user name");
-        };
+        let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
+        let chat = current_chat.get_untracked().context("no chat selected")?;
+        let members = state
+            .vault
+            .with_untracked(|v| {
+                v.hardened_chats.get(&chat).map(|m| m.members.keys().copied().collect::<Vec<_>>())
+            })
+            .context("we are not part of this chat")?;
 
-        if name == my_name {
-            anyhow::bail!("you cannot invite yourself");
-        }
-
-        let Some(chat) = current_chat.get_untracked() else {
-            anyhow::bail!("no chat selected");
-        };
-
-        let Some(members) = state.vault.with_untracked(|v| {
-            v.hardened_chats.get(&chat).map(|m| m.members.keys().copied().collect::<Vec<_>>())
-        }) else {
-            anyhow::bail!("we are not part of this chat");
-        };
-
-        let client = crate::chain::node(my_name).await?;
-        let invitee = match client
-            .get_profile_by_name(crate::chain::user_contract(), username_to_raw(name))
-            .await
-        {
-            Ok(Some(u)) => u,
-            Ok(None) => anyhow::bail!("user {name} does not exist"),
-            Err(e) => anyhow::bail!("failed to fetch user: {e}"),
-        };
+        let invitee = crate::chain::fetch_profile(my_name, name).await?;
 
         let mut requests = requests();
         let user_data = requests.fetch_keys(invitee.sign).await.context("fetching user profile")?;
@@ -379,7 +343,6 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             HardenedChatInvitePayload { chat, inviter: my_name, inviter_id: my_id, members }
                 .to_bytes();
         crate::encrypt(&mut payload, secret);
-
         requests
             .send_mail(invitee.sign, Mail::HardenedChatInvite {
                 cp: cp.into_bytes(),
@@ -404,6 +367,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             confirm: "invite",
             maxlength: 32,
         },
+        move || current_member.get().permissions.contains(chat_spec::Permissions::INVITE),
         move |name| {
             if is_hardened.get_untracked() {
                 add_hardened_user(name).left_future()
@@ -414,9 +378,13 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     );
 
     let message_input = create_node_ref::<Textarea>();
-    let resize_input = move || {
-        let mi = message_input.get_untracked().unwrap();
-        _ = resize_input(mi);
+    let clear_input = move || {
+        message_input.get_untracked().unwrap().set_value("");
+        message_input
+            .get_untracked()
+            .unwrap()
+            .dispatch_event(&web_sys::Event::new("input").unwrap())
+            .unwrap();
     };
 
     let send_normal_message = move |chat, content: String| {
@@ -428,8 +396,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         handled_spawn_local("sending normal message", async move {
             let mut req = requests();
             req.send_message(state, chat, &content).await?;
-            message_input.get_untracked().unwrap().set_value("");
-            resize_input();
+            clear_input();
             Ok(())
         });
 
@@ -474,8 +441,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             .await
             .context("saving our message locally")?;
             append_message(my_name, content);
-            message_input.get_untracked().unwrap().set_value("");
-            resize_input();
+            clear_input();
             Ok(())
         });
 
@@ -526,6 +492,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     let hardened_chats_are_empty = move || state.vault.with(|v| v.hardened_chats.is_empty());
     let chat_selected = move || current_chat.with(Option::is_some);
     let get_chat = move || current_chat.get().unwrap_or_default().to_string();
+    let can_send = move || current_member.get().permissions.contains(chat_spec::Permissions::SEND);
+
+    request_idle_callback(|| _ = eval("setup_resizable_textarea()").unwrap());
 
     view! {
         <crate::Nav my_name/>
@@ -555,9 +524,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 <div class="fg1 flx fdc sc pr oys fy" on:scroll=on_scroll node_ref=message_scroll>
                     <div class="fg1 flx fdc bp sc fsc fy boa" node_ref=messages></div>
                 </div>
-                <textarea class="fg0 flx bm bp pc sf" type="text" rows=1 placeholder="mesg..."
-                    node_ref=message_input on:keydown=on_input on:resize=move |_| resize_input()
-                    on:keyup=move |_| resize_input()/>
+                <textarea class="fg0 flx bm bp pc sf" id="message-input" type="text" rows=1
+                    placeholder="mesg..." node_ref=message_input on:keydown=on_input 
+                    disabled=crate::not(can_send)/>
             </div>
             <div class="sc fg1 flx pb fdc" hidden=chat_selected class=("off-screen", crate::not(show_chat))>
                 <div class="ma">"no chat selected"</div>
@@ -579,19 +548,20 @@ struct PoppupStyle {
 
 fn popup<F: Future<Output = anyhow::Result<()>>>(
     style: PoppupStyle,
+    enabled: impl Fn() -> bool + 'static + Copy,
     on_confirm: impl Fn(String) -> F + 'static + Copy,
 ) -> (impl IntoView, impl IntoView) {
     let (hidden, set_hidden) = create_signal(true);
     let (controls_disabled, set_controls_disabled) = create_signal(false);
     let input = create_node_ref::<Input>();
-    let input_trigger = create_trigger();
 
     let show = move |_| {
         input.get_untracked().unwrap().focus().unwrap();
         set_hidden(false);
     };
     let close = move |_| set_hidden(true);
-    let on_confirm = move || {
+    let on_confirm = move |e: SubmitEvent| {
+        e.prevent_default();
         let content = crate::get_value(input);
         if content.is_empty() || content.len() > style.maxlength {
             return;
@@ -606,36 +576,27 @@ fn popup<F: Future<Output = anyhow::Result<()>>>(
             set_controls_disabled(false);
         })
     };
-    let on_input = move |_| {
-        input_trigger.notify();
-        crate::report_validity(input, "")
-    };
-    let on_keydown = move |e: web_sys::KeyboardEvent| {
-        if e.key_code() == '\r' as u32 && !e.get_modifier_state("Shift") {
-            on_confirm();
-        }
 
-        if e.key_code() == 27 && !controls_disabled.get_untracked() {
+    let handle_esc = move |e: web_sys::KeyboardEvent| {
+        if e.key_code() == 27 && !hidden.get_untracked() {
             set_hidden(true);
         }
     };
-    let confirm_disabled = move || {
-        input_trigger.track();
-        controls_disabled() || !input.get_untracked().unwrap().check_validity()
-    };
 
-    let button = view! { <button class=style.button_style on:click=show>{style.button}</button> };
+    let button = view! {
+        <button class=style.button_style disabled=crate::not(enabled)
+            on:click=show> {style.button}</button>
+    };
     let popup = view! {
-        <div class="fsc flx blr sb" hidden=hidden>
-            <div class="sc flx fdc bp ma bsha">
+        <div class="fsc flx blr sb" hidden=hidden on:keydown=handle_esc>
+            <form class="sc flx fdc bp ma bsha" on:submit=on_confirm>
                 <input class="pc hov bp" type="text" placeholder=style.placeholder
-                    maxlength=style.maxlength required node_ref=input
-                    on:input=on_input on:keydown=on_keydown/>
-                <input class="pc hov bp tbm" type="button" value=style.confirm
-                    disabled=confirm_disabled on:click=move |_| on_confirm() />
+                    maxlength=style.maxlength required node_ref=input/>
+                <input class="pc hov bp tbm" type="submit" value=style.confirm
+                    disabled=controls_disabled />
                 <input class="pc hov bp tbm" type="button" value="cancel"
-                    disabled=controls_disabled on:click=close />
-            </div>
+                    on:click=close />
+            </form>
         </div>
     };
     (button, popup)

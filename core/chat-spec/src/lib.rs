@@ -29,14 +29,11 @@ pub mod rpcs {
         CREATE_CHAT;
         ADD_MEMBER;
         SEND_MESSAGE;
-        BLOCK_PROPOSAL;
         SEND_BLOCK;
         FETCH_CHAT_DATA;
         FETCH_MESSAGES;
-        SUBSCRIBE;
-        GIVE_UP_BLOCK;
         VOTE_BLOCK;
-        FETCH_MEMBER;
+        FETCH_MEMBERS;
 
         FETCH_PROFILE;
         FETCH_VAULT;
@@ -45,6 +42,9 @@ pub mod rpcs {
         SEND_MAIL;
         READ_MAIL;
         SET_VAULT;
+
+        SUBSCRIBE;
+        UNSUBSCRIBE;
     }
 }
 
@@ -103,6 +103,8 @@ pub enum ChatError {
     ChannelClosed,
     #[error("invalid response")]
     InvalidResponse,
+    #[error("timeout")]
+    Timeout,
 }
 
 impl ChatError {

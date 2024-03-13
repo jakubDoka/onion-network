@@ -1,16 +1,19 @@
 use {
-    crate::{handled_async_closure, State, UserKeys},
+    crate::{handled_async_callback, State, UserKeys},
     anyhow::Context,
     chat_spec::{username_to_raw, UserName},
     leptos::{html::Input, *},
     leptos_router::A,
+    web_sys::SubmitEvent,
 };
 
 #[component]
 pub fn Login(state: State) -> impl IntoView {
     let username = create_node_ref::<Input>();
     let password = create_node_ref::<Input>();
-    let on_login = handled_async_closure("logging in", move || async move {
+    let on_login = handled_async_callback("logging in", move |e: SubmitEvent| async move {
+        e.prevent_default();
+
         let username = username.get_untracked().expect("universe to work");
         let password = password.get_untracked().expect("universe to work");
         let username_content =
@@ -21,23 +24,17 @@ pub fn Login(state: State) -> impl IntoView {
         state.keys.set(Some(keys));
         Ok(())
     });
-    let on_password_keyup = move |e: web_sys::KeyboardEvent| {
-        if e.key_code() == '\r' as u32 {
-            on_login();
-        }
-    };
 
     view! {
         <div class="sc flx fdc bp ma">
             <Nav/>
-            <div class="flx fdc">
+            <form class="flx fdc" on:submit=on_login>
                 <input class="pc hov bp tbm" type="text" style:width="250px"
                     node_ref=username required maxlength="32" placeholder="username" />
                 <input class="pc hov bp tbm" type="password" style:width="250px"
-                    node_ref=password on:keyup=on_password_keyup placeholder="password" />
-                <input class="pc hov bp tbm" type="button" value="login"
-                    on:click=move |_| on_login() />
-            </div>
+                    node_ref=password placeholder="password" />
+                <input class="pc hov bp tbm" type="submit" value="login" />
+            </form>
         </div>
     }
 }
@@ -46,8 +43,8 @@ pub fn Login(state: State) -> impl IntoView {
 pub fn Register(state: State) -> impl IntoView {
     let username = create_node_ref::<Input>();
     let password = create_node_ref::<Input>();
-
-    let on_register = handled_async_closure("registering", move || async move {
+    let on_register = handled_async_callback("registering", move |e: SubmitEvent| async move {
+        e.prevent_default();
         let username = username.get_untracked().expect("universe to work");
         let password = password.get_untracked().expect("universe to work");
         let username_content =
@@ -80,29 +77,16 @@ pub fn Register(state: State) -> impl IntoView {
         Ok(())
     });
 
-    let validation_trigger = create_trigger();
-    let on_change = move |e: web_sys::KeyboardEvent| {
-        validation_trigger.notify();
-        if e.key_code() == '\r' as u32 {
-            on_register();
-        }
-    };
-    let disabled = move || {
-        validation_trigger.track();
-        !username.get_untracked().unwrap().check_validity()
-    };
-
     view! {
         <div class="sc flx fdc bp ma">
             <Nav/>
-            <div class="flx fdc">
-                <input class="pc hov bp tbm" type="text" placeholder="new username" maxlength="32"
-                    node_ref=username on:keyup=on_change required />
+            <form class="flx fdc" on:submit=on_register>
+                <input class="pc hov bp tbm" type="text" placeholder="new username"
+                    maxlength="32" node_ref=username required />
                 <input class="pc hov bp tbm" type="password" placeholder="new password"
-                    node_ref=password on:keyup=on_change />
-                <input class="pc hov bp tbm" type="button" value="register"
-                    on:click=move |_| on_register() disabled=disabled />
-            </div>
+                    node_ref=password />
+                <input class="pc hov bp tbm" type="submit" value="register" />
+            </form>
         </div>
     }
 }

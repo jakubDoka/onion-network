@@ -23,7 +23,7 @@ thiserror = "1.0.50"
 tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
 dashmap = "5.5.3"
 
-topology-wrapper = { workspace = true, features = ["disabled"] }
+topology-wrapper = { workspace = true }
 chain-api = { workspace = true, features = ["native"] }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }

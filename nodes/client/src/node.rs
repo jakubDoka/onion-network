@@ -552,6 +552,30 @@ impl Node {
         match command {
             RequestInit::Request(req) => self.handle_request(req),
             RequestInit::Subscription(sub) => self.handle_subscription_request(sub),
+            RequestInit::EndSubscription(topic) => {
+                let Some(sub) = self.subscriptions.iter_mut().find(|s| s.topics.contains(&topic))
+                else {
+                    log::error!("cannot find subscription to end");
+                    return;
+                };
+
+                let request = chat_spec::Request {
+                    prefix: rpcs::UNSUBSCRIBE,
+                    id: CallId::new(),
+                    topic: Some(topic),
+                    body: Reminder(&[]),
+                };
+
+                sub.stream.write(request).unwrap();
+                self.subscriptions
+                    .iter_mut()
+                    .find_map(|s| {
+                        let index = s.topics.iter().position(|t| t == &topic)?;
+                        s.topics.swap_remove(index);
+                        Some(())
+                    })
+                    .expect("channel to exist");
+            }
         }
     }
 

@@ -17,7 +17,7 @@ use {
     anyhow::Context,
     argon2::Argon2,
     chain_api::UserIdentity,
-    chat_spec::{username_to_raw, ChatName, Identity, Nonce, Proof, UserName},
+    chat_spec::{username_to_raw, ChatError, ChatName, Identity, Nonce, Proof, UserName},
     component_utils::{Codec, Reminder},
     crypto::{
         enc::{self, ChoosenCiphertext, Ciphertext},
@@ -36,7 +36,9 @@ use {
     libp2p::futures::{future::join_all, FutureExt},
     node::Vault,
     rand::{rngs::OsRng, CryptoRng, RngCore},
-    std::{cmp::Ordering, fmt::Display, future::Future, time::Duration, usize},
+    std::{
+        cmp::Ordering, fmt::Display, future::Future, pin::pin, task::Poll, time::Duration, usize,
+    },
 };
 
 mod chain;
@@ -450,10 +452,6 @@ fn App() -> impl IntoView {
 
                 anyhow::Result::Ok(())
             };
-            let listen = async move {
-                handle_error(listen.await);
-                std::future::pending().await
-            };
 
             state.requests.set_value(Some(dispatch));
             state.vault.set_untracked(vault);
@@ -461,10 +459,12 @@ fn App() -> impl IntoView {
             state.mail_action.set_value(mail_action);
             navigate_to("/chat");
 
-            libp2p::futures::select! {
+            let res = libp2p::futures::select! {
                 e = node.run().fuse() => e,
                 e = listen.fuse() => e,
-            }
+            };
+            navigate_to("/login");
+            res
         });
     });
 
@@ -692,6 +692,21 @@ fn handled_async_closure<F: Future<Output = anyhow::Result<()>> + 'static>(
     }
 }
 
+fn handled_async_callback<F: Future<Output = anyhow::Result<()>> + 'static, T>(
+    context: &'static str,
+    f: impl Fn(T) -> F + 'static + Copy,
+) -> impl Fn(T) + 'static + Copy {
+    let Errors(errors) = use_context().unwrap();
+    move |v| {
+        let fut = f(v);
+        spawn_local(async move {
+            if let Err(e) = fut.await.context(context) {
+                errors.set(Some(e));
+            }
+        });
+    }
+}
+
 fn handled_spawn_local(
     context: &'static str,
     f: impl Future<Output = anyhow::Result<()>> + 'static,
@@ -707,4 +722,28 @@ fn handled_spawn_local(
 fn encrypt(data: &mut Vec<u8>, secret: crypto::SharedSecret) {
     let arr = crypto::encrypt(data, secret, OsRng);
     data.extend(arr);
+}
+
+pub async fn timeout<F: Future>(f: F, duration: Duration) -> Result<F::Output, ChatError> {
+    let mut fut = pin!(f);
+    let mut timeout_handle = None::<TimeoutHandle>;
+    let until = instant::Instant::now() + duration;
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(v) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Ok(v));
+        }
+
+        if until < instant::Instant::now() {
+            return Poll::Ready(Err(ChatError::Timeout));
+        }
+
+        if timeout_handle.is_none() {
+            let waker = cx.waker().clone();
+            let handle = set_timeout_with_handle(|| waker.wake(), duration).unwrap();
+            timeout_handle = Some(handle);
+        }
+
+        Poll::Pending
+    })
+    .await
 }

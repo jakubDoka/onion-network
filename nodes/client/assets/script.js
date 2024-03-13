@@ -101,3 +101,16 @@ class MessageCursor {
 this.db = {
         saveMessages: saveMessagesDb,
 };
+
+function setup_resizable_textarea() {
+        const mi = document.getElementById('message-input');
+        mi.addEventListener('input', () => resize_textarea());
+}
+
+function resize_textarea() {
+        const mi = document.getElementById('message-input');
+        mi.style.height = 'auto';
+        let top = getComputedStyle(mi).getPropertyValue('padding-top');
+        let bottom = getComputedStyle(mi).getPropertyValue('padding-bottom');
+        mi.style.height = (mi.scrollHeight - parseInt(top) - parseInt(bottom)) + 'px';
+}

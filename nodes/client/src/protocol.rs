@@ -6,6 +6,8 @@ use {
     std::convert::identity,
 };
 
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 type Result<T, E = ChatError> = std::result::Result<T, E>;
 
 pub struct RequestDispatch {
@@ -48,7 +50,8 @@ impl RequestDispatch {
             }))
             .await
             .map_err(|_| ChatError::ChannelClosed)?;
-        self.buffer = rx.await.map_err(|_| ChatError::ChannelClosed)?;
+        self.buffer =
+            crate::timeout(rx, REQUEST_TIMEOUT).await?.map_err(|_| ChatError::ChannelClosed)?;
         Result::<R>::decode(&mut &self.buffer[..])
             .ok_or(ChatError::InvalidResponse)
             .and_then(identity)
@@ -115,6 +118,20 @@ impl RequestDispatch {
         self.dispatch(rpcs::READ_MAIL, proof_topic(&proof), proof).await
     }
 
+    pub async fn fetch_members(
+        &mut self,
+        name: ChatName,
+        from: Identity,
+        limit: u32,
+    ) -> Result<Vec<(Identity, Member)>> {
+        self.dispatch(rpcs::FETCH_MEMBERS, Topic::Chat(name), (from, limit)).await
+    }
+
+    pub async fn fetch_my_member(&mut self, name: ChatName, me: Identity) -> Result<Member> {
+        let mebers = self.fetch_members(name, me, 1).await?;
+        mebers.into_iter().next().map(|(_, m)| m).ok_or(ChatError::NotFound)
+    }
+
     pub async fn dispatch_direct<'a, R: Codec<'a>>(
         &'a mut self,
         stream: &mut EncryptedStream,
@@ -131,13 +148,10 @@ impl RequestDispatch {
             })
             .ok_or(ChatError::MessageOverload)?;
 
-        self.buffer = stream
-            .next()
-            .await
+        self.buffer = crate::timeout(stream.next(), REQUEST_TIMEOUT)
+            .await?
             .ok_or(ChatError::ChannelClosed)?
             .map_err(|_| ChatError::ChannelClosed)?;
-
-        log::info!("Received response: {:?}", self.buffer);
 
         <(CallId, Result<R>)>::decode(&mut &self.buffer[..])
             .ok_or(ChatError::InvalidResponse)
@@ -152,12 +166,16 @@ impl RequestDispatch {
             .try_send(RequestInit::Subscription(SubscriptionInit { id, topic, channel: tx }))
             .map_err(|_| ChatError::ChannelClosed)?;
 
-        log::info!("Subscribing to {:?}", topic);
-        let init = rx.next().await.unwrap();
-        Result::<()>::decode(&mut &init[..]).unwrap()?;
-        log::info!("Subscribed to {:?}", topic);
+        let init =
+            crate::timeout(rx.next(), REQUEST_TIMEOUT).await?.ok_or(ChatError::ChannelClosed)?;
+        Result::<()>::decode(&mut &init[..]).ok_or(ChatError::InvalidResponse)??;
 
         Ok(Subscription { events: rx })
+    }
+
+    pub fn unsubscribe(&mut self, topic: impl Into<Topic>) {
+        let topic: Topic = topic.into();
+        self.sink.try_send(RequestInit::EndSubscription(topic)).unwrap();
     }
 }
 
@@ -166,6 +184,7 @@ pub type RequestStream = libp2p::futures::channel::mpsc::Receiver<RequestInit>;
 pub enum RequestInit {
     Request(RawRequest),
     Subscription(SubscriptionInit),
+    EndSubscription(Topic),
 }
 
 impl RequestInit {
@@ -173,6 +192,7 @@ impl RequestInit {
         match self {
             Self::Request(r) => r.topic.unwrap(),
             Self::Subscription(s) => s.topic,
+            Self::EndSubscription(t) => *t,
         }
     }
 }

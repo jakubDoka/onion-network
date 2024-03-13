@@ -102,7 +102,7 @@ pub async fn fetch_members(
     cx: crate::Context,
     name: ChatName,
     (identity, count): (Identity, usize),
-) -> Result<Vec<Member>> {
+) -> Result<Vec<(Identity, Member)>> {
     Ok(cx
         .chats
         .get(&name)
@@ -112,7 +112,7 @@ pub async fn fetch_members(
         .members
         .range(identity..)
         .take(count.min(50))
-        .map(|(_, member)| *member)
+        .map(|(id, member)| (*id, *member))
         .collect::<Vec<_>>())
 }
 

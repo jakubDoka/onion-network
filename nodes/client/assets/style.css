@@ -127,7 +127,7 @@
 	color: var(--font-color);
 }
 
-.pc .hov:hover:not(:active) {
+.pc .hov:hover:not(:active):not([disabled]) {
 	background-color: var(--highlight-color);
 	color: var(--primary-color);
 }
@@ -137,7 +137,11 @@
 	color: var(--font-color);
 }
 
-.sc.hov:hover:not(:active) {
+[disabled] {
+	opacity: 0.5;
+}
+
+.sc.hov:hover:not(:active):not([disabled]) {
 	background-color: var(--highlight-color);
 	color: var(--secondary-color);
 }
@@ -147,7 +151,7 @@
 	color: var(--primary-color);
 }
 
-.hc.hov:hover:not(:active) {
+.hc.hov:hover:not(:active):not([disabled]) {
 	background-color: var(--primary-color);
 	color: var(--highlight-color);
 	fill: var(--highlight-color);
@@ -158,7 +162,7 @@
 	color: var(--primary-color);
 }
 
-.ec.hov:hover:not(:active) {
+.ec.hov:hover:not(:active):not([disabled]) {
 	background-color: var(--primary-color);
 	color: var(--error-color);
 }

@@ -1,10 +1,22 @@
 use {
     self::web_sys::wasm_bindgen::JsValue,
-    chain_api::{ContractId, TransactionHandler},
-    chat_spec::UserName,
+    chain_api::{ContractId, TransactionHandler, UserIdentity},
+    chat_spec::{username_to_raw, UserName},
     leptos::*,
     std::str::FromStr,
 };
+
+pub async fn fetch_profile(
+    my_name: UserName,
+    name: UserName,
+) -> Result<UserIdentity, anyhow::Error> {
+    let client = crate::chain::node(my_name).await?;
+    match client.get_profile_by_name(crate::chain::user_contract(), username_to_raw(name)).await {
+        Ok(Some(u)) => Ok(u),
+        Ok(None) => anyhow::bail!("user {name} does not exist"),
+        Err(e) => anyhow::bail!("failed to fetch user: {e}"),
+    }
+}
 
 pub async fn node(name: UserName) -> Result<chain_api::Client<WebSigner>, chain_api::Error> {
     component_utils::build_env!(CHAIN_NODE);

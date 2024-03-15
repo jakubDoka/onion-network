@@ -7,21 +7,22 @@
 #![allow(clippy::empty_docs)]
 
 use {
-    self::{protocol::RequestDispatch, web_sys::wasm_bindgen::JsValue},
+    self::web_sys::wasm_bindgen::JsValue,
     crate::{
         chat::Chat,
         login::{Login, Register},
-        node::{ChatMeta, HardenedChatInvitePayload, JoinRequestPayload, Mail, MemberMeta, Node},
         profile::Profile,
     },
     anyhow::Context,
-    argon2::Argon2,
-    chain_api::UserIdentity,
-    chat_spec::{username_to_raw, ChatError, ChatName, Identity, Nonce, Proof, UserName},
+    chat_spec::{username_to_raw, ChatName, Identity, Nonce, Proof, UserName},
+    client_node::{
+        BootPhase, ChatMeta, HardenedChatInvitePayload, JoinRequestPayload, MailVariants,
+        MemberMeta, Node, RequestDispatch, UserKeys, Vault,
+    },
     component_utils::{Codec, Reminder},
     crypto::{
         enc::{self, ChoosenCiphertext, Ciphertext},
-        sign, FixedAesPayload, TransmutationCircle,
+        FixedAesPayload, TransmutationCircle,
     },
     leptos::{
         component, create_effect, create_node_ref,
@@ -33,21 +34,15 @@ use {
         StoredValue,
     },
     leptos_router::{Route, Router, Routes, A},
-    libp2p::futures::{future::join_all, FutureExt},
-    node::Vault,
-    rand::{rngs::OsRng, CryptoRng, RngCore},
-    std::{
-        cmp::Ordering, fmt::Display, future::Future, pin::pin, task::Poll, time::Duration, usize,
-    },
+    libp2p::futures::{future::join_all, FutureExt, StreamExt},
+    rand::rngs::OsRng,
+    std::{cmp::Ordering, fmt::Display, future::Future, time::Duration},
 };
 
-mod chain;
 mod chat;
 mod db;
 mod login;
-mod node;
 mod profile;
-mod protocol;
 
 pub fn main() {
     console_error_panic_hook::set_once();
@@ -57,67 +52,6 @@ pub fn main() {
         log::Level::Error
     });
     mount_to_body(App)
-}
-
-#[derive(Clone)]
-struct UserKeys {
-    name: UserName,
-    sign: sign::Keypair,
-    enc: enc::Keypair,
-    vault: crypto::SharedSecret,
-}
-
-impl UserKeys {
-    pub fn new(name: UserName, password: &str) -> Self {
-        struct Entropy<'a>(&'a [u8]);
-
-        impl RngCore for Entropy<'_> {
-            fn next_u32(&mut self) -> u32 {
-                unimplemented!()
-            }
-
-            fn next_u64(&mut self) -> u64 {
-                unimplemented!()
-            }
-
-            fn fill_bytes(&mut self, dest: &mut [u8]) {
-                let data = self.0.take(..dest.len()).expect("not enough entropy");
-                dest.copy_from_slice(data);
-            }
-
-            fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
-                unimplemented!()
-            }
-        }
-
-        impl CryptoRng for Entropy<'_> {}
-
-        const VALUT: usize = 32;
-        const ENC: usize = 64 + 32;
-        const SIGN: usize = 32 + 48;
-        let mut bytes = [0; VALUT + ENC + SIGN];
-        Argon2::default()
-            .hash_password_into(password.as_bytes(), &username_to_raw(name), &mut bytes)
-            .unwrap();
-
-        let mut entropy = Entropy(&bytes);
-
-        let sign = sign::Keypair::new(&mut entropy);
-        let enc = enc::Keypair::new(&mut entropy);
-        let vault = crypto::new_secret(&mut entropy);
-        Self { name, sign, enc, vault }
-    }
-
-    pub fn identity_hash(&self) -> Identity {
-        crypto::hash::new(&self.sign.public_key())
-    }
-
-    pub fn to_identity(&self) -> UserIdentity {
-        UserIdentity {
-            sign: crypto::hash::new(&self.sign.public_key()),
-            enc: crypto::hash::new(&self.enc.public_key()),
-        }
-    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -206,9 +140,9 @@ fn App() -> impl IntoView {
         identity: Identity,
         mut dispatch: RequestDispatch,
     ) -> anyhow::Result<(UserName, MemberMeta)> {
-        let client = chain::node(my_name).await?;
+        let client = client_node::chain_node(my_name).await?;
         let identity_hashes = client
-            .get_profile_by_name(chain::user_contract(), username_to_raw(name))
+            .get_profile_by_name(client_node::user_contract(), username_to_raw(name))
             .await?
             .context("user not found")?;
         let pf = dispatch.fetch_keys(identity_hashes.sign).await.context("fetching profile")?;
@@ -223,7 +157,7 @@ fn App() -> impl IntoView {
         .into_bytes();
 
         dispatch
-            .send_mail(identity_hashes.sign, Mail::HardenedJoinRequest {
+            .send_mail(identity_hashes.sign, MailVariants::HardenedJoinRequest {
                 cp: cp.into_bytes(),
                 payload: unsafe {
                     std::mem::transmute(FixedAesPayload::new(
@@ -286,20 +220,20 @@ fn App() -> impl IntoView {
                             my_id: Identity,
                             my_name: UserName,
                             new_messages: &mut Vec<db::Message>| {
-        let Some(mail) = Mail::decode(&mut raw_mail) else {
+        let Some(mail) = MailVariants::decode(&mut raw_mail) else {
             anyhow::bail!("faild to decode mail, {raw_mail:?}");
         };
         assert!(raw_mail.is_empty());
 
         match mail {
-            Mail::ChatInvite { chat, cp } => {
+            MailVariants::ChatInvite { chat, cp } => {
                 let secret = enc
                     .decapsulate_choosen(&ChoosenCiphertext::from_bytes(cp))
                     .context("failed to decapsulate invite")?;
 
                 state.vault.update(|v| _ = v.chats.insert(chat, ChatMeta::from_secret(secret)));
             }
-            Mail::HardenedJoinRequest { cp, payload } => {
+            MailVariants::HardenedJoinRequest { cp, payload } => {
                 log::debug!("handling hardened join request");
                 let secret = enc
                     .decapsulate(&Ciphertext::from_bytes(cp))
@@ -327,7 +261,7 @@ fn App() -> impl IntoView {
                     chat.members.insert(name, MemberMeta { secret, identity });
                 })
             }
-            Mail::HardenedChatInvite { cp, payload } => {
+            MailVariants::HardenedChatInvite { cp, payload } => {
                 log::debug!("handling hardened chat invite");
                 let enc = enc;
                 let secret = enc
@@ -359,7 +293,7 @@ fn App() -> impl IntoView {
                     Ok(())
                 });
             }
-            Mail::HardenedChatMessage { nonce, chat, content } => {
+            MailVariants::HardenedChatMessage { nonce, chat, content } => {
                 let mut message = content.0.to_owned();
                 state.vault.update(|v| {
                     let Some((&chat, meta)) = v
@@ -404,7 +338,9 @@ fn App() -> impl IntoView {
             navigate_to("/");
             let identity = keys.identity_hash();
             let (node, vault, dispatch, vault_version, mail_action) =
-                Node::new(keys, wboot_phase).await.inspect_err(|_| navigate_to("/login"))?;
+                Node::new(keys, |s| wboot_phase(Some(s)))
+                    .await
+                    .inspect_err(|_| navigate_to("/login"))?;
 
             let mut dispatch_clone = dispatch.clone();
             let cloned_enc = enc.clone();
@@ -460,7 +396,7 @@ fn App() -> impl IntoView {
             navigate_to("/chat");
 
             let res = libp2p::futures::select! {
-                e = node.run().fuse() => e,
+                _ = node.fuse() => Err(anyhow::anyhow!("local node terminated")),
                 e = listen.fuse() => e,
             };
             navigate_to("/login");
@@ -521,36 +457,6 @@ fn ErrorPanel(errors: ReadSignal<Option<anyhow::Error>>) -> impl IntoView {
         <div class="fsc jcfe flx pen">
             <div class="bm" style="align-self: flex-end;" node_ref=error_nodes />
         </div>
-    }
-}
-
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[repr(u8)]
-pub enum BootPhase {
-    #[error("fetching nodes and profile from chain...")]
-    FetchNodesAndProfile,
-    #[error("initiating orion connection...")]
-    InitiateConnection,
-    #[error("collecting server keys... ({0} left)")]
-    CollecringKeys(usize),
-    #[error("opening route to profile...")]
-    ProfileOpen,
-    #[error("loading vault...")]
-    VaultLoad,
-    #[error("creating new profile...")]
-    ProfileCreate,
-    #[error("searching chats...")]
-    ChatSearch,
-    #[error("ready")]
-    ChatRun,
-}
-
-impl BootPhase {
-    fn discriminant(&self) -> u8 {
-        // SAFETY: Because `Self` is marked `repr(u8)`, its layout is a `repr(C)` `union`
-        // between `repr(C)` structs, each of which has the `u8` discriminant as its first
-        // field, so we can read the discriminant without offsetting the pointer.
-        unsafe { *<*const _>::from(self).cast::<u8>() }
     }
 }
 
@@ -717,28 +623,4 @@ fn handled_spawn_local(
 fn encrypt(data: &mut Vec<u8>, secret: crypto::SharedSecret) {
     let arr = crypto::encrypt(data, secret, OsRng);
     data.extend(arr);
-}
-
-pub async fn timeout<F: Future>(f: F, duration: Duration) -> Result<F::Output, ChatError> {
-    let mut fut = pin!(f);
-    let mut timeout_handle = None::<TimeoutHandle>;
-    let until = instant::Instant::now() + duration;
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(v) = fut.as_mut().poll(cx) {
-            return Poll::Ready(Ok(v));
-        }
-
-        if until < instant::Instant::now() {
-            return Poll::Ready(Err(ChatError::Timeout));
-        }
-
-        if timeout_handle.is_none() {
-            let waker = cx.waker().clone();
-            let handle = set_timeout_with_handle(|| waker.wake(), duration).unwrap();
-            timeout_handle = Some(handle);
-        }
-
-        Poll::Pending
-    })
-    .await
 }

@@ -1,10 +1,10 @@
 use {
     crate::{
         db, handled_async_callback, handled_async_closure, handled_callback, handled_spawn_local,
-        node::{self, HardenedChatInvitePayload, Mail, MessageContent, RawChatMessage},
     },
     anyhow::Context,
     chat_spec::{ChatError, ChatEvent, ChatName, Identity, Member, Permissions, Rank, UserName},
+    client_node::{HardenedChatInvitePayload, MailVariants, MessageContent, RawChatMessage},
     component_utils::{Codec, DropFn, Reminder},
     crypto::{enc, SharedSecret, TransmutationCircle},
     leptos::{
@@ -12,7 +12,7 @@ use {
         *,
     },
     leptos_router::Redirect,
-    libp2p::futures::{future::join_all, FutureExt},
+    libp2p::futures::{future::join_all, FutureExt, StreamExt},
     rand::{rngs::OsRng, Rng},
     std::{
         future::Future,
@@ -317,7 +317,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
             requests().create_chat(chat, my_id).await.context("creating chat")?;
 
-            let meta = node::ChatMeta::new();
+            let meta = client_node::ChatMeta::new();
             state.vault.update(|v| _ = v.chats.insert(chat, meta));
 
             Ok(())
@@ -353,13 +353,11 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
         let chat = current_chat.get_untracked().context("no chat selected")?;
         let secret = state.chat_secret(chat).context("we are nor part of this chat")?;
-        let invitee = crate::chain::fetch_profile(my_name, name).await?;
+        let invitee = client_node::fetch_profile(my_name, name).await?;
 
         let mut requests = requests();
-        requests
-            .add_member(state, chat, invitee.sign, Member::worst())
-            .await
-            .context("adding user")?;
+        let proof = state.next_chat_proof(chat).context("getting chat proof")?;
+        requests.add_member(proof, invitee.sign, Member::worst()).await.context("adding user")?;
 
         let user_data = requests.fetch_keys(invitee.sign).await.context("fetching user profile")?;
 
@@ -367,7 +365,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             .encapsulate_choosen(enc::PublicKey::from_ref(&user_data.enc), secret, OsRng)
             .into_bytes();
         requests
-            .send_mail(invitee.sign, Mail::ChatInvite { chat, cp })
+            .send_mail(invitee.sign, MailVariants::ChatInvite { chat, cp })
             .await
             .context("sending invite")?;
 
@@ -384,7 +382,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             })
             .context("we are not part of this chat")?;
 
-        let invitee = crate::chain::fetch_profile(my_name, name).await?;
+        let invitee = client_node::fetch_profile(my_name, name).await?;
 
         let mut requests = requests();
         let user_data = requests.fetch_keys(invitee.sign).await.context("fetching user profile")?;
@@ -397,7 +395,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 .to_bytes();
         crate::encrypt(&mut payload, secret);
         requests
-            .send_mail(invitee.sign, Mail::HardenedChatInvite {
+            .send_mail(invitee.sign, MailVariants::HardenedChatInvite {
                 cp: cp.into_bytes(),
                 payload: Reminder(&payload),
             })
@@ -406,7 +404,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
         state.vault.update(|v| {
             let meta = v.hardened_chats.get_mut(&chat).expect("we checked we are part of the chat");
-            meta.members.insert(name, node::MemberMeta { secret, identity: invitee.sign });
+            meta.members.insert(name, client_node::MemberMeta { secret, identity: invitee.sign });
         });
 
         Ok(())
@@ -452,7 +450,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
         handled_spawn_local("sending normal message", async move {
             let mut req = requests();
-            req.send_message(state, chat, &content).await?;
+            let proof =
+                state.next_chat_message_proof(chat, &content).context("getting chat proof")?;
+            req.send_message(proof, chat).await?;
             clear_input();
             Ok(())
         });
@@ -476,7 +476,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 let nonce = rand::thread_rng().gen();
                 async move {
                     requests()
-                        .send_mail(member.identity, Mail::HardenedChatMessage {
+                        .send_mail(member.identity, MailVariants::HardenedChatMessage {
                             nonce,
                             chat: crypto::hash::with_nonce(chat.as_bytes(), nonce),
                             content: Reminder(&message),
@@ -723,7 +723,8 @@ fn editable_member(
     let kick = handled_async_callback(kick_ctx, move |_| async move {
         let name = name_sig.get_untracked().context("no chat selected")?;
         let mut requests = state.requests.get_value().unwrap();
-        requests.kick_member(state, name, identity).await?;
+        let proof = state.next_chat_proof(name).context("getting chat proof")?;
+        requests.kick_member(proof, identity).await?;
         root.get_untracked().unwrap().remove();
         Ok(())
     });
@@ -744,7 +745,8 @@ fn editable_member(
         let updated_member = Member { rank, permissions, action_cooldown_ms, ..m };
 
         let mut requests = state.requests.get_value().unwrap();
-        requests.add_member(state, name, identity, updated_member).await?;
+        let proof = state.next_chat_proof(name).context("getting chat proof")?;
+        requests.add_member(proof, identity, updated_member).await?;
 
         cancel();
 

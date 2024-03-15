@@ -53,10 +53,10 @@ pub fn Register(state: State) -> impl IntoView {
         let key = UserKeys::new(username_content, password.value().as_str());
 
         let client =
-            crate::chain::node(username_content).await.context("chain is not reachable")?;
+            client_node::chain_node(username_content).await.context("chain is not reachable")?;
 
         if client
-            .user_exists(crate::chain::user_contract(), username_to_raw(username_content))
+            .user_exists(client_node::user_contract(), username_to_raw(username_content))
             .await
             .context("user contract call failed")?
         {
@@ -65,7 +65,7 @@ pub fn Register(state: State) -> impl IntoView {
 
         client
             .register(
-                crate::chain::user_contract(),
+                client_node::user_contract(),
                 username_to_raw(username_content),
                 key.to_identity(),
                 0,

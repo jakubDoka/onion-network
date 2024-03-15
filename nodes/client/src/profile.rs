@@ -1,4 +1,4 @@
-use {crate::node::Theme, leptos::*, leptos_router::Redirect};
+use {client_node::Theme, leptos::*, leptos_router::Redirect};
 
 #[component]
 pub fn Profile(state: crate::State) -> impl IntoView {

@@ -12,20 +12,22 @@ description = "minimal frontend for the chat application"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = { workspace = true }
-argon2 = { version = "0.5.2", default-features = false, features = ["alloc"] }
 console_error_panic_hook = "0.1.7"
 console_log = { version = "1.0.0", features = ["wasm-bindgen"] }
 hex = "0.4.3"
 leptos = { version = "0.6.6", default-features = false, features = ["nightly", "csr"] }
 leptos_router = { version = "0.6.6", features = ["nightly", "csr"] }
-libp2p = { workspace = true, features = ["noise", "macros", "yamux", "wasm-bindgen"] }
 log = { workspace = true }
-rand = "0.8.5"
 serde = { version = "1.0.193", features = ["derive"] }
 serde_json = "1.0.108"
 thiserror = "1.0.50"
 wasm-bindgen-futures = "0.4.38"
+
+argon2 = { version = "0.5.2", default-features = false, features = ["alloc"] }
+libp2p = { workspace = true, features = ["noise", "macros", "yamux", "wasm-bindgen"] }
+rand = "0.8.5"
+instant = "0.1.12"
+anyhow = { workspace = true }
 
 websocket-websys = { workspace = true }
 dht = { workspace = true }
@@ -33,7 +35,7 @@ onion = { workspace = true }
 crypto = { workspace = true }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
-instant = "0.1.12"
+client-node = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
 version = "0.1.0"

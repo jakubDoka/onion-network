@@ -44,12 +44,12 @@ use {
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 type Result<T, E = ChatError> = std::result::Result<T, E>;
-
 pub type SubscriptionMessage = Vec<u8>;
-
 pub type RawResponse = Vec<u8>;
-
 pub type MessageContent = String;
+
+#[cfg(feature = "api")]
+mod api;
 
 pub struct JoinRequestPayload {
     pub name: RawUserName,
@@ -743,31 +743,6 @@ impl RequestDispatch {
         (Self { buffer: Vec::new(), sink }, stream)
     }
 
-    async fn dispatch<'a, R: Codec<'a>>(
-        &'a mut self,
-        prefix: u8,
-        topic: impl Into<Option<Topic>>,
-        request: impl Codec<'_>,
-    ) -> Result<R> {
-        let id = CallId::new();
-        let (tx, rx) = oneshot::channel();
-        self.sink
-            .send(RequestInit::Request(RawRequest {
-                id,
-                topic: topic.into(),
-                prefix,
-                payload: request.to_bytes(),
-                channel: tx,
-            }))
-            .await
-            .map_err(|_| ChatError::ChannelClosed)?;
-        self.buffer =
-            crate::timeout(rx, REQUEST_TIMEOUT).await?.map_err(|_| ChatError::ChannelClosed)?;
-        Result::<R>::decode(&mut &self.buffer[..])
-            .ok_or(ChatError::InvalidResponse)
-            .and_then(identity)
-    }
-
     pub async fn add_member(
         &mut self,
         proof: Proof<ChatName>,
@@ -836,6 +811,29 @@ impl RequestDispatch {
             .ok_or(ChatError::NotMember)
     }
 
+    pub async fn subscribe(
+        &mut self,
+        topic: impl Into<Topic>,
+    ) -> Result<mpsc::Receiver<SubscriptionMessage>> {
+        let (tx, mut rx) = mpsc::channel(0);
+        let id = CallId::new();
+        let topic: Topic = topic.into();
+        self.sink
+            .try_send(RequestInit::Subscription(SubscriptionInit { id, topic, channel: tx }))
+            .map_err(|_| ChatError::ChannelClosed)?;
+
+        let init =
+            crate::timeout(rx.next(), REQUEST_TIMEOUT).await?.ok_or(ChatError::ChannelClosed)?;
+        Result::<()>::decode(&mut &init[..]).ok_or(ChatError::InvalidResponse)??;
+
+        Ok(rx)
+    }
+
+    pub fn unsubscribe(&mut self, topic: impl Into<Topic>) {
+        let topic: Topic = topic.into();
+        self.sink.try_send(RequestInit::EndSubscription(topic)).unwrap();
+    }
+
     async fn dispatch_direct<'a, R: Codec<'a>>(
         &'a mut self,
         stream: &mut EncryptedStream,
@@ -862,27 +860,29 @@ impl RequestDispatch {
             .and_then(|(_, r)| r)
     }
 
-    pub async fn subscribe(
-        &mut self,
-        topic: impl Into<Topic>,
-    ) -> Result<mpsc::Receiver<SubscriptionMessage>> {
-        let (tx, mut rx) = mpsc::channel(0);
+    async fn dispatch<'a, R: Codec<'a>>(
+        &'a mut self,
+        prefix: u8,
+        topic: impl Into<Option<Topic>>,
+        request: impl Codec<'_>,
+    ) -> Result<R> {
         let id = CallId::new();
-        let topic: Topic = topic.into();
+        let (tx, rx) = oneshot::channel();
         self.sink
-            .try_send(RequestInit::Subscription(SubscriptionInit { id, topic, channel: tx }))
+            .send(RequestInit::Request(RawRequest {
+                id,
+                topic: topic.into(),
+                prefix,
+                payload: request.to_bytes(),
+                channel: tx,
+            }))
+            .await
             .map_err(|_| ChatError::ChannelClosed)?;
-
-        let init =
-            crate::timeout(rx.next(), REQUEST_TIMEOUT).await?.ok_or(ChatError::ChannelClosed)?;
-        Result::<()>::decode(&mut &init[..]).ok_or(ChatError::InvalidResponse)??;
-
-        Ok(rx)
-    }
-
-    pub fn unsubscribe(&mut self, topic: impl Into<Topic>) {
-        let topic: Topic = topic.into();
-        self.sink.try_send(RequestInit::EndSubscription(topic)).unwrap();
+        self.buffer =
+            crate::timeout(rx, REQUEST_TIMEOUT).await?.map_err(|_| ChatError::ChannelClosed)?;
+        Result::<R>::decode(&mut &self.buffer[..])
+            .ok_or(ChatError::InvalidResponse)
+            .and_then(identity)
     }
 }
 

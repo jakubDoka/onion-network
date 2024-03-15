@@ -65,14 +65,14 @@ struct State {
 }
 
 impl State {
-    pub fn set_chat_nonce(&self, chat: ChatName, nonce: Nonce) {
+    fn set_chat_nonce(&self, chat: ChatName, nonce: Nonce) {
         self.vault.update(|v| {
             let chat = v.chats.get_mut(&chat).expect("chat not found");
             chat.action_no = nonce;
         });
     }
 
-    pub fn next_chat_proof(self, chat_name: ChatName) -> Option<chat_spec::Proof<ChatName>> {
+    fn next_chat_proof(self, chat_name: ChatName) -> Option<chat_spec::Proof<ChatName>> {
         self.keys
             .try_with_untracked(|keys| {
                 let keys = keys.as_ref()?;
@@ -102,7 +102,7 @@ impl State {
             .flatten()
     }
 
-    pub fn next_profile_proof(self, vault: &[u8]) -> Option<chat_spec::Proof<Reminder>> {
+    fn next_profile_proof(self, vault: &[u8]) -> Option<chat_spec::Proof<Reminder>> {
         self.keys
             .try_with_untracked(|keys| {
                 let keys = keys.as_ref()?;
@@ -114,7 +114,7 @@ impl State {
             .flatten()
     }
 
-    pub fn chat_secret(self, chat_name: ChatName) -> Option<crypto::SharedSecret> {
+    fn chat_secret(self, chat_name: ChatName) -> Option<crypto::SharedSecret> {
         self.vault.with_untracked(|vault| vault.chats.get(&chat_name).map(|c| c.secret))
     }
 
@@ -196,15 +196,9 @@ fn App() -> impl IntoView {
     };
     create_effect(move |init| {
         serialized_vault.track();
-        if init.is_none() {
-            return;
-        }
-        let Some(keys) = state.keys.get_untracked() else {
-            return;
-        };
-        let Some(ed) = state.requests.get_value() else {
-            return;
-        };
+        _ = init?;
+        let keys = state.keys.get_untracked()?;
+        let ed = state.requests.get_value()?;
 
         if let Some(handle) = timeout.get_value() {
             handle.clear()
@@ -212,6 +206,8 @@ fn App() -> impl IntoView {
         let handle =
             set_timeout_with_handle(move || save_vault(keys, ed), Duration::from_secs(3)).unwrap();
         timeout.set_value(Some(handle));
+
+        Some(())
     });
 
     let handle_mail = move |mut raw_mail: &[u8],

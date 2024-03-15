@@ -31,6 +31,7 @@ libp2p = "0.53.2"
 log = "0.4.20"
 futures = "0.3.30"
 anyhow = "1.0.80"
+thiserror = "1.0.58"
 
 chain-api = { path = "core/chain-api" }
 node_staker = { path = "contracts/node_staker" }

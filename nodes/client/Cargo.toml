@@ -35,7 +35,7 @@ onion = { workspace = true }
 crypto = { workspace = true }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
-client-node = { workspace = true }
+client-node = { workspace = true, default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
 version = "0.1.0"

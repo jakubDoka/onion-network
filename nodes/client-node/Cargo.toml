@@ -8,6 +8,9 @@ categories.workspace = true
 license.workspace = true
 edition.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 rand = "0.8.5"
 wasm-bindgen-futures = "0.4.42"
@@ -54,3 +57,8 @@ features = [
 
 [lints]
 workspace = true
+
+[features]
+default = ["api"]
+building = []
+api = []

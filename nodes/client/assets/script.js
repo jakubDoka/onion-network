@@ -124,9 +124,14 @@ function triggersInsertMode(elem) {
                 || (elem.tagName === "TEXTAREA");
 }
 
+function isHidden(elem) {
+        if (getComputedStyle(elem).display === "none") return true;
+        if (elem.parentElement) return isHidden(elem.parentElement);
+        return false;
+}
+
 const specialKeys = {
         ["Escape"]: "<esc>",
-        ["Enter"]: "",
 };
 let keyBuffer = "";
 document.addEventListener("keydown", function (e) {
@@ -145,47 +150,49 @@ document.addEventListener("keydown", function (e) {
                 return;
         }
 
-        keyBuffer += key;
+
+        if (e.key === "Backspace") {
+                keyBuffer = keyBuffer.slice(0, -1);
+        } else if (e.key === "Enter") {
+        } else keyBuffer += key;
 
         for (const elem of shortcutElems) {
                 if (elem.getAttribute("shortcut").startsWith(keyBuffer)
-                        && getComputedStyle(elem).display !== "none")
+                        && !isHidden(elem))
                         matched.push(elem);
         }
 
-        for (const elem of matched) {
-                elem.classList.add("sel");
-        }
-
-        const complete = key == "";
+        const complete = key === "Enter";
         let collision = false;
         let bestPriority = -1;
         let bestMatch = undefined;
         for (const elem of matched) {
                 let [sequence, priority] = elem.getAttribute("shortcut").split(" ");
                 priority = parseInt(priority ?? "0");
-                if (sequence !== keyBuffer || complete) continue;
-                if (priority < bestPriority) continue;
                 collision = bestPriority === priority && !complete;
+                if (sequence !== keyBuffer && complete) continue;
+                if (priority < bestPriority) continue;
                 bestPriority = priority;
                 bestMatch = elem;
         }
 
-        if (bestMatch && !collision) {
-                bestMatch.classList.remove("sel");
-                console.log("Best match", bestMatch);
+        if (collision) bestMatch = undefined;
+
+        if (bestMatch) {
                 if (triggersInsertMode(bestMatch)) {
-                        console.log("Focus", bestMatch);
                         e.preventDefault();
                         bestMatch.focus();
                 } else {
-                        console.log("Click", bestMatch);
                         bestMatch.click();
                 }
         }
 
         if (bestMatch || matched.length === 0) {
                 keyBuffer = "";
+        } else if (keyBuffer.length > 0) {
+                for (const elem of matched) {
+                        elem.classList.add("sel");
+                }
         }
 
         const keyDisplay = document.getElementById("key-display");

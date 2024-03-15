@@ -44,6 +44,7 @@ rpc = { path = "core/rpc" }
 storage-spec = { path = "core/storage-spec" }
 streaming = { path = "core/streaming" }
 client = { path = "nodes/client" }
+client-node = { path = "nodes/client-node" }
 satelite = { path = "nodes/satelite" }
 server = { path = "nodes/server" }
 storage = { path = "nodes/storage" }
@@ -68,8 +69,7 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-[profile.wasm-optimized]
-inherits = "release"
+[profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1

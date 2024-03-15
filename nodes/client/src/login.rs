@@ -95,8 +95,8 @@ pub fn Register(state: State) -> impl IntoView {
 fn Nav() -> impl IntoView {
     view! {
         <nav class="flx jcsb">
-            <A class="bf hov bp rsb" href="/login">/login</A>
-            <A class="bf hov bp sb" href="/register">/register</A>
+            <A class="bf hov bp rsb sc" href="/login">/login</A>
+            <A class="bf hov bp sb sc" href="/register">/register</A>
         </nav>
     }
 }

@@ -131,17 +131,19 @@ struct State {
 }
 
 impl State {
-    pub fn next_chat_proof(
-        self,
-        chat_name: ChatName,
-        nonce: Option<Nonce>,
-    ) -> Option<chat_spec::Proof<ChatName>> {
+    pub fn set_chat_nonce(&self, chat: ChatName, nonce: Nonce) {
+        self.vault.update(|v| {
+            let chat = v.chats.get_mut(&chat).expect("chat not found");
+            chat.action_no = nonce;
+        });
+    }
+
+    pub fn next_chat_proof(self, chat_name: ChatName) -> Option<chat_spec::Proof<ChatName>> {
         self.keys
             .try_with_untracked(|keys| {
                 let keys = keys.as_ref()?;
                 self.vault.try_update(|vault| {
                     let chat = vault.chats.get_mut(&chat_name)?;
-                    chat.action_no = nonce.map_or(chat.action_no, |n| n + 1);
                     Some(Proof::new(&keys.sign, &mut chat.action_no, chat_name, OsRng))
                 })
             })
@@ -153,14 +155,12 @@ impl State {
         &self,
         name: ChatName,
         message: &'a [u8],
-        nonce: Option<Nonce>,
     ) -> Option<chat_spec::Proof<Reminder<'a>>> {
         self.keys
             .try_with_untracked(|keys| {
                 let keys = keys.as_ref()?;
                 self.vault.try_update(|vault| {
                     let chat = vault.chats.get_mut(&name)?;
-                    chat.action_no = nonce.map_or(chat.action_no, |n| n + 1);
                     Some(Proof::new(&keys.sign, &mut chat.action_no, Reminder(message), OsRng))
                 })
             })
@@ -607,17 +607,17 @@ fn Nav(my_name: UserName) -> impl IntoView {
                 <div class="bp bf hc lsb">{uname}</div>
             </div>
             <div class="flx fdc tsm" hidden node_ref=menu>
-                <A class="bf hov bp bsb" href="/chat">/rooms</A>
-                <A class="bf hov bp sb" href="/profile">/profile</A>
-                <A class="bf hov bp tsb" href="/login">/logout</A>
+                <A class="bf hov bp sc bsb" href="/chat">/rooms</A>
+                <A class="bf hov bp sc sb" href="/profile">/profile</A>
+                <A class="bf hov bp sc tsb" href="/login">/logout</A>
             </div>
         </nav>
 
         <nav class="sc flx jcsb fg0 desktop-only">
             <div class="flx">
-                <A class="bf hov bp rsb" href="/chat">/rooms</A>
-                <A class="bf hov bp sb" href="/profile">/profile</A>
-                <A class="bf hov bp sb" href="/login">/logout</A>
+                <A class="bf hov bp sc rsb" href="/chat">/rooms</A>
+                <A class="bf hov bp sc sb" href="/profile">/profile</A>
+                <A class="bf hov bp sc sb" href="/login">/logout</A>
             </div>
             <div class="bp bf hc lsb">{uname}</div>
         </nav>

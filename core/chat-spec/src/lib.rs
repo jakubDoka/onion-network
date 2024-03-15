@@ -28,6 +28,7 @@ pub mod rpcs {
     rpcs! {
         CREATE_CHAT;
         ADD_MEMBER;
+        KICK_MEMBER;
         SEND_MESSAGE;
         SEND_BLOCK;
         FETCH_CHAT_DATA;
@@ -63,7 +64,7 @@ pub enum ChatError {
     NotFound,
     #[error("invalid proof")]
     InvalidProof,
-    #[error("account already exists")]
+    #[error("already exists")]
     AlreadyExists,
     #[error("invalid action")]
     InvalidAction,
@@ -75,7 +76,7 @@ pub enum ChatError {
     MailboxFull,
     #[error("you are not a member")]
     NotMember,
-    #[error("user already exists")]
+    #[error("member already exists")]
     AlreadyMember,
     #[error("invalid action, expected nonce higher then {0}")]
     InvalidChatAction(Nonce),

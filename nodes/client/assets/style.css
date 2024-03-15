@@ -23,12 +23,24 @@
 	display: flex;
 }
 
+.fw {
+	flex-wrap: wrap;
+}
+
 .pea {
 	pointer-events: auto;
 }
 
 .pen {
 	pointer-events: none;
+}
+
+.bgps {
+	gap: var(--big-margin);
+}
+
+.sgps {
+	gap: var(--small-margin);
 }
 
 .fdc {
@@ -43,8 +55,16 @@
 	backdrop-filter: blur(5px);
 }
 
+.jcc {
+	justify-content: center;
+}
+
 .jcsb {
 	justify-content: space-between;
+}
+
+.jcsa {
+	justify-content: space-around;
 }
 
 .jcfe {
@@ -89,6 +109,22 @@
 
 .rbp {
 	padding-right: var(--big-padding);
+}
+
+.tsp {
+	padding-top: var(--small-padding);
+}
+
+.tbp {
+	padding-top: var(--big-padding);
+}
+
+.bsp {
+	padding-bottom: var(--small-padding);
+}
+
+.bbp {
+	padding-bottom: var(--big-padding);
 }
 
 .sm {
@@ -234,7 +270,6 @@
 }
 
 * {
-	color: var(--font-color);
 	font-family: Hack, monospace;
 	border-radius: 5px;
 	font-size: var(--small-font-size);
@@ -263,6 +298,29 @@
 }
 .bar-loaded {
 	opacity: 1.0;
+}
+
+.tlf {
+	table-layout: fixed;
+}
+
+tbody {
+	border-bottom: var(--big-padding) solid transparent;
+	border-top: var(--big-padding) solid transparent;
+}
+
+.sbb {
+	border-bottom: var(--small-padding) solid transparent;
+}
+
+table {
+	border-collapse: collapse;
+    border-spacing: 0;
+}
+
+th, td, tr {
+	padding: 0px;
+	border-radius: 0px;
 }
 
 @keyframes pulse {
@@ -309,6 +367,7 @@ input, button {
 	border: none;
 	font-size: var(--big-font-size);
 }
+
 
 input[type="text"] {
 	width: 250px;

@@ -333,6 +333,7 @@ impl Server {
                 chat::{
                     rpcs::CREATE_CHAT => create.repl();
                     rpcs::ADD_MEMBER => add_member.repl().restore();
+                    rpcs::KICK_MEMBER => kick_member.repl().restore();
                     rpcs::SEND_MESSAGE => send_message.repl().restore();
                     rpcs::FETCH_MESSAGES => fetch_messages.restore();
                     rpcs::FETCH_MEMBERS => fetch_members.restore();
@@ -350,6 +351,7 @@ impl Server {
                 chat::{
                     rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
+                    rpcs::KICK_MEMBER => kick_member.restore();
                     rpcs::SEND_BLOCK => handle_message_block.restore().no_resp();
                     rpcs::FETCH_CHAT_DATA => fetch_chat_data;
                     rpcs::SEND_MESSAGE => send_message.restore();

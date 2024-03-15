@@ -64,14 +64,18 @@ impl RequestDispatch {
         member: Identity,
         config: Member,
     ) -> Result<()> {
-        let msg = (state.next_chat_proof(name, None).unwrap(), member, config);
-        let nonce = match self.dispatch(rpcs::ADD_MEMBER, Topic::Chat(name), msg).await {
-            Err(ChatError::InvalidChatAction(nonce)) => nonce,
-            e => return e,
-        };
-
-        let msg = (state.next_chat_proof(name, Some(nonce)).unwrap(), member, config);
+        let msg = (state.next_chat_proof(name).unwrap(), member, config);
         self.dispatch(rpcs::ADD_MEMBER, Topic::Chat(name), msg).await
+    }
+
+    pub async fn kick_member(
+        &mut self,
+        state: crate::State,
+        name: ChatName,
+        identity: Identity,
+    ) -> Result<()> {
+        let proof = state.next_chat_proof(name).unwrap();
+        self.dispatch(rpcs::KICK_MEMBER, Topic::Chat(name), (proof, identity)).await
     }
 
     pub async fn send_message<'a>(
@@ -80,13 +84,7 @@ impl RequestDispatch {
         name: ChatName,
         content: &[u8],
     ) -> Result<()> {
-        let proof = state.next_chat_message_proof(name, content, None).unwrap();
-        let nonce = match self.dispatch(rpcs::SEND_MESSAGE, Topic::Chat(name), proof).await {
-            Err(ChatError::InvalidChatAction(nonce)) => nonce,
-            e => return e,
-        };
-
-        let proof = state.next_chat_message_proof(name, content, Some(nonce)).unwrap();
+        let proof = state.next_chat_message_proof(name, content).unwrap();
         self.dispatch(rpcs::SEND_MESSAGE, Topic::Chat(name), proof).await
     }
 
@@ -129,7 +127,11 @@ impl RequestDispatch {
 
     pub async fn fetch_my_member(&mut self, name: ChatName, me: Identity) -> Result<Member> {
         let mebers = self.fetch_members(name, me, 1).await?;
-        mebers.into_iter().next().map(|(_, m)| m).ok_or(ChatError::NotFound)
+        mebers
+            .into_iter()
+            .next()
+            .and_then(|(id, m)| (id == me).then_some(m))
+            .ok_or(ChatError::NotMember)
     }
 
     pub async fn dispatch_direct<'a, R: Codec<'a>>(

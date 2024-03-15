@@ -4,9 +4,9 @@ use {
         node::{self, HardenedChatInvitePayload, Mail, MessageContent, RawChatMessage},
     },
     anyhow::Context,
-    chat_spec::{ChatEvent, ChatName, Member, UserName},
+    chat_spec::{ChatError, ChatEvent, ChatName, Identity, Member, Permissions, Rank, UserName},
     component_utils::{Codec, DropFn, Reminder},
-    crypto::{enc, TransmutationCircle},
+    crypto::{enc, SharedSecret, TransmutationCircle},
     leptos::{
         html::{Input, Textarea},
         *,
@@ -21,7 +21,7 @@ use {
     web_sys::{js_sys::eval, SubmitEvent},
 };
 
-fn is_at_bottom(messages_div: HtmlElement<leptos::html::Div>) -> bool {
+fn is_at_bottom(messages_div: HtmlElement<leptos::html::AnyElement>) -> bool {
     let scroll_bottom = messages_div.scroll_top();
     let scroll_height = messages_div.scroll_height();
     let client_height = messages_div.client_height();
@@ -50,7 +50,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         Hardened(db::MessageCursor),
     }
 
-    let (current_chat, set_current_chat) = create_signal(selected);
+    let current_chat = create_rw_signal(selected);
     let (current_member, set_current_member) = create_signal(Member::best());
     let (show_chat, set_show_chat) = create_signal(false);
     let (is_hardened, set_is_hardened) = create_signal(false);
@@ -157,12 +157,65 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         }
     });
 
+    let handle_event = move |event: ChatEvent, secret: SharedSecret| match event {
+        ChatEvent::Message(sender, Reminder(message)) => {
+            _ = sender; // TODO: verify this matches with the username
+
+            let mut message = message.to_vec();
+            let Some(message) = crypto::decrypt(&mut message, secret) else {
+                log::warn!("message cannot be decrypted: {:?} {:?}", message, secret);
+                return;
+            };
+
+            let Some(RawChatMessage { sender, content }) = RawChatMessage::decode(&mut &*message)
+            else {
+                log::warn!("message cannot be decoded: {:?}", message);
+                return;
+            };
+
+            append_message(sender, content.into());
+            log::info!("received message: {:?}", content);
+        }
+        ChatEvent::Member(identiy, member) => {
+            if identiy == my_id {
+                set_current_member(member);
+            }
+
+            log::info!("received member: {:?}", member);
+
+            let elem = member_view(state, identiy, member, current_member, current_chat);
+            if let Some(member_elem) = document().get_element_by_id(&hex::encode(identiy)) {
+                member_elem.replace_with_with_node_1(&elem).unwrap();
+            } else {
+                document().get_element_by_id("members").unwrap().append_child(&elem).unwrap();
+            }
+        }
+        ChatEvent::MemberRemoved(identity) => {
+            if identity == my_id {
+                if let Some(chat) = current_chat.get_untracked() {
+                    state.vault.update(|v| _ = v.chats.remove(&chat));
+                    current_chat.set(None);
+                }
+            }
+
+            log::info!("member removed: {:?}", identity);
+
+            if let Some(member_elem) = document().get_element_by_id(&hex::encode(identity)) {
+                member_elem.remove();
+            }
+        }
+    };
+
     create_effect(move |prev_chat| {
         if let Some(Some(prev_chat)) = prev_chat {
             requests().unsubscribe(prev_chat);
         }
 
-        let chat = current_chat()?;
+        let Some(chat) = current_chat() else {
+            messages.get_untracked().unwrap().set_inner_html("");
+            return None;
+        };
+
         if is_hardened.get_untracked() {
             return None;
         }
@@ -172,34 +225,12 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             let mut sub = requests().subscribe(chat).await?;
             log::info!("subscribed to chat: {:?}", chat);
             while let Some(bytes) = sub.next().await {
-                let Some(ChatEvent::Message(recvd_chat, proof)) = ChatEvent::decode(&mut &*bytes)
-                else {
+                let Some(event) = ChatEvent::decode(&mut &*bytes) else {
                     log::warn!("received message that cannot be decoded");
                     continue;
                 };
 
-                assert_eq!(chat, recvd_chat);
-
-                if !proof.verify() {
-                    log::warn!("received message with invalid proof");
-                    continue;
-                }
-
-                let mut message = proof.context.0.to_vec();
-                let Some(message) = crypto::decrypt(&mut message, secret) else {
-                    log::warn!("message cannot be decrypted: {:?} {:?}", message, secret);
-                    continue;
-                };
-
-                let Some(RawChatMessage { sender, content }) =
-                    RawChatMessage::decode(&mut &*message)
-                else {
-                    log::warn!("message cannot be decoded: {:?}", message);
-                    continue;
-                };
-
-                append_message(sender, content.into());
-                log::info!("received message: {:?}", content);
+                handle_event(event, secret);
             }
 
             Ok(())
@@ -226,13 +257,27 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let side_chat = move |chat: ChatName, hardened: bool| {
         let select_chat = handled_async_callback("switching chat", move |_| async move {
-            let my_user =
-                requests().fetch_my_member(chat, my_id).await.context("fetching our member")?;
+            let my_user = if hardened {
+                Member::best()
+            } else {
+                let m = requests()
+                    .fetch_my_member(chat, my_id)
+                    .await
+                    .inspect_err(|e| {
+                        if !matches!(e, ChatError::NotFound | ChatError::NotMember) {
+                            return;
+                        }
+                        state.vault.update(|v| _ = v.chats.remove(&chat));
+                    })
+                    .context("fetching our member")?;
+                state.set_chat_nonce(chat, m.action + 1);
+                m
+            };
             set_current_member(my_user);
             set_show_chat(true);
             set_red_all_messages(false);
             set_cursor(Cursor::Normal(chat_spec::Cursor::INIT));
-            set_current_chat(Some(chat));
+            current_chat.set(Some(chat));
             set_is_hardened(hardened);
             crate::navigate_to(format_args!("/chat/{chat}"));
             let messages = messages.get_untracked().expect("universe to work");
@@ -312,7 +357,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
         let mut requests = requests();
         requests
-            .add_member(state, chat, invitee.sign, Member::default())
+            .add_member(state, chat, invitee.sign, Member::worst())
             .await
             .context("adding user")?;
 
@@ -372,7 +417,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             placeholder: "user to invite...",
             button_style: "fg0 hov pc",
             button: "+",
-            shortcut: "im",
+            shortcut: "am",
             confirm: "invite",
             maxlength: 32,
         },
@@ -385,6 +430,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             }
         },
     );
+
+    let (member_list_button, member_list_popup) =
+        member_list_poppup(state, current_member, current_chat);
 
     let message_input = create_node_ref::<Textarea>();
     let clear_input = move || {
@@ -482,7 +530,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             return;
         }
 
-        if !is_at_bottom(message_scroll.get_untracked().unwrap()) {
+        if !is_at_bottom(message_scroll.get_untracked().unwrap().into_any()) {
             return;
         }
 
@@ -525,17 +573,18 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 </div>
             </div>
             <div class="sc fg1 flx pb fdc" hidden=crate::not(chat_selected) class=("off-screen", crate::not(show_chat))>
-                <div class="fg0 flx bm jcsb">
+                <div class="fg0 flx bm">
                     <button class="hov sf pc lsm phone-only" on:click=hide_chat>"<"</button>
                     <div class="phone-only">{get_chat}</div>
                     {invite_user_button}
+                    {member_list_button}
                 </div>
                 <div class="fg1 flx fdc sc pr oys fy" on:scroll=on_scroll node_ref=message_scroll>
                     <div class="fg1 flx fdc bp sc fsc fy boa" node_ref=messages></div>
                 </div>
                 <textarea class="fg0 flx bm bp pc sf" id="message-input" type="text" rows=1
                     placeholder="mesg..." node_ref=message_input on:keydown=on_input 
-                    disabled=crate::not(can_send)/>
+                    disabled=crate::not(can_send) shortcut="i"/>
             </div>
             <div class="sc fg1 flx pb fdc" hidden=chat_selected class=("off-screen", crate::not(show_chat))>
                 <div class="ma">"no chat selected"</div>
@@ -544,7 +593,184 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         {create_normal_chat_poppup}
         {create_hardened_chat_poppup}
         {invite_user_poppup}
+        {member_list_popup}
     }.into_view()
+}
+
+fn member_list_poppup(
+    state: crate::State,
+    me: ReadSignal<Member>,
+    name_sig: RwSignal<Option<ChatName>>,
+) -> (impl IntoView, impl IntoView) {
+    let (hidden, set_hidden) = create_signal(true);
+    let members = create_node_ref::<html::Table>();
+    let cursor = store_value(Identity::default());
+    let (exhausted, set_exhausted) = create_signal(false);
+
+    let requests = move || state.requests.get_value().unwrap();
+    let show = move |_| _ = (set_hidden(false), set_exhausted(false));
+    let hide = move |_| set_hidden(true);
+    let load_members = handled_async_closure("loading members", move || async move {
+        let name = name_sig.get_untracked().context("no chat selected")?;
+        let last_identity = cursor.get_value();
+        let fetched_members = requests().fetch_members(name, last_identity, 31).await?;
+        set_exhausted(fetched_members.len() < 31);
+
+        let members = members.get_untracked().expect("layout invariants");
+        for &(identity, member) in
+            fetched_members.iter().skip((last_identity != Identity::default()) as usize)
+        {
+            let member = member_view(state, identity, member, me, name_sig);
+            members.append_child(&member).unwrap();
+        }
+
+        Ok::<_, anyhow::Error>(())
+    });
+
+    let handle_scroll = move |_| {
+        let members = members.get_untracked().expect("layout invariants");
+        if is_at_bottom(members.into_any()) && !exhausted() {
+            load_members();
+        }
+    };
+
+    create_effect(move |_| {
+        if name_sig.get().is_none() {
+            return;
+        }
+
+        members.get_untracked().unwrap().set_inner_html("");
+        load_members();
+    });
+
+    let button = view! {
+        <button class="hov sf pc lsm" shortcut="lm"
+            on:click=show>"members"</button>
+    };
+    let popup = view! {
+        <div class="fsc flx blr sb" hidden=hidden>
+            <div class="sc flx fdc bp bm bsha w100 bgps">
+                <div class="pr fg1 oys pc flx fdc"  on:scroll=handle_scroll>
+                    <table class="tlf w100">
+                        <tr class="sp"><th>rank</th><th>perm</th><th>rtlm</th></tr>
+                    </table>
+                    <table class="tlf w100" id="members" node_ref=members></table>
+                </div>
+                <input class="pc hov bp" type="button" value="cancel" on:click=hide shortcut="<esc>" />
+            </div>
+        </div>
+    };
+    (button, popup)
+}
+
+fn member_view(
+    state: crate::State,
+    identity: Identity,
+    m: Member,
+    me: ReadSignal<Member>,
+    name: RwSignal<Option<ChatName>>,
+) -> HtmlElement<html::Tr> {
+    let my_id = state.keys.get_untracked().unwrap().identity_hash();
+    let can_modify = me.get_untracked().rank < m.rank || my_id == identity;
+    let root = create_node_ref::<html::Tr>();
+    let start_edit = handled_callback("opening member edit", move |_| {
+        if !can_modify {
+            return Ok(());
+        }
+
+        root.get_untracked()
+            .unwrap()
+            .replace_with_with_node_1(&editable_member(state, identity, m, me, name))
+            .unwrap();
+
+        Ok(())
+    });
+
+    view! {
+        <tr class:hov=can_modify class="sp" node_ref=root on:click=start_edit
+            id=hex::encode(identity)>
+            <th>{m.rank}</th>
+            <th>{m.permissions.to_string()}</th>
+            <th>{m.action_cooldown_ms}</th>
+        </tr>
+    }
+}
+
+fn editable_member(
+    state: crate::State,
+    identity: Identity,
+    m: Member,
+    me: ReadSignal<Member>,
+    name_sig: RwSignal<Option<ChatName>>,
+) -> HtmlElement<html::Tbody> {
+    let rank = create_node_ref::<Input>();
+    let permissions = create_node_ref::<Input>();
+    let action_cooldown_ms = create_node_ref::<Input>();
+    let root = create_node_ref::<html::Tbody>();
+
+    let ctx = "commiting member changes";
+    let is_me = state.keys.get_untracked().unwrap().identity_hash() == identity;
+    let kick_label = if is_me { "leave" } else { "kick" };
+    let kick_ctx = if is_me { "leaving chat" } else { "kicking member" };
+
+    let cancel = move || {
+        root.get_untracked()
+            .unwrap()
+            .replace_with_with_node_1(&member_view(state, identity, m, me, name_sig))
+            .unwrap();
+    };
+
+    let kick = handled_async_callback(kick_ctx, move |_| async move {
+        let name = name_sig.get_untracked().context("no chat selected")?;
+        let mut requests = state.requests.get_value().unwrap();
+        requests.kick_member(state, name, identity).await?;
+        root.get_untracked().unwrap().remove();
+        Ok(())
+    });
+    let save = handled_async_callback(ctx, move |e: SubmitEvent| async move {
+        e.prevent_default();
+
+        let name = name_sig.get_untracked().context("no chat selected")?;
+
+        let rank = crate::get_value(rank).parse::<Rank>().context("parsing rank")?;
+        let permissions = crate::get_value(permissions)
+            .parse::<chat_spec::Permissions>()
+            .context("parsing permissions")?;
+        if permissions & me.get_untracked().permissions != permissions {
+            anyhow::bail!("you cannot give more permissions than you have");
+        }
+        let action_cooldown_ms =
+            crate::get_value(action_cooldown_ms).parse::<u32>().context("parsing cooldown")?;
+        let updated_member = Member { rank, permissions, action_cooldown_ms, ..m };
+
+        let mut requests = state.requests.get_value().unwrap();
+        requests.add_member(state, name, identity, updated_member).await?;
+
+        cancel();
+
+        Ok(())
+    });
+
+    view! {
+        <tbody class="br sb sc sp" node_ref=root id=hex::encode(identity)>
+            <form id="member-form" on:submit=save></form>
+            <tr class="sbb">
+                <th><input class="hov pc tac sf" type="number" value=m.rank form="member-form"
+                    min=me.get_untracked().rank max=Rank::MAX node_ref=rank required /></th>
+                <th><input class="hov pc tac sf" type="text" value=m.permissions.to_string()
+                    node_ref=permissions maxlength=Permissions::COUNT form="member-form"
+                    required /></th>
+                <th><input class="hov pc tac sf" type="number" value=m.action_cooldown_ms
+                    form="member-form" min=me.get_untracked().action_cooldown_ms max=u32::MAX
+                    node_ref=action_cooldown_ms required /></th>
+            </tr>
+            <tr class="sc sb"><td colspan=3><div class="flx jcc sgps">
+                <input class="hov pc sf" type="submit" value="save" form="member-form" />
+                <input class="hov pc sf" type="button" value=kick_label on:click=kick />
+                <input class="hov pc sf" type="button" value="cancel" on:click=move |_| cancel() />
+            </div></td></tr>
+        </tbody>
+    }
 }
 
 struct PoppupStyle {

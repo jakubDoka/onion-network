@@ -1,8 +1,8 @@
 use {
     super::Nonce,
-    crate::{BlockNumber, ChatError, Identity, Proof},
+    crate::{BlockNumber, ChatError, Identity},
     component_utils::{arrayvec::ArrayString, Codec, Reminder},
-    std::{iter, ops::Range, time::SystemTime},
+    std::{fmt::Display, iter, ops::Range, str::FromStr, time::SystemTime},
 };
 
 pub const CHAT_NAME_CAP: usize = 32;
@@ -21,20 +21,18 @@ pub struct Member {
 
 impl Member {
     pub fn best() -> Member {
-        Member {
-            action: 0,
-            permissions: Permissions::all(),
-            rank: 0,
-            action_cooldown_ms: 0,
-            frozen_until: 0,
-        }
+        Member { permissions: Permissions::all(), ..Default::default() }
+    }
+
+    pub fn worst() -> Member {
+        Member { rank: Rank::MAX, action_cooldown_ms: 10000, ..Default::default() }
     }
 
     pub fn allocate_action(&mut self, permission: Permissions) -> Result<(), ChatError> {
         let current_ms =
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
 
-        if self.frozen_until > current_ms {
+        if self.frozen_until >= current_ms {
             return Err(ChatError::RateLimited(self.frozen_until - current_ms));
         }
         self.frozen_until = current_ms + self.action_cooldown_ms as u64;
@@ -50,6 +48,62 @@ bitflags::bitflags! {
         const INVITE = 1 << 1;
         const KICK = 1 << 2;
         const RATE_LIMIT = 1 << 3;
+    }
+}
+
+impl Permissions {
+    pub const COUNT: usize = Self::FULL.len();
+    pub const FULL: &'static str = "sikr";
+}
+
+impl FromStr for Permissions {
+    type Err = PermissionsParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut permissions = Self::empty();
+
+        if s.len() != Self::COUNT {
+            return Err(PermissionsParseError::InvalidLength);
+        }
+
+        for (i, (c, s)) in s.chars().zip(Self::FULL.chars()).enumerate() {
+            if c == s {
+                permissions |=
+                    Self::from_bits(1 << i).expect("valid bit unless we really fucked up");
+            } else if c != '-' {
+                return Err(PermissionsParseError::InvalidChar(i, s));
+            }
+        }
+
+        Ok(permissions)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PermissionsParseError {
+    #[error(
+        "invalid length, expected exactly {} characters (all enabled '{}') (all disabled '----')",
+        Permissions::COUNT,
+        Permissions::FULL
+    )]
+    InvalidLength,
+    #[error("invalid character at position {0}, expected '{1}' or '-'")]
+    InvalidChar(usize, char),
+}
+
+impl Display for Permissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let full = "sikr";
+        let mut mask = self.bits();
+        for c in full.chars() {
+            if mask & 1 != 0 {
+                write!(f, "{c}")?;
+            } else {
+                write!(f, "-")?;
+            }
+            mask >>= 1;
+        }
+        Ok(())
     }
 }
 
@@ -109,8 +163,11 @@ pub type ChatName = ArrayString<CHAT_NAME_CAP>;
 pub type RawChatName = [u8; CHAT_NAME_CAP];
 
 #[derive(Codec)]
+#[allow(clippy::large_enum_variant)]
 pub enum ChatEvent<'a> {
-    Message(ChatName, Proof<Reminder<'a>>),
+    Message(Identity, Reminder<'a>),
+    Member(Identity, Member),
+    MemberRemoved(Identity),
 }
 
 #[derive(Codec)]

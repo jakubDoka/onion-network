@@ -72,20 +72,26 @@ pub async fn add_member(
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let sender_id = crypto::hash::from_slice(&proof.pk);
+    let is_update = chat.members.contains_key(&identity);
     let sender = chat.members.get_mut(&sender_id).ok_or(ChatError::NotMember)?;
+    let rank = sender.rank;
 
-    sender.allocate_action(Permissions::INVITE)?;
     advance_nonce(&mut sender.action, proof.nonce)?;
+    if !is_update {
+        sender.allocate_action(Permissions::INVITE)?;
+    }
 
     let member = Member {
-        rank: sender.rank + member.rank,
+        rank: sender.rank.max(member.rank),
         permissions: member.permissions & sender.permissions,
         action_cooldown_ms: sender.action_cooldown_ms.max(member.action_cooldown_ms),
         ..default()
     };
 
     match chat.members.entry(identity) {
-        btree_map::Entry::Occupied(existing) if existing.get().rank < member.rank => {
+        btree_map::Entry::Occupied(existing)
+            if existing.get().rank > rank || identity == sender_id =>
+        {
             let existing = existing.into_mut();
             existing.rank = member.rank;
             existing.permissions = member.permissions;
@@ -94,6 +100,41 @@ pub async fn add_member(
         btree_map::Entry::Vacant(v) => _ = v.insert(member),
         _ => return Err(ChatError::NoPermission),
     }
+
+    cx.push_chat_event(proof.context, ChatEvent::Member(identity, member)).await;
+
+    Ok(())
+}
+
+pub async fn kick_member(
+    cx: crate::Context,
+    (proof, identity): (Proof<ChatName>, Identity),
+) -> Result<()> {
+    let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
+    {
+        let mut chat = chat.write().await;
+
+        crate::ensure!(proof.verify(), ChatError::InvalidProof);
+
+        let sender_id = crypto::hash::from_slice(&proof.pk);
+        let sender = chat.members.get_mut(&sender_id).ok_or(ChatError::NotMember)?;
+
+        advance_nonce(&mut sender.action, proof.nonce)?;
+        if identity != sender_id {
+            sender.allocate_action(Permissions::KICK)?;
+        }
+        let rank = sender.rank;
+
+        crate::ensure!(
+            let btree_map::Entry::Occupied(entry) = chat.members.entry(identity),
+            ChatError::NotFound
+        );
+        crate::ensure!(identity == sender_id || entry.get().rank > rank, ChatError::NoPermission);
+
+        entry.remove();
+    }
+
+    cx.push_chat_event(proof.context, ChatEvent::MemberRemoved(identity)).await;
 
     Ok(())
 }
@@ -127,17 +168,17 @@ pub async fn send_message(
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
+    let identity = crypto::hash::from_slice(&proof.pk);
 
     {
         let mut chat_guard = chat.write().await;
         let chat = chat_guard.deref_mut();
 
-        let identity = crypto::hash::from_slice(&proof.pk);
         let sender = chat.members.get_mut(&identity).ok_or(ChatError::NotMember)?;
         let nonce = sender.action;
 
-        sender.allocate_action(Permissions::SEND)?;
         advance_nonce(&mut sender.action, proof.nonce)?;
+        sender.allocate_action(Permissions::SEND)?;
 
         let message = Message { identity, nonce, content: Reminder(msg) };
         let encoded_len = message.encoded_len();
@@ -157,7 +198,7 @@ pub async fn send_message(
         }
     }
 
-    cx.push_chat_event(name, ChatEvent::Message(name, proof)).await;
+    cx.push_chat_event(name, ChatEvent::Message(identity, proof.context)).await;
 
     Ok(())
 }

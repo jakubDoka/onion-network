@@ -81,8 +81,8 @@ where
 {
     fn into_response(self) -> Response {
         match self {
-            Ok(_) => Response::Success(dbg!(self.to_bytes())),
-            Err(_) => Response::Failure(dbg!(self.to_bytes())),
+            Ok(_) => Response::Success(self.to_bytes()),
+            Err(_) => Response::Failure(self.to_bytes()),
         }
     }
 }

@@ -52,8 +52,8 @@ rebuild_workspace() {
 test -d utils/falcon/falcon || (cd utils/falcon && sh transpile.sh || exit 1)
 
 
-CHAIN_PATH="forked/substrate-node-template/target/release/node-template"
-test -e $CHAIN_PATH || (cd forked/substrate-node-template && cargo build --release)
+CHAIN_PATH="chain/substrate-node-template/target/release/node-template"
+test -e $CHAIN_PATH || (cd chain/substrate-node-template && cargo build --release)
 $CHAIN_PATH --dev > /dev/null 2>&1 &
 sleep 5
 subxt metadata > core/chain-types/metadata.scale

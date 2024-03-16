@@ -1,0 +1,41 @@
+[package]
+repository = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+name = "topology-vis"
+version = "0.1.0"
+edition = { workspace = true }
+description = "little frontend to visualize the topology of a network"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+console_error_panic_hook = "0.1.7"
+console_log = "1"
+wasm-bindgen-futures = "0.4.41"
+libp2p = { workspace = true, features = ["noise", "yamux", "wasm-bindgen", "macros", "websocket-websys"] }
+log = { workspace = true }
+macroquad = "0.4.4"
+
+component-utils = { workspace = true }
+dht = { workspace = true }
+topology-wrapper = { workspace = true }
+crypto = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
+workspace = true
+features = ["native"]
+default-features = false 
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.chain-api]
+workspace = true
+features = ["web"]
+default-features = false 
+
+[features]
+building = []
+
+[lints]
+workspace = true

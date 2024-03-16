@@ -68,7 +68,7 @@ macro_rules! gen_config {
 #[macro_export]
 macro_rules! gen_unique_id {
     ($vis:vis $ty:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Codec)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, codec::Codec)]
         $vis struct $ty(usize);
 
         impl $ty {
@@ -85,12 +85,23 @@ macro_rules! gen_unique_id {
     };
 }
 
-pub mod codec;
-pub mod proof;
 pub mod stream;
 
 use core::task::Waker;
-pub use {arrayvec, codec::*, codec_derive::Codec, futures, stream::*, thiserror};
+pub use {arrayvec, futures, stream::*, thiserror};
+
+pub const PACKET_LEN_WIDTH: usize = std::mem::size_of::<PacketLen>();
+pub type PacketLen = u16;
+
+#[must_use]
+pub fn encode_len(len: usize) -> [u8; PACKET_LEN_WIDTH] {
+    (len as PacketLen).to_be_bytes()
+}
+
+#[must_use]
+pub fn decode_len(bytes: [u8; PACKET_LEN_WIDTH]) -> usize {
+    PacketLen::from_be_bytes(bytes) as usize
+}
 
 pub struct DropFn<F: FnOnce()>(Option<F>);
 

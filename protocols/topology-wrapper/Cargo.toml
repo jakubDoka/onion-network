@@ -4,18 +4,22 @@ license = { workspace = true }
 readme = { workspace = true }
 categories = { workspace = true }
 keywords = { workspace = true }
-name = "component-utils"
+name = "topology-wrapper"
 version = "0.1.0"
 edition = { workspace = true }
+description = "topology visualization protocols for libp2p"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-arrayvec = { version = "0.7.4", features = ["serde"] }
-futures = { version = "0.3.28" }
-thiserror = { version = "1.0.50" }
+libp2p = { workspace = true }
+log = { workspace = true }
 
-codec = { workspace = true }
+component-utils = { workspace = true }
+codec.workspace = true
+
+[features]
+disabled = []
 
 [lints]
 workspace = true

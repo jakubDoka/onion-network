@@ -1,16 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
-	"nodes/*",
 	"utils/*",
 	"tests/*",
+	"protocols/*",
 	"contracts/*",
-	"core/*",
-	"utils/falcon/falcon"
+	"crypto/falcon/falcon",
+	"crypto/*",
+	"chat/*",
+	"chain/*",
 ]
+
 exclude = [
-	"forked/node-template",
-	"utils/falcon",
+	"crypto/falcon",
+	"chain/substrate-node-template",
 ]
 
 [workspace.lints.clippy]
@@ -33,35 +36,43 @@ futures = "0.3.30"
 anyhow = "1.0.80"
 thiserror = "1.0.58"
 
-chain-api = { path = "core/chain-api" }
+dht = { path = "protocols/dht" }
+onion = { path = "protocols/onion" }
+rpc = { path = "protocols/rpc" }
+streaming = { path = "protocols/streaming" }
+topology-wrapper = { path = "protocols/topology-wrapper" }
+topology-vis = { path = "protocols/topology-vis" }
+
 node_staker = { path = "contracts/node_staker" }
 user_manager = { path = "contracts/user_manager" }
-chain-types = { path = "core/chain-types" }
-chat-spec = { path = "core/chat-spec" }
-crypto = { path = "core/crypto" }
-dht = { path = "core/dht" }
-onion = { path = "core/onion" }
-rpc = { path = "core/rpc" }
-storage-spec = { path = "core/storage-spec" }
-streaming = { path = "core/streaming" }
-client = { path = "nodes/client" }
-client-node = { path = "nodes/client-node" }
+
+chat-client-node = { path = "chat/client-node", default-features = false }
+chat-client = { path = "chat/client" }
+chat-server = { path = "chat/server" }
+chat-spec = { path = "chat/spec" }
+
 satelite = { path = "nodes/satelite" }
-server = { path = "nodes/server" }
 storage = { path = "nodes/storage" }
-topology-vis = { path = "nodes/topology-vis" }
+storage-spec = { path = "nodes/storage-spec" }
+
 init-transfer = { path = "tests/init-transfer" }
 runner = { path = "tests/runner" }
-berkleamp-welch = { path = "utils/berkleamp-welch", features = ["simd"] }
+
+berkleamp-welch = { path = "crypto/berkleamp-welch", features = ["simd"] }
+crypto = { path = "crypto/crypto" }
+falcon = { path = "crypto/falcon/falcon" }
+kyber = { path = "crypto/kyber" }
+merkle-tree = { path = "crypto/merkle-tree" }
+double-ratchet = { path = "crypto/double-ratchet" }
+
 codec-derive = { path = "utils/codec-derive" }
+codec = { path = "utils/codec", default-features = false }
 component-utils = { path = "utils/component-utils" }
 config = { path = "utils/config" }
-contract-macro = { path = "utils/contract_macro" }
-kyber = { path = "utils/kyber" }
-merkle-tree = { path = "utils/merkle-tree" }
-topology-wrapper = { path = "utils/topology-wrapper" }
-websocket-websys = { path = "utils/websocket-websys" }
-falcon = { path = "utils/falcon/falcon" }
+contract-macro = { path = "utils/contract-macro" }
+
+chain-api = { path = "chain/api", default-features = false }
+chain-types = { path = "chain/types", default-features = false }
 
 [profile.native-optimized]
 inherits = "release"

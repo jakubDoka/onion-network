@@ -12,20 +12,15 @@ description = "interface for interacting with chain"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-blake2 = "0.10.6"
 futures = { version = "0.3.29", features = ["executor"] }
 hex = "0.4.3"
 log = { workspace = true }
 parity-scale-codec = "3.6.5"
-scale-encode = "0.6.0"
-serde = { version = "1.0.190", features = ["derive"] }
 serde_json = "1.0.108"
 subxt = { version = "0.34", default-features = false }
 subxt-signer = { version = "0.34", features = ["subxt", "sr25519"], default-features = false }
-thiserror = "1.0.50"
 
 chain-types = { workspace = true }
-contract-macro = { workspace = true }
 crypto = { workspace = true }
 
 [features]

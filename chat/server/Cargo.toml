@@ -13,13 +13,10 @@ description = "node serving users of a chat, storing latest messages and finaliz
 
 [dependencies]
 anyhow = { workspace = true }
-bitflags = "2.4.1"
 env_logger = "0.11.0"
 libp2p = { workspace = true, features = ["tcp", "noise", "macros", "tokio", "yamux", "websocket", "dns"] }
 log = { workspace = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
-smallvec = "1.11.1"
-thiserror = "1.0.50"
 tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
 dashmap = "5.5.3"
 

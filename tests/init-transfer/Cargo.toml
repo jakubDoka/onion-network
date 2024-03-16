@@ -13,10 +13,8 @@ description = "transfere balance to some account(s) from genesis account"
 
 [dependencies]
 tokio = { version = "1.34.0", features = ["rt", "macros"] }
-
 chain-api = { workspace = true }
 config = { workspace = true }
-futures = { workspace = true }
 
 [lints]
 workspace = true

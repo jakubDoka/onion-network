@@ -13,7 +13,6 @@ description = "A macro for generating api for ink! contract"
 proc-macro = true
 
 [dependencies]
-heck = "0.4.0"
 ink_metadata = "4.2.0"
 contract-metadata = "4.0.0"
 proc-macro2 = "1.0.56"
@@ -22,10 +21,6 @@ serde_json = "1.0.81"
 syn = "2"
 quote = "1.0.15"
 scale-typegen = "0.2.0"
-
-[dev-dependencies]
-ink_primitives = "4.2.0"
-scale-info = { version = "2.5", default-features = false }
 
 [lints]
 workspace = true

@@ -2,11 +2,11 @@ extern crate proc_macro;
 
 use {
     contract_metadata::ContractMetadata,
-    heck::ToUpperCamelCase as _,
     ink_metadata::{InkProject, MetadataVersion, Selector},
     proc_macro::TokenStream,
     proc_macro_error::{abort_call_site, proc_macro_error},
     scale_typegen::{TypeGenerator, TypeGeneratorSettings},
+    std::iter,
 };
 
 #[proc_macro]
@@ -211,6 +211,20 @@ fn generate_messages(
         .collect()
 }
 
+fn snake_case_to_camel_case(input: &str) -> String {
+    input
+        .split('_')
+        .flat_map(|s| {
+            let mut chars = s.chars();
+            chars
+                .next()
+                .map(|c| iter::once(c.to_ascii_uppercase()).chain(chars))
+                .into_iter()
+                .flatten()
+        })
+        .collect()
+}
+
 fn generate_message_impl(
     type_gen: &TypeGenerator,
     name: &str,
@@ -218,7 +232,7 @@ fn generate_message_impl(
     selector: &Selector,
     impl_trait: &syn::Path,
 ) -> proc_macro2::TokenStream {
-    let struct_ident = quote::format_ident!("{}", name.to_upper_camel_case());
+    let struct_ident = quote::format_ident!("{}", snake_case_to_camel_case(name));
     let fn_ident = quote::format_ident!("{}", name);
     let (args, arg_names): (Vec<_>, Vec<_>) = args
         .iter()

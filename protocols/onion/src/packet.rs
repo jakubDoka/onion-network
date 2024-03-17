@@ -11,7 +11,7 @@ use {
     codec::Codec,
     crypto::enc::Ciphertext,
     libp2p::{core::multihash::Multihash, identity::PeerId},
-    std::{mem, usize},
+    std::usize,
 };
 
 pub const OK: u8 = 0;
@@ -100,21 +100,14 @@ pub fn peel_initial(
     node_kp: &Keypair,
     original_buffer: &mut [u8],
 ) -> Option<(Option<PeerId>, SharedSecret, usize)> {
-    const PKS: usize = mem::size_of::<PublicKey>();
-    const CS: usize = mem::size_of::<Ciphertext>();
-
-    if original_buffer.len() < PKS + CS {
-        return None;
-    }
-
-    let (buffer, tail) = original_buffer.split_at_mut(original_buffer.len() - PKS);
-
     #[derive(codec::Codec)]
     struct PostPacket {
-        sender: PublicKey,
         ciphertext: Ciphertext,
+        sender: PublicKey,
     }
 
+    let mut buffer = &mut *original_buffer;
+    let tail = buffer.take_mut(buffer.len() - std::mem::size_of::<PostPacket>()..)?;
     let PostPacket { sender, ciphertext } = PostPacket::decode(&mut &*tail)?;
     let ss = node_kp.decapsulate(&ciphertext).ok()?;
 
@@ -130,6 +123,6 @@ pub fn peel_initial(
     let id = PeerId::from_bytes(tail).ok()?;
 
     let len = buffer.len();
-    sender.encode(&mut &mut original_buffer[len..len + PKS]).unwrap();
-    Some((Some(id), ss, len + PKS))
+    sender.encode(&mut &mut original_buffer[len..]).unwrap();
+    Some((Some(id), ss, len + std::mem::size_of::<PublicKey>()))
 }

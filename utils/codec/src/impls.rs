@@ -85,7 +85,7 @@ impl<'a, R: Codec<'a>, E: Codec<'a>> Codec<'a> for Result<R, E> {
 
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let is_ok = <bool>::decode(buffer)?;
-        Some(if is_ok { Ok(<R>::decode(buffer)?) } else { Err(<E>::decode(buffer)?) })
+        Some(if is_ok { Ok(R::decode(buffer)?) } else { Err(E::decode(buffer)?) })
     }
 }
 

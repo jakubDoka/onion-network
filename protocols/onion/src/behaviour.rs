@@ -8,9 +8,7 @@ use {
         AeadCore, AeadInPlace, Aes256Gcm, KeyInit,
     },
     codec::{Codec, Reminder},
-    component_utils::{
-        encode_len, ClosingStream, FindAndRemove, PacketReader, PacketWriter, PACKET_LEN_WIDTH,
-    },
+    component_utils::{ClosingStream, FindAndRemove, PacketReader, PacketWriter},
     core::{fmt, slice},
     futures::{
         stream::{FusedStream, FuturesUnordered},
@@ -374,13 +372,13 @@ impl EncryptedStream {
         let nonce = Aes256Gcm::generate_nonce(OsRng);
 
         let mut writer = self.writer.guard();
-        let reserved = writer.write([0u8; PACKET_LEN_WIDTH])?;
+        let reserved = writer.write([0u8; 2])?;
         let raw = writer.write(data)?;
         let tag = aes.encrypt_in_place_detached(&nonce, ASOC_DATA, raw).expect("no");
         let full_len = raw.len() + tag.len() + nonce.len();
         writer.write_bytes(&tag)?;
         writer.write_bytes(&nonce)?;
-        reserved.copy_from_slice(&encode_len(full_len));
+        reserved.copy_from_slice(&(full_len as u16).to_be_bytes());
 
         Some(())
     }
@@ -587,7 +585,10 @@ async fn upgrade_outbound_low(
                                                                        // this case
     };
 
-    stream.write_all(&encode_len(buffer.len())).await.map_err(OUpgradeError::WritePacketLength)?;
+    stream
+        .write_all(&(buffer.len() as u16).to_be_bytes())
+        .await
+        .map_err(OUpgradeError::WritePacketLength)?;
     log::debug!("wrote packet length: {}", buffer.len());
     stream.write_all(buffer).await.map_err(OUpgradeError::WritePacket)?;
     log::debug!("wrote packet");

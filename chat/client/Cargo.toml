@@ -58,7 +58,7 @@ features = [
   "Storage",]
 
 [features]
-building = []
+building = ["chat-client-node/building"]
 
 [lints]
 workspace = true

@@ -1,4 +1,5 @@
 #![feature(iter_map_windows)]
+#![feature(slice_take)]
 #![feature(if_let_guard)]
 #![feature(type_alias_impl_trait)]
 #![feature(array_windows)]

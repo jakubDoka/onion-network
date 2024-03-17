@@ -13,7 +13,7 @@ pub mod enc;
 pub mod hash;
 pub mod sign;
 
-use {codec::Codec, rand_core::CryptoRngCore};
+use rand_core::CryptoRngCore;
 pub use {hash::Hash, rand_core};
 
 pub fn new_secret(mut rng: impl CryptoRngCore) -> SharedSecret {
@@ -53,7 +53,7 @@ const NONCE_SIZE: usize = <<Aes256Gcm as AeadCore>::NonceSize as Unsigned>::USIZ
 const TAG_SIZE: usize = <<Aes256Gcm as AeadCore>::TagSize as Unsigned>::USIZE;
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "codec", derive(Codec))]
+#[cfg_attr(feature = "codec", derive(codec::Codec))]
 pub struct FixedAesPayload<const SIZE: usize> {
     data: [u8; SIZE],
     #[cfg_attr(feature = "codec", codec(with = codec::unsafe_as_raw_bytes))]

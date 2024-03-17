@@ -13,6 +13,7 @@ use {
         sign,
     },
     dht::Route,
+    double_ratchet::DoubleRatchet,
     libp2p::{
         core::upgrade::Version,
         futures::{
@@ -24,7 +25,7 @@ use {
         *,
     },
     onion::{EncryptedStream, PathId, SharedSecret},
-    rand::{rngs::OsRng, seq::IteratorRandom, CryptoRng, RngCore},
+    rand::{rngs::OsRng, seq::IteratorRandom, CryptoRng, Rng, RngCore},
     std::{
         collections::{HashMap, HashSet},
         convert::{identity, Infallible},
@@ -44,7 +45,7 @@ use {
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-type Result<T, E = ChatError> = std::result::Result<T, E>;
+type Result<T, E = anyhow::Error> = std::result::Result<T, E>;
 pub type SubscriptionMessage = Vec<u8>;
 pub type RawResponse = Vec<u8>;
 pub type MessageContent = String;
@@ -89,14 +90,14 @@ impl ChatMeta {
     }
 }
 
-#[derive(Default, Codec, Clone)]
+#[derive(Default, Codec)]
 pub struct HardenedChatMeta {
     pub members: HashMap<UserName, MemberMeta>,
 }
 
-#[derive(Clone, Copy, Codec)]
+#[derive(Codec)]
 pub struct MemberMeta {
-    pub secret: crypto::SharedSecret,
+    pub dr: DoubleRatchet,
     pub identity: crypto::Hash,
 }
 
@@ -107,10 +108,10 @@ pub struct RawChatMessage<'a> {
 }
 
 #[derive(Codec)]
-pub enum MailVariants<'a> {
+pub enum MailVariants {
     ChatInvite { chat: ChatName, cp: ChoosenCiphertext },
     HardenedJoinRequest { cp: Ciphertext, payload: Vec<u8> },
-    HardenedChatMessage { nonce: Nonce, chat: crypto::Hash, content: Reminder<'a> },
+    HardenedChatMessage { nonce: Nonce, chat: crypto::Hash, content: Vec<u8> },
     HardenedChatInvite { cp: Ciphertext, payload: Vec<u8> },
 }
 
@@ -202,12 +203,12 @@ impl Node {
     pub async fn new(
         keys: UserKeys,
         mut wboot_phase: impl FnMut(BootPhase),
-    ) -> anyhow::Result<(Self, Vault, RequestDispatch, Nonce, Nonce)> {
+    ) -> anyhow::Result<(Self, Vault, Requests, Nonce, Nonce)> {
         macro_rules! set_state { ($($t:tt)*) => {_ = wboot_phase(BootPhase::$($t)*)}; }
 
         set_state!(FetchNodesAndProfile);
 
-        let (mut request_dispatch, commands) = RequestDispatch::new();
+        let (mut request_dispatch, commands) = Requests::new();
         let chain_api = chain_node(keys.name).await?;
         let node_request = chain_api.list(node_contract());
         let profile_request =
@@ -713,19 +714,198 @@ struct Behaviour {
 }
 
 #[derive(Clone)]
-pub struct RequestDispatch {
+pub struct Requests {
     buffer: Vec<u8>,
     sink: mpsc::Sender<RequestInit>,
 }
 
-pub fn proof_topic<T>(p: &Proof<T>) -> Topic {
-    crypto::hash::new(p.pk).into()
-}
-
-impl RequestDispatch {
+impl Requests {
     pub fn new() -> (Self, RequestStream) {
         let (sink, stream) = mpsc::channel(5);
         (Self { buffer: Vec::new(), sink }, stream)
+    }
+
+    pub async fn invite_member(
+        &mut self,
+        name: ChatName,
+        member: Identity,
+        ctx: impl RequestContext,
+        config: Member,
+    ) -> Result<()> {
+        let keys = self.fetch_keys(member).await?;
+
+        let (invite, proof) = ctx.with_vault(|vault| {
+            let chat_meta = vault.chats.get_mut(&name).with_context(vault_chat_404(name))?;
+            let cp =
+                ctx.with_keys(|k| k.enc.encapsulate_choosen(&keys.enc, chat_meta.secret, OsRng))?;
+            let proof =
+                ctx.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, name, OsRng))?;
+            Ok((MailVariants::ChatInvite { chat: name, cp }, proof))
+        })?;
+
+        self.send_mail(member, invite).await.context("sending invite")?;
+        self.add_member(proof, member, config).await
+    }
+
+    pub async fn send_encrypted_message(
+        &mut self,
+        name: ChatName,
+        mut message: Vec<u8>,
+        ctx: impl RequestContext,
+    ) -> Result<()> {
+        let proof = ctx.with_vault(|vault| {
+            let chat_meta = vault.chats.get_mut(&name).with_context(vault_chat_404(name))?;
+            let tag = crypto::encrypt(&mut message, chat_meta.secret, OsRng);
+            message.extend(tag);
+            let msg = Reminder(&message);
+            let proof =
+                ctx.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, msg, OsRng))?;
+            Ok(proof)
+        })?;
+        self.send_message(proof, name).await
+    }
+
+    pub async fn fetch_and_decrypt_messages(
+        &mut self,
+        name: ChatName,
+        cursor: &mut Cursor,
+        ctx: impl RequestContext,
+    ) -> Result<Vec<(Identity, String)>> {
+        let chat_meta =
+            ctx.with_vault(|v| v.chats.get(&name).context("we are not part of the chat").copied())?;
+
+        let (new_cusor, Reminder(mesages)) = self.fetch_messages(name, *cursor).await?;
+        *cursor = new_cusor;
+
+        Ok(unpack_messages_ref(mesages)
+            .filter_map(|message| {
+                let message = chat_spec::Message::decode(&mut &message[..])?;
+                let mut content = message.content.0.to_owned();
+                let content = crypto::decrypt(&mut content, chat_meta.secret)?;
+                let content = std::str::from_utf8(content).ok()?;
+                Some((message.sender, content.to_owned()))
+            })
+            .collect())
+    }
+
+    pub async fn create_and_save_chat(
+        &mut self,
+        name: ChatName,
+        ctx: impl RequestContext,
+    ) -> Result<()> {
+        let my_id = ctx.with_keys(UserKeys::identity_hash)?;
+
+        ctx.with_vault(|v| Ok(v.chats.insert(name, ChatMeta::new())))?;
+        let res = self.save_vault(&ctx).await.context("saving vault");
+        if let Err(e) = res {
+            ctx.with_vault(|v| Ok(_ = v.chats.remove(&name)))?;
+            return Err(e);
+        }
+
+        self.create_chat(name, my_id).await
+    }
+
+    pub async fn create_hardned_chat(
+        &mut self,
+        name: ChatName,
+        ctx: impl RequestContext,
+    ) -> Result<()> {
+        ctx.with_vault(|v| Ok(v.hardened_chats.insert(name, HardenedChatMeta::default())))?;
+        let res = self.save_vault(&ctx).await.context("saving vault");
+        if res.is_err() {
+            ctx.with_vault(|v| Ok(_ = v.hardened_chats.remove(&name)))?;
+        }
+        res
+    }
+
+    pub async fn send_hardened_chat_invite(
+        &mut self,
+        to_name: UserName,
+        name: ChatName,
+        ctx: impl RequestContext,
+    ) -> Result<()> {
+        let to = fetch_profile(ctx.with_keys(|k| k.name)?, to_name)
+            .await
+            .context("fetching identity")?
+            .sign;
+        let keys = self.fetch_keys(to).await.context("fetching keys")?;
+        let (cp, ss) = ctx.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
+
+        let members = ctx.with_vault(|v| {
+            let cm = v.hardened_chats.get_mut(&name).with_context(vault_chat_404(name))?;
+            let members =
+                cm.members.iter().map(|(&name, m)| (name, m.identity)).collect::<Vec<_>>();
+            cm.members.insert(to_name, MemberMeta { secret: ss, identity: to });
+            Ok(members)
+        })?;
+
+        let mut payload = HardenedChatInvitePayload {
+            chat: name,
+            inviter: ctx.with_keys(|k| k.name)?,
+            inviter_id: ctx.with_keys(UserKeys::identity_hash)?,
+            members,
+        }
+        .to_bytes();
+        let tag = crypto::encrypt(&mut payload, ss, OsRng);
+        payload.extend(tag);
+
+        let mail = MailVariants::HardenedChatInvite { cp, payload };
+        self.send_mail(to, mail).await.context("sending invite")?;
+        Ok(())
+    }
+
+    pub async fn send_hardened_message(
+        &mut self,
+        name: ChatName,
+        message: &[u8],
+        ctx: impl RequestContext,
+    ) -> Result<()> {
+        fn send_single_invite(
+            name: ChatName,
+            message: &[u8],
+            meta: &MemberMeta,
+            reqs: &Requests,
+        ) -> impl Future<Output = Result<(), ChatError>> {
+            let mut content = message.to_vec();
+            let tag = crypto::encrypt(&mut content, meta.secret, OsRng);
+            content.extend(tag);
+
+            let nonce = OsRng.gen::<Nonce>();
+            let identity = meta.identity;
+            let mut reqs = reqs.clone();
+            async move {
+                let mail = MailVariants::HardenedChatMessage {
+                    nonce,
+                    chat: crypto::hash::with_nonce(name.as_bytes(), nonce),
+                    content,
+                };
+                reqs.send_mail(identity, mail).await
+            }
+        }
+
+        let requests = ctx.with_vault(move |v| {
+            let cm = v.hardened_chats.get(&name).with_context(vault_chat_404(name))?;
+            let reqs =
+                cm.members.values().map(|meta| send_single_invite(name, message, meta, self));
+            Ok(futures::future::try_join_all(reqs))
+        })?;
+        requests.await.map(drop).map_err(Into::into)
+    }
+
+    pub async fn update_member(
+        &mut self,
+        name: ChatName,
+        member: Identity,
+        config: Member,
+        ctx: impl RequestContext,
+    ) -> Result<()> {
+        let proof = ctx.with_vault(|v| {
+            let chat_meta = v.chats.get_mut(&name).with_context(vault_chat_404(name))?;
+            let action_no = &mut chat_meta.action_no;
+            let proof = ctx.with_keys(|k| Proof::new(&k.sign, action_no, name, OsRng))?;
+            Ok(proof)
+        })?;
+        self.add_member(proof, member, config).await
     }
 
     pub async fn add_member(
@@ -742,14 +922,6 @@ impl RequestDispatch {
         self.dispatch(rpcs::KICK_MEMBER, Topic::Chat(proof.context), (proof, identity)).await
     }
 
-    pub async fn send_message<'a>(
-        &'a mut self,
-        proof: Proof<Reminder<'_>>,
-        name: ChatName,
-    ) -> Result<()> {
-        self.dispatch(rpcs::SEND_MESSAGE, Topic::Chat(name), proof).await
-    }
-
     pub async fn fetch_messages(
         &mut self,
         name: ChatName,
@@ -758,24 +930,29 @@ impl RequestDispatch {
         self.dispatch(rpcs::FETCH_MESSAGES, Topic::Chat(name), cursor).await
     }
 
-    pub async fn create_chat(&mut self, name: ChatName, me: Identity) -> Result<()> {
-        self.dispatch(rpcs::CREATE_CHAT, Topic::Chat(name), me).await
-    }
-
     pub async fn set_vault<'a>(&'a mut self, proof: Proof<Reminder<'_>>) -> Result<()> {
-        self.dispatch(rpcs::SET_VAULT, proof_topic(&proof), proof).await
+        self.dispatch(rpcs::SET_VAULT, proof.topic(), proof).await
     }
 
     pub async fn fetch_keys(&mut self, identity: Identity) -> Result<FetchProfileResp> {
         self.dispatch(rpcs::FETCH_PROFILE, Topic::Profile(identity), ()).await
     }
 
-    pub async fn send_mail<'a>(&'a mut self, to: Identity, mail: impl Codec<'_>) -> Result<()> {
-        self.dispatch(rpcs::SEND_MAIL, Topic::Profile(to), mail).await.or_else(ChatError::recover)
+    pub async fn send_mail<'a>(
+        &'a mut self,
+        to: Identity,
+        mail: impl Codec<'_>,
+    ) -> Result<(), ChatError> {
+        self.dispatch_low(rpcs::SEND_MAIL, Topic::Profile(to), mail)
+            .await
+            .or_else(ChatError::recover)
     }
 
-    pub async fn read_mail(&mut self, proof: Proof<Mail>) -> Result<Reminder> {
-        self.dispatch(rpcs::READ_MAIL, proof_topic(&proof), proof).await
+    pub async fn read_mail(&mut self, ctx: impl RequestContext) -> Result<Reminder> {
+        let proof = ctx.with_mail_action(|nonce| {
+            ctx.with_keys(|k| Proof::new(&k.sign, nonce, Mail, OsRng))
+        })??;
+        self.dispatch(rpcs::READ_MAIL, proof.topic(), proof).await
     }
 
     pub async fn fetch_members(
@@ -783,11 +960,15 @@ impl RequestDispatch {
         name: ChatName,
         from: Identity,
         limit: u32,
-    ) -> Result<Vec<(Identity, Member)>> {
-        self.dispatch(rpcs::FETCH_MEMBERS, Topic::Chat(name), (from, limit)).await
+    ) -> Result<Vec<(Identity, Member)>, ChatError> {
+        self.dispatch_low(rpcs::FETCH_MEMBERS, Topic::Chat(name), (from, limit)).await
     }
 
-    pub async fn fetch_my_member(&mut self, name: ChatName, me: Identity) -> Result<Member> {
+    pub async fn fetch_my_member(
+        &mut self,
+        name: ChatName,
+        me: Identity,
+    ) -> Result<Member, ChatError> {
         let mebers = self.fetch_members(name, me, 1).await?;
         mebers
             .into_iter()
@@ -809,7 +990,7 @@ impl RequestDispatch {
 
         let init =
             crate::timeout(rx.next(), REQUEST_TIMEOUT).await?.ok_or(ChatError::ChannelClosed)?;
-        Result::<()>::decode(&mut &init[..]).ok_or(ChatError::InvalidResponse)??;
+        Result::<(), ChatError>::decode(&mut &init[..]).ok_or(ChatError::InvalidResponse)??;
 
         Ok(rx)
     }
@@ -819,13 +1000,38 @@ impl RequestDispatch {
         self.sink.try_send(RequestInit::EndSubscription(topic)).unwrap();
     }
 
+    async fn create_chat(&mut self, name: ChatName, me: Identity) -> Result<()> {
+        self.dispatch(rpcs::CREATE_CHAT, Topic::Chat(name), me).await
+    }
+
+    async fn send_message<'a>(
+        &'a mut self,
+        proof: Proof<Reminder<'_>>,
+        name: ChatName,
+    ) -> Result<()> {
+        self.dispatch(rpcs::SEND_MESSAGE, Topic::Chat(name), proof).await
+    }
+
+    async fn save_vault(&mut self, ctx: &impl RequestContext) -> Result<()> {
+        let vault_sec = ctx.with_keys(|k| k.vault)?;
+        let mut vault = ctx.with_vault(|v| Ok(v.to_bytes()))?;
+        let tag = crypto::encrypt(&mut vault, vault_sec, OsRng);
+        vault.extend(tag);
+
+        let vault = Reminder(&vault);
+        let proof = ctx.with_keys(|k| {
+            ctx.with_vault_version(|nonce| Proof::new(&k.sign, nonce, vault, OsRng))
+        })??;
+        self.set_vault(proof).await
+    }
+
     async fn dispatch_direct<'a, R: Codec<'a>>(
         &'a mut self,
         stream: &mut EncryptedStream,
         prefix: u8,
         topic: impl Into<Option<Topic>>,
         request: impl Codec<'_>,
-    ) -> Result<R> {
+    ) -> Result<R, ChatError> {
         stream
             .write(chat_spec::Request {
                 prefix,
@@ -840,17 +1046,17 @@ impl RequestDispatch {
             .ok_or(ChatError::ChannelClosed)?
             .map_err(|_| ChatError::ChannelClosed)?;
 
-        <(CallId, Result<R>)>::decode(&mut &self.buffer[..])
+        <(CallId, Result<R, ChatError>)>::decode(&mut &self.buffer[..])
             .ok_or(ChatError::InvalidResponse)
             .and_then(|(_, r)| r)
     }
 
-    async fn dispatch<'a, R: Codec<'a>>(
+    async fn dispatch_low<'a, R: Codec<'a>>(
         &'a mut self,
         prefix: u8,
         topic: impl Into<Option<Topic>>,
         request: impl Codec<'_>,
-    ) -> Result<R> {
+    ) -> Result<R, ChatError> {
         let id = CallId::new();
         let (tx, rx) = oneshot::channel();
         self.sink
@@ -865,10 +1071,30 @@ impl RequestDispatch {
             .map_err(|_| ChatError::ChannelClosed)?;
         self.buffer =
             crate::timeout(rx, REQUEST_TIMEOUT).await?.map_err(|_| ChatError::ChannelClosed)?;
-        Result::<R>::decode(&mut &self.buffer[..])
+        Result::<R, ChatError>::decode(&mut &self.buffer[..])
             .ok_or(ChatError::InvalidResponse)
             .and_then(identity)
     }
+
+    async fn dispatch<'a, R: Codec<'a>>(
+        &'a mut self,
+        prefix: u8,
+        topic: impl Into<Option<Topic>>,
+        request: impl Codec<'_>,
+    ) -> Result<R> {
+        self.dispatch_low(prefix, topic, request).await.map_err(Into::into)
+    }
+}
+
+fn vault_chat_404(name: ChatName) -> impl FnOnce() -> String {
+    move || format!("chat {name} not found in vault")
+}
+
+pub trait RequestContext {
+    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> Result<R>) -> Result<R>;
+    fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> Result<R>;
+    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R>;
+    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R>;
 }
 
 pub type RequestStream = mpsc::Receiver<RequestInit>;

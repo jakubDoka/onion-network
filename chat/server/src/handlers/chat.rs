@@ -6,7 +6,6 @@ use {
         Cursor, Identity, Member, Message, Permissions, Proof, ReplVec, REPLICATION_FACTOR,
     },
     codec::{Codec, Reminder},
-    component_utils::encode_len,
     dht::{try_peer_id_to_ed, U256},
     libp2p::{futures::StreamExt, PeerId},
     std::{
@@ -181,7 +180,7 @@ pub async fn send_message(
         advance_nonce(&mut sender.action, proof.nonce)?;
         sender.allocate_action(Permissions::SEND)?;
 
-        let message = Message { identity, nonce, content: Reminder(msg) };
+        let message = Message { sender: identity, nonce, content: Reminder(msg) };
         let encoded_len = message.encoded_len();
 
         if chat.buffer.len() + encoded_len + 2 > UNFINALIZED_BUFFER_CAP {
@@ -189,7 +188,7 @@ pub async fn send_message(
         }
 
         _ = message.encode(&mut chat.buffer);
-        chat.buffer.extend(encode_len(encoded_len));
+        chat.buffer.extend((encoded_len as u16).to_be_bytes());
 
         if chat.buffer.len() > BLOCK_SIZE
             && chat.buffer.len() % BLOCK_SIZE > BLOCK_SIZE / 2

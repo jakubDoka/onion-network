@@ -23,13 +23,13 @@ dashmap = "5.5.3"
 topology-wrapper = { workspace = true }
 chain-api = { workspace = true, features = ["native"] }
 chat-spec = { workspace = true }
-component-utils = { workspace = true }
 config = { workspace = true }
 rpc = { workspace = true }
 crypto = { workspace = true }
 dht = { workspace = true }
 onion = { workspace = true }
 codec.workspace = true
+arrayvec = "0.7.4"
 
 [lints]
 workspace = true

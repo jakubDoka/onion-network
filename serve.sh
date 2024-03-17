@@ -32,7 +32,7 @@ if [ "$1" = "release" ]; then
   TARGET_DIR="target/native-optimized"
 fi
 
-on_exit() { killall node-template server runner trunk live-server; }
+on_exit() { killall node-template chat-server runner trunk live-server; }
 trap on_exit EXIT
 
 rm -rf node_keys node_logs
@@ -41,15 +41,15 @@ mkdir node_keys node_logs
 # build
 rebuild_workspace() {
 	cargo build $FLAGS --workspace \
-		--exclude client \
-		--exclude websocket-websys \
+		--exclude chat-client \
+		--exclude chat-client-node \
 		--exclude node_staker \
 		--exclude user_manager \
 		--exclude topology-vis \
 		|| exit 1
 }
 
-test -d utils/falcon/falcon || (cd utils/falcon && sh transpile.sh || exit 1)
+test -d crypto/falcon/falcon || (cd crypto/falcon && sh transpile.sh || exit 1)
 
 
 CHAIN_PATH="chain/substrate-node-template/target/release/node-template"
@@ -58,7 +58,7 @@ $CHAIN_PATH --dev > /dev/null 2>&1 &
 sleep 5
 subxt metadata > core/chain-types/metadata.scale
 
-(cd nodes/client/wallet-integration && npm i || exit 1)
+(cd chat/client/wallet-integration && npm i || exit 1)
 (cd contracts/node_staker && cargo contract build $WASM_FLAGS || exit 1)
 (cd contracts/user_manager && cargo contract build $WASM_FLAGS || exit 1)
 rebuild_workspace
@@ -73,23 +73,23 @@ echo "user contract: $USER_CONTRACT"
 $TARGET_DIR/init-transfer || exit 1
 
 # run
-run_miners() { $TARGET_DIR/runner --node-count $NODE_COUNT --first-port $NODE_START --miner $TARGET_DIR/server $1 & }
+run_miners() { $TARGET_DIR/runner --node-count $NODE_COUNT --first-port $NODE_START --miner $TARGET_DIR/chat-server $1 & }
 
 
-(cd nodes/topology-vis && ./build.sh "$1" || exit 1)
-(cd nodes/topology-vis/dist && live-server --host localhost --port $TOPOLOGY_PORT &)
-(cd nodes/client && trunk serve $WASM_FLAGS --port $FRONTEND_PORT --features building &)
+(cd protocols/topology-vis && ./build.sh "$1" || exit 1)
+(cd protocols/topology-vis/dist && live-server --host localhost --port $TOPOLOGY_PORT &)
+(cd chat/client && trunk serve $WASM_FLAGS --port $FRONTEND_PORT --features building &)
 run_miners --first-run
 
 while read -r line; do
 	case "$line" in
-		"miners")
-			killall runner server
+		"chat-servers")
+			killall runner chat-server
 			rebuild_workspace
 			run_miners
 			;;
 		"topology")
-			(cd nodes/topology-vis && ./build.sh "$1" || exit 1)
+			(cd protocols/topology-vis && ./build.sh "$1" || exit 1)
 			;;
 		"exit")
 			exit 0

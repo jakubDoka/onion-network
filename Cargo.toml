@@ -41,32 +41,15 @@ onion = { path = "protocols/onion" }
 rpc = { path = "protocols/rpc" }
 streaming = { path = "protocols/streaming" }
 topology-wrapper = { path = "protocols/topology-wrapper" }
-topology-vis = { path = "protocols/topology-vis" }
-
-node_staker = { path = "contracts/node_staker" }
-user_manager = { path = "contracts/user_manager" }
 
 chat-client-node = { path = "chat/client-node", default-features = false }
-chat-client = { path = "chat/client" }
-chat-server = { path = "chat/server" }
 chat-spec = { path = "chat/spec" }
-
-satelite = { path = "nodes/satelite" }
-storage = { path = "nodes/storage" }
-storage-spec = { path = "nodes/storage-spec" }
-
-init-transfer = { path = "tests/init-transfer" }
-runner = { path = "tests/runner" }
-
-berkleamp-welch = { path = "crypto/berkleamp-welch", features = ["simd"] }
 crypto = { path = "crypto/crypto" }
 falcon = { path = "crypto/falcon/falcon" }
 kyber = { path = "crypto/kyber" }
-merkle-tree = { path = "crypto/merkle-tree" }
-double-ratchet = { path = "crypto/double-ratchet" }
 
 codec-derive = { path = "utils/codec-derive" }
-codec = { path = "utils/codec", default-features = false }
+codec = { path = "utils/codec" }
 component-utils = { path = "utils/component-utils" }
 config = { path = "utils/config" }
 contract-macro = { path = "utils/contract-macro" }

@@ -1,9 +1,10 @@
 use {
-    crate::{decode_len, encode_len, PACKET_LEN_WIDTH},
     codec::{Buffer, Codec, Reminder},
     futures::Future,
-    std::{io, pin::Pin, task::Poll},
+    std::{io, pin::Pin, task::Poll, usize},
 };
+
+const PACKET_LEN_WIDTH: usize = 2;
 
 pub struct AsocStream<A, S> {
     pub inner: S,
@@ -69,7 +70,8 @@ impl PacketReader {
     ) -> Poll<Result<&'a mut [u8], io::Error>> {
         futures::ready!(self.poll_read_exact(cx, stream, PACKET_LEN_WIDTH))?;
 
-        let packet_size = decode_len(self.read_buffer[..PACKET_LEN_WIDTH].try_into().unwrap());
+        let packet_size =
+            u16::from_be_bytes(self.read_buffer[..PACKET_LEN_WIDTH].try_into().unwrap()) as usize;
 
         futures::ready!(self.poll_read_exact(cx, stream, packet_size + PACKET_LEN_WIDTH))?;
 
@@ -132,7 +134,7 @@ impl PacketWriter {
         let mut writer = self.guard();
         let reserved = writer.write([0u8; PACKET_LEN_WIDTH])?;
         let len = writer.write(message)?.len();
-        reserved.copy_from_slice(&encode_len(len));
+        reserved.copy_from_slice(&(len as u16).to_be_bytes());
         Some(())
     }
 

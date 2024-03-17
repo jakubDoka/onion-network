@@ -16,7 +16,7 @@ libp2p = { workspace = true }
 log = { workspace = true }
 
 component-utils = { workspace = true }
-codec.workspace = true
+codec = { workspace = true }
 
 [features]
 disabled = []

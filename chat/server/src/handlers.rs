@@ -1,17 +1,5 @@
 #[macro_export]
 macro_rules! ensure {
-    ($cond:expr, Ok($resp:expr)) => {
-        if !$cond {
-            return Ok(Err($resp));
-        }
-    };
-
-    (let $var:pat = $expr:expr, Ok($resp:expr)) => {
-        let $var = $expr else {
-            return Ok(Err($resp));
-        };
-    };
-
     ($cond:expr, $resp:expr) => {
         if !$cond {
             return Err($resp);
@@ -25,12 +13,26 @@ macro_rules! ensure {
     };
 }
 
+macro_rules! __routes {
+    ($($module:ident::{$($id:expr => $endpoint:expr;)*};)*) => {{
+        let mut router = Router::default();
+        $( {
+            use handlers::$module::*;
+            $(
+                router.register($id, $endpoint);
+            )*
+        } )*
+        router
+    }};
+}
+
+pub(crate) use __routes as router;
 use {
     self::chat::Chat,
     crate::{Context, OnlineLocation},
+    arrayvec::ArrayVec,
     chat_spec::{ChatError, ChatName, Identity, ReplVec, Request, Topic, REPLICATION_FACTOR},
     codec::Codec,
-    component_utils::arrayvec::ArrayVec,
     dht::U256,
     libp2p::{
         futures::{stream::FuturesUnordered, FutureExt, StreamExt},
@@ -471,18 +473,3 @@ impl Router {
         }
     }
 }
-
-macro_rules! __routes {
-    ($($module:ident::{$($id:expr => $endpoint:expr;)*};)*) => {{
-        let mut router = Router::default();
-        $( {
-            use handlers::$module::*;
-            $(
-                router.register($id, $endpoint);
-            )*
-        } )*
-        router
-    }};
-}
-
-pub(crate) use __routes as router;

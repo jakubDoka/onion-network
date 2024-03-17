@@ -88,20 +88,7 @@ macro_rules! gen_unique_id {
 pub mod stream;
 
 use core::task::Waker;
-pub use {arrayvec, futures, stream::*, thiserror};
-
-pub const PACKET_LEN_WIDTH: usize = std::mem::size_of::<PacketLen>();
-pub type PacketLen = u16;
-
-#[must_use]
-pub fn encode_len(len: usize) -> [u8; PACKET_LEN_WIDTH] {
-    (len as PacketLen).to_be_bytes()
-}
-
-#[must_use]
-pub fn decode_len(bytes: [u8; PACKET_LEN_WIDTH]) -> usize {
-    PacketLen::from_be_bytes(bytes) as usize
-}
+pub use {futures, stream::*};
 
 pub struct DropFn<F: FnOnce()>(Option<F>);
 
@@ -115,21 +102,6 @@ impl<F: FnOnce()> Drop for DropFn<F> {
     fn drop(&mut self) {
         self.0.take().expect("we drop only once")();
     }
-}
-
-#[must_use]
-pub fn arrstr_to_array<const SIZE: usize>(s: arrayvec::ArrayString<SIZE>) -> [u8; SIZE] {
-    let mut arr = [0xff; SIZE];
-    arr[..s.len()].copy_from_slice(s.as_bytes());
-    arr
-}
-
-#[must_use]
-pub fn array_to_arrstr<const SIZE: usize>(arr: [u8; SIZE]) -> Option<arrayvec::ArrayString<SIZE>> {
-    let mut s = arrayvec::ArrayString::<SIZE>::new();
-    let len = arr.iter().rposition(|&x| x != 0xff).map_or(0, |x| x + 1);
-    s.push_str(core::str::from_utf8(&arr[..len]).ok()?);
-    Some(s)
 }
 
 pub trait FindAndRemove<T> {

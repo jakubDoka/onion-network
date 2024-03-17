@@ -1,185 +1,217 @@
-//use {
-//    crypto::{enc, sign::PublicKey, SharedSecret, TransmutationCircle},
-//    hkdf::Hkdf,
-//    rand::{rngs::OsRng, CryptoRng, RngCore},
-//    sha2::Sha256,
-//};
-//
-//pub const RACHET_SEED_SIZE: usize = 64 + 32;
-//pub const MAX_KEPT_MISSING_MESSAGES: usize = 10;
-//pub const SUB_CONSTANT: SharedSecret = [0u8; 32];
-//
-//pub type RatchetSeed = [u8; RACHET_SEED_SIZE];
-//
-//pub struct LimmitedEntropy<'a>(&'a [u8]);
-//
-//impl RngCore for LimmitedEntropy<'_> {
-//    fn next_u32(&mut self) -> u32 {
-//        unimplemented!()
-//    }
-//
-//    fn next_u64(&mut self) -> u64 {
-//        unimplemented!()
-//    }
-//
-//    fn fill_bytes(&mut self, dest: &mut [u8]) {
-//        dest.copy_from_slice(self.0.take(..dest.len()).unwrap());
-//    }
-//
-//    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
-//        unimplemented!()
-//    }
-//}
-//impl CryptoRng for LimmitedEntropy<'_> {}
-//
-//#[derive(Debug, Clone, Copy, Codec, PartialEq, Eq)]
-//pub struct MessageHeader {
-//    pub root_index: u32,
-//    pub sub_index: u32,
-//}
-//
-//#[derive(Debug, Clone, Codec)]
-//pub struct NewKeyPayload {
-//    pub new_key: enc::PublicKey,
-//    pub cp: enc::Ciphertext,
-//    pub prev_sub_count: u32,
-//}
-//
-//#[derive(Debug, Clone, Codec)]
-//pub struct Message<'a> {
-//    pub header: MessageHeader,
-//    pub new_key: Option<NewKeyPayload>,
-//    pub content: Reminder<'a>,
-//}
-//
-//pub struct DoubleRatchet {
-//    index: u32,
-//    root_chain: SharedSecret,
-//    sender_chain_index: u32,
-//    sender_chain: SharedSecret,
-//    receiver_chain_index: u32,
-//    receiver_chain: SharedSecret,
-//    rachet_key_seed: RatchetSeed,
-//    prev_sub_count: u32,
-//    next_message_cp: Option<enc::Ciphertext>,
-//    missing_messages: ArrayVec<(MessageHeader, SharedSecret), MAX_KEPT_MISSING_MESSAGES>,
-//}
-//
-//impl DoubleRatchet {
-//    pub fn new_initator() -> Self {
-//        let mut rachet_key_seed = [0u8; RACHET_SEED_SIZE];
-//        OsRng.fill_bytes(&mut rachet_key_seed);
-//
-//        Self {
-//            index: 0,
-//            root_chain: Default::default(),
-//            sender_chain_index: 0,
-//            sender_chain: Default::default(),
-//            receiver_chain_index: 0,
-//            receiver_chain: Default::default(),
-//            rachet_key_seed,
-//            next_message_cp: None,
-//            prev_sub_count: 0,
-//            missing_messages: ArrayVec::new(),
-//        }
-//    }
-//
-//    pub fn recv_message(&mut self, message: Message) -> Option<SharedSecret> {
-//        let Some(nk_payload) = message.new_key else {
-//            if self.root_chain == SharedSecret::default() {
-//                return None;
-//            }
-//
-//            assert_ne!(self.sender_chain, SharedSecret::default());
-//            assert_ne!(self.receiver_chain, SharedSecret::default());
-//
-//            if message.header.root_index != self.index
-//                || message.header.sub_index < self.receiver_chain_index
-//            {
-//                return self
-//                    .missing_messages
-//                    .iter()
-//                    .position(|&(header, _)| header == message.header)
-//                    .map(|i| self.missing_messages.swap_remove(i).1);
-//            }
-//
-//            for i in self.receiver_chain_index..message.header.sub_index {
-//                Self::add_missing_message(
-//                    &mut self.missing_messages,
-//                    self.index,
-//                    i,
-//                    kdf_rc(&mut self.receiver_chain),
-//                );
-//            }
-//
-//            self.receiver_chain_index = message.header.sub_index + 1;
-//            return Some(kdf_rc(&mut self.receiver_chain));
-//        };
-//
-//        for i in self.receiver_chain_index..nk_payload.prev_sub_count {
-//            Self::add_missing_message(
-//                &mut self.missing_messages,
-//                self.index,
-//                i,
-//                kdf_rc(&mut self.receiver_chain),
-//            );
-//        }
-//
-//        let local_kp = enc::Keypair::new(&mut LimmitedEntropy(&self.rachet_key_seed));
-//        let sender_rachet_input =
-//            local_kp.decapsulate(enc::Ciphertext::from_ref(&nk_payload.cp)).ok()?;
-//        let (new_cp, receiver_rachet_input) =
-//            local_kp.encapsulate(enc::PublicKey::from_ref(&nk_payload.new_key), OsRng);
-//
-//        self.next_message_cp = Some(new_cp);
-//        self.prev_sub_count = std::mem::take(&mut self.sender_chain_index) + 1;
-//        self.sender_chain = kdf_rk(&mut self.root_chain, sender_rachet_input);
-//        self.receiver_chain_index = 0;
-//        self.receiver_chain = kdf_rk(&mut self.root_chain, receiver_rachet_input);
-//        self.receiver_chain_index = 1;
-//        self.index += 1;
-//
-//        Some(kdf_rc(&mut self.receiver_chain))
-//    }
-//
-//    pub fn add_missing_message(
-//        missing_messages: &mut ArrayVec<(MessageHeader, SharedSecret), MAX_KEPT_MISSING_MESSAGES>,
-//        root_index: u32,
-//        sub_index: u32,
-//        key: SharedSecret,
-//    ) {
-//        if missing_messages.len() >= MAX_KEPT_MISSING_MESSAGES {
-//            missing_messages.remove(0);
-//        }
-//        missing_messages.push((MessageHeader { root_index, sub_index }, key));
-//    }
-//}
-//
-//pub fn kdf_rc(root: &mut SharedSecret) -> SharedSecret {
-//    let (next_root, message_key) = kdf(*root, SUB_CONSTANT, "reciever chain");
-//    *root = next_root;
-//    message_key
-//}
-//
-//pub fn kdf_sc(root: &mut SharedSecret) -> SharedSecret {
-//    let (next_root, message_key) = kdf(*root, SUB_CONSTANT, "sender chain");
-//    *root = next_root;
-//    message_key
-//}
-//
-//pub fn kdf_rk(root: &mut SharedSecret, rachet_input: SharedSecret) -> SharedSecret {
-//    let (next_root, message_key) = kdf(*root, rachet_input, "root chain");
-//    *root = next_root;
-//    message_key
-//}
-//
-//pub fn kdf(
-//    root: SharedSecret,
-//    input: SharedSecret,
-//    info: &'static str,
-//) -> (SharedSecret, SharedSecret) {
-//    let gen = Hkdf::<Sha256>::new(Some(&root), &input);
-//    let mut output = [0u8; 64];
-//    gen.expand(info.as_bytes(), &mut output).unwrap();
-//    unsafe { std::mem::transmute(output) }
-//}
+#![feature(slice_take)]
+pub use x25519_dalek::PublicKey;
+use {
+    arrayvec::ArrayVec, codec::Codec, hkdf::Hkdf, rand_core::CryptoRngCore, sha2::Sha256,
+    x25519_dalek::StaticSecret,
+};
+
+const MAX_KEPT_MISSING_MESSAGES: usize = 5;
+const SUB_CONSTANT: SharedSecret = [0u8; 32];
+
+type SharedSecret = [u8; 32];
+
+#[derive(Debug, Clone, Copy, Codec, PartialEq, Eq)]
+struct MessageId {
+    root_index: u32,
+    sub_index: u32,
+}
+
+#[derive(Debug, Clone, Copy, Codec)]
+pub struct MessageHeader {
+    root_index: u32,
+    sub_index: u32,
+    prev_sub_count: u32,
+    #[codec(with = codec::unsafe_as_raw_bytes)]
+    current_key: PublicKey,
+}
+
+// TODO: encrypt headers
+#[derive(Codec, Default)]
+pub struct DoubleRatchet {
+    index: u32,
+    root_chain: SharedSecret,
+    sender_chain_index: u32,
+    sender_chain: SharedSecret,
+    receiver_chain_index: u32,
+    receiver_chain: SharedSecret,
+    prev_sub_count: u32,
+    rachet_key: SharedSecret,
+    missing_messages: ArrayVec<(MessageId, SharedSecret), MAX_KEPT_MISSING_MESSAGES>,
+}
+
+impl DoubleRatchet {
+    pub fn recipient(
+        recip: PublicKey,
+        mut root_chain: SharedSecret,
+        rng: impl CryptoRngCore,
+    ) -> Self {
+        let rachet_key = StaticSecret::random_from_rng(rng);
+        let root_input = rachet_key.diffie_hellman(&recip).to_bytes();
+        let sender_chain = kdf_rk(&mut root_chain, root_input);
+        Self { root_chain, sender_chain, rachet_key: rachet_key.to_bytes(), ..Default::default() }
+    }
+
+    pub fn sender(root_chain: SharedSecret, rng: impl CryptoRngCore) -> (Self, PublicKey) {
+        let rachet_key = StaticSecret::random_from_rng(rng);
+        (
+            Self { root_chain, rachet_key: rachet_key.to_bytes(), ..Default::default() },
+            PublicKey::from(&rachet_key),
+        )
+    }
+
+    pub fn recv_message(
+        &mut self,
+        message: MessageHeader,
+        mut rng: impl CryptoRngCore,
+    ) -> Option<SharedSecret> {
+        if message.root_index < self.index {
+            return self.find_missing_message(message);
+        }
+
+        if message.root_index == self.index {
+            if message.sub_index < self.receiver_chain_index {
+                return self.find_missing_message(message);
+            }
+        } else {
+            self.add_missing_message(message.prev_sub_count);
+
+            let reciever_rachet_input =
+                StaticSecret::from(self.rachet_key).diffie_hellman(&message.current_key).to_bytes();
+            self.rachet_key = StaticSecret::random_from_rng(&mut rng).to_bytes();
+            let sender_rachet_input =
+                StaticSecret::from(self.rachet_key).diffie_hellman(&message.current_key).to_bytes();
+
+            self.prev_sub_count = std::mem::take(&mut self.sender_chain_index);
+            self.receiver_chain = kdf_rk(&mut self.root_chain, reciever_rachet_input);
+            self.receiver_chain_index = 0;
+            self.sender_chain = kdf_rk(&mut self.root_chain, sender_rachet_input);
+            self.sender_chain_index = 0;
+            self.index += 1;
+        }
+
+        assert_ne!(self.receiver_chain, SharedSecret::default());
+
+        self.add_missing_message(message.sub_index);
+        Some(kdf_sc(&mut self.receiver_chain))
+    }
+
+    pub fn send_message(&mut self) -> (MessageHeader, SharedSecret) {
+        assert_ne!(self.sender_chain, SharedSecret::default());
+
+        self.index += (self.sender_chain_index == 0) as u32;
+        let header = MessageHeader {
+            root_index: self.index,
+            sub_index: self.sender_chain_index,
+            prev_sub_count: self.prev_sub_count,
+            current_key: PublicKey::from(&StaticSecret::from(self.rachet_key)),
+        };
+        let secret = kdf_sc(&mut self.sender_chain);
+        self.sender_chain_index += 1;
+        (header, secret)
+    }
+
+    fn find_missing_message(&mut self, message: MessageHeader) -> Option<SharedSecret> {
+        self.missing_messages
+            .iter()
+            .position(|&(header, _)| {
+                header == MessageId { root_index: message.root_index, sub_index: message.sub_index }
+            })
+            .map(|i| self.missing_messages.swap_remove(i).1)
+    }
+
+    fn add_missing_message(&mut self, latest_index: u32) {
+        assert!(latest_index >= self.receiver_chain_index);
+
+        if let Some(to_truncate) = (self.missing_messages.len() + latest_index as usize
+            - self.receiver_chain_index as usize)
+            .checked_sub(MAX_KEPT_MISSING_MESSAGES)
+        {
+            self.missing_messages.drain(..to_truncate);
+        }
+
+        for sub_index in self.receiver_chain_index..latest_index {
+            self.missing_messages.push((
+                MessageId { root_index: self.index, sub_index },
+                kdf_sc(&mut self.receiver_chain),
+            ));
+        }
+
+        self.receiver_chain_index = latest_index + 1;
+    }
+}
+
+fn kdf_sc(root: &mut SharedSecret) -> SharedSecret {
+    let (next_root, message_key) = kdf(*root, SUB_CONSTANT, "sub chain");
+    *root = next_root;
+    message_key
+}
+
+fn kdf_rk(root: &mut SharedSecret, rachet_input: SharedSecret) -> SharedSecret {
+    let (next_root, message_key) = kdf(*root, rachet_input, "root chain");
+    *root = next_root;
+    message_key
+}
+
+fn kdf(
+    root: SharedSecret,
+    input: SharedSecret,
+    info: &'static str,
+) -> (SharedSecret, SharedSecret) {
+    let gen = Hkdf::<Sha256>::new(Some(&root), &input);
+    let mut output = [0u8; 64];
+    gen.expand(info.as_bytes(), &mut output).unwrap();
+    unsafe { std::mem::transmute(output) }
+}
+
+#[cfg(test)]
+mod test {
+    use {super::*, rand_core::OsRng};
+
+    #[test]
+    fn test_sanity() {
+        let rng = OsRng;
+
+        let shared_secret = StaticSecret::random_from_rng(rng).to_bytes();
+        let (mut alice, alice_pk) = DoubleRatchet::sender(shared_secret, rng);
+        let mut bob = DoubleRatchet::recipient(alice_pk, shared_secret, rng);
+
+        let mut messages = Vec::new();
+        for i in 1..10 {
+            for _ in 0..i {
+                messages.push(bob.send_message());
+            }
+
+            for (msg, secret) in messages.drain(..) {
+                let secret2 = alice.recv_message(msg, rng).unwrap();
+                assert_eq!(secret, secret2);
+            }
+        }
+
+        for i in 1..10 {
+            for _ in 0..i {
+                messages.push(alice.send_message());
+            }
+
+            for (msg, secret) in messages.drain(..) {
+                let secret2 = bob.recv_message(msg, rng).unwrap();
+                assert_eq!(secret, secret2);
+            }
+
+            std::mem::swap(&mut alice, &mut bob);
+        }
+
+        for i in 1..10 {
+            dbg!(i);
+            for _ in 0..i {
+                messages.push(alice.send_message());
+            }
+
+            for (msg, secret) in messages.drain(..).rev() {
+                let secret2 = bob.recv_message(msg, rng).unwrap();
+                assert_eq!(secret, secret2);
+            }
+
+            //std::mem::swap(&mut alice, &mut bob);
+        }
+    }
+}

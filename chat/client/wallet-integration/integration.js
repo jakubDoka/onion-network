@@ -30,4 +30,4 @@ async function address(name) {
 	return choosen.address;
 }
 
-this.integration = { sign, address };
+window.integration = { sign, address };

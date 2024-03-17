@@ -1,8 +1,8 @@
 use {
     super::Nonce,
     crate::{BlockNumber, ChatError, Identity},
+    arrayvec::ArrayString,
     codec::{Buffer, Codec, Reminder},
-    component_utils::arrayvec::ArrayString,
     std::{fmt::Display, iter, ops::Range, str::FromStr, time::SystemTime},
 };
 
@@ -145,7 +145,7 @@ impl Member {
 
 #[derive(Clone, Copy, Codec)]
 pub struct Message<'a> {
-    pub identity: Identity,
+    pub sender: Identity,
     pub nonce: Nonce,
     pub content: Reminder<'a>,
 }
@@ -161,7 +161,6 @@ impl Cursor {
 }
 
 pub type ChatName = ArrayString<CHAT_NAME_CAP>;
-pub type RawChatName = [u8; CHAT_NAME_CAP];
 
 #[derive(Codec)]
 #[allow(clippy::large_enum_variant)]

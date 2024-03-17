@@ -93,7 +93,7 @@ fn derive_codec_enum(e: syn::DataEnum, crate_name: &syn::Ident) -> [proc_macro2:
                 )
             }
             syn::Fields::Unit => {
-                (quote! { Self::#name => buffer.push(#i)? }, quote! { i => Some(Self::#name) })
+                (quote! { Self::#name => buffer.push(#i)? }, quote! { #i => Some(Self::#name) })
             }
         }
     };

@@ -28,6 +28,7 @@ crypto = { workspace = true }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
 codec.workspace = true
+double-ratchet = { version = "0.1.0", path = "../../crypto/double-ratchet" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
 workspace = true

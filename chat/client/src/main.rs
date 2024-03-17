@@ -14,15 +14,13 @@ use {
         profile::Profile,
     },
     anyhow::Context,
-    chat_spec::{ChatName, Identity, Nonce, Proof, UserName},
     chat_client_node::{
         BootPhase, ChatMeta, HardenedChatInvitePayload, JoinRequestPayload, MailVariants,
-        MemberMeta, Node, RequestDispatch, UserKeys, Vault,
+        MemberMeta, Node, RequestContext, Requests, UserKeys, Vault,
     },
+    chat_spec::{ChatName, Identity, Nonce, Proof, UserName},
     codec::{Codec, Reminder},
-    crypto::{
-        enc::{self},
-    },
+    crypto::enc,
     leptos::{
         component, create_effect, create_node_ref,
         html::{self, Input},
@@ -35,7 +33,7 @@ use {
     leptos_router::{Route, Router, Routes, A},
     libp2p::futures::{future::join_all, FutureExt, StreamExt},
     rand::rngs::OsRng,
-    std::{cmp::Ordering, fmt::Display, future::Future, time::Duration},
+    std::{cmp::Ordering, convert::identity, fmt::Display, future::Future, time::Duration},
 };
 
 mod chat;
@@ -56,11 +54,42 @@ pub fn main() {
 #[derive(Default, Clone, Copy)]
 struct State {
     keys: RwSignal<Option<UserKeys>>,
-    requests: StoredValue<Option<RequestDispatch>>,
+    requests: StoredValue<Option<Requests>>,
     vault: RwSignal<Vault>,
     vault_version: StoredValue<Nonce>,
     mail_action: StoredValue<Nonce>,
     hardened_messages: RwSignal<Option<(ChatName, db::Message)>>,
+}
+
+type Result<T> = anyhow::Result<T>;
+
+// TODO: emmit errors instead of unwraps
+impl RequestContext for State {
+    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> Result<R>) -> Result<R> {
+        self.vault
+            .try_update(|vault| action(vault))
+            .context("vault not available, might need reload")
+            .and_then(identity)
+    }
+
+    fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> Result<R> {
+        self.keys
+            .try_with_untracked(|keys| keys.as_ref().map(action))
+            .flatten()
+            .context("keys not available, might need reload")
+    }
+
+    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
+        self.vault_version
+            .try_update_value(action)
+            .context("vault version not available, might need reload")
+    }
+
+    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
+        self.mail_action
+            .try_update_value(action)
+            .context("mail action not available, might need reload")
+    }
 }
 
 impl State {
@@ -84,23 +113,6 @@ impl State {
             .flatten()
     }
 
-    fn next_chat_message_proof<'a>(
-        &self,
-        name: ChatName,
-        message: &'a [u8],
-    ) -> Option<chat_spec::Proof<Reminder<'a>>> {
-        self.keys
-            .try_with_untracked(|keys| {
-                let keys = keys.as_ref()?;
-                self.vault.try_update(|vault| {
-                    let chat = vault.chats.get_mut(&name)?;
-                    Some(Proof::new(&keys.sign, &mut chat.action_no, Reminder(message), OsRng))
-                })
-            })
-            .flatten()
-            .flatten()
-    }
-
     fn next_profile_proof(self, vault: &[u8]) -> Option<chat_spec::Proof<Reminder>> {
         self.keys
             .try_with_untracked(|keys| {
@@ -116,18 +128,6 @@ impl State {
     fn chat_secret(self, chat_name: ChatName) -> Option<crypto::SharedSecret> {
         self.vault.with_untracked(|vault| vault.chats.get(&chat_name).map(|c| c.secret))
     }
-
-    fn next_mail_proof(&self) -> Option<chat_spec::Proof<chat_spec::Mail>> {
-        self.keys
-            .try_with_untracked(|keys| {
-                let keys = keys.as_ref()?;
-                self.mail_action.try_update_value(|nonce| {
-                    Some(Proof::new(&keys.sign, nonce, chat_spec::Mail, OsRng))
-                })
-            })
-            .flatten()
-            .flatten()
-    }
 }
 
 fn App() -> impl IntoView {
@@ -136,7 +136,7 @@ fn App() -> impl IntoView {
         chat: ChatName,
         enc: enc::Keypair,
         identity: Identity,
-        mut dispatch: RequestDispatch,
+        mut dispatch: Requests,
     ) -> anyhow::Result<(UserName, MemberMeta)> {
         let pf = dispatch.fetch_keys(their_identity).await.context("fetching profile")?;
 
@@ -151,6 +151,8 @@ fn App() -> impl IntoView {
             .await
             .context("sending invite")?;
 
+        log::debug!("sent invite to {name}");
+
         Ok((name, MemberMeta { secret, identity: their_identity }))
     }
 
@@ -164,7 +166,7 @@ fn App() -> impl IntoView {
         state.vault.with(Codec::to_bytes)
     });
     let timeout = store_value(None::<TimeoutHandle>);
-    let save_vault = move |keys: UserKeys, mut ed: RequestDispatch| {
+    let save_vault = move |keys: UserKeys, mut ed: Requests| {
         let mut vault_bytes = serialized_vault.get_untracked();
         crate::encrypt(&mut vault_bytes, keys.vault);
         handled_spawn_local("saving vault", async move {
@@ -191,7 +193,7 @@ fn App() -> impl IntoView {
     });
 
     let handle_mail = move |mut raw_mail: &[u8],
-                            dispatch: &RequestDispatch,
+                            dispatch: &Requests,
                             enc: enc::Keypair,
                             my_id: Identity,
                             my_name: UserName,
@@ -215,10 +217,10 @@ fn App() -> impl IntoView {
                 let payload = crypto::decrypt(&mut payload, secret)
                     .context("failed to decrypt join request payload")?;
 
-                let JoinRequestPayload { chat, name, identity } = <_>::decode(&mut &*payload)
-                    .context("failed to decrypt join request payload")?;
+                let JoinRequestPayload { chat, name, identity } =
+                    <_>::decode(&mut &*payload).context("failed to decode join request payload")?;
 
-                if state.vault.with_untracked(|v| !v.chats.contains_key(&chat)) {
+                if state.vault.with_untracked(|v| !v.hardened_chats.contains_key(&chat)) {
                     anyhow::bail!("request to join chat we dont have");
                 }
 
@@ -258,8 +260,7 @@ fn App() -> impl IntoView {
                     Ok(())
                 });
             }
-            MailVariants::HardenedChatMessage { nonce, chat, content } => {
-                let mut message = content.0.to_owned();
+            MailVariants::HardenedChatMessage { nonce, chat, mut content } => {
                 state.vault.update(|v| {
                     let Some((&chat, meta)) = v
                         .hardened_chats
@@ -272,8 +273,8 @@ fn App() -> impl IntoView {
 
                     let Some((&sender, content)) =
                         meta.members.iter_mut().find_map(|(name, mm)| {
-                            let decrypted = crypto::decrypt(&mut message, mm.secret)?;
-                            Some((name, std::str::from_utf8(decrypted).ok().unwrap().into()))
+                            let decrypted = crypto::decrypt(&mut content, mm.secret)?;
+                            Some((name, std::str::from_utf8(decrypted).ok()?.into()))
                         })
                     else {
                         log::warn!("received message for chat we are not in");
@@ -310,9 +311,8 @@ fn App() -> impl IntoView {
             let mut dispatch_clone = dispatch.clone();
             let cloned_enc = enc.clone();
             handled_spawn_local("reading mail", async move {
-                let proof = state.next_mail_proof().unwrap();
                 let inner_dispatch = dispatch_clone.clone();
-                let Reminder(list) = dispatch_clone.read_mail(proof).await?;
+                let Reminder(list) = dispatch_clone.read_mail(state).await?;
 
                 let mut new_messages = Vec::new();
                 for mail in chat_spec::unpack_mail(list) {

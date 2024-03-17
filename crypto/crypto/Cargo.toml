@@ -20,7 +20,7 @@ rand_core = { version = "0.6.4", default-features = false }
 
 kyber = { workspace = true }
 falcon = { workspace = true }
-codec = { workspace = true, optional = true }
+codec = { workspace = true, optional = true, features = ["derive"] }
 
 [dev-dependencies]
 rand_core = { version = "0.6.4", features = ["getrandom"] }

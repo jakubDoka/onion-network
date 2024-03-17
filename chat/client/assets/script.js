@@ -18,7 +18,7 @@ function openDb() {
                 dbReq.onupgradeneeded = (event) => {
                         /** @type {IDBDatabase} */
                         const ndb = event.target.result;
-                        ndb.deleteObjectStore("messages");
+                        try { ndb.deleteObjectStore("messages"); } catch (e) { }
                         const messages = ndb.createObjectStore("messages", { autoIncrement: true });
                         messages.createIndex("by_chat", ["chat", "owner"], { unique: false });
                 };
@@ -98,9 +98,11 @@ class MessageCursor {
         }
 }
 
-this.db = {
+window.db = {
         saveMessages: saveMessagesDb,
 };
+
+Object.assign(window, { setup_resizable_textarea, MessageCursor });
 
 function setup_resizable_textarea() {
         const mi = document.getElementById('message-input');

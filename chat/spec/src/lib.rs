@@ -8,8 +8,8 @@
 #![feature(slice_from_ptr_range)]
 
 use {
+    arrayvec::{ArrayString, ArrayVec},
     codec::{Codec, Reminder},
-    component_utils::arrayvec::{ArrayString, ArrayVec},
     rand_core::CryptoRngCore,
     std::num::NonZeroUsize,
 };
@@ -55,12 +55,12 @@ pub use {chat::*, profile::*, rpc::CallId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
 pub enum ChatError {
-    #[error("outdated")]
-    Outdated,
-    #[error("not found")]
-    NotFound,
     #[error("invalid proof")]
     InvalidProof,
+    #[error("not found")]
+    NotFound,
+    #[error("outdated")]
+    Outdated,
     #[error("already exists")]
     AlreadyExists,
     #[error("invalid action")]
@@ -103,6 +103,8 @@ pub enum ChatError {
     InvalidResponse,
     #[error("timeout")]
     Timeout,
+    #[error("context dropped")]
+    ContextDropped,
 }
 
 impl ChatError {
@@ -194,7 +196,7 @@ impl<T: ProofContext> Proof<T> {
 
     fn pack_payload(nonce: Nonce, context: &T) -> [u8; PAYLOAD_SIZE] {
         let mut buf = [0; PAYLOAD_SIZE];
-        buf[..crypto::hash::SIZE].copy_from_slice(context.as_bytes());
+        buf[..crypto::hash::SIZE].copy_from_slice(&crypto::hash::new(context.as_bytes()));
         buf[crypto::hash::SIZE..].copy_from_slice(&nonce.to_be_bytes());
         buf
     }
@@ -202,6 +204,10 @@ impl<T: ProofContext> Proof<T> {
     pub fn verify(&self) -> bool {
         let bytes = Self::pack_payload(self.nonce, &self.context);
         self.pk.verify(&bytes, &self.signature).is_ok()
+    }
+
+    pub fn topic(&self) -> Topic {
+        crypto::hash::new(self.pk).into()
     }
 }
 

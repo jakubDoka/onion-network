@@ -7,7 +7,6 @@
 #![allow(clippy::empty_docs)]
 
 use {
-    self::web_sys::wasm_bindgen::JsValue,
     crate::{
         chat::Chat,
         login::{Login, Register},
@@ -18,22 +17,22 @@ use {
         BootPhase, ChatMeta, HardenedChatInvitePayload, JoinRequestPayload, MailVariants,
         MemberMeta, Node, RequestContext, Requests, UserKeys, Vault,
     },
-    chat_spec::{ChatName, Identity, Nonce, Proof, UserName},
+    chat_spec::{ChatName, Nonce, Proof, UserName},
     codec::{Codec, Reminder},
-    crypto::enc,
+    double_ratchet::DoubleRatchet,
     leptos::{
         component, create_effect, create_node_ref,
         html::{self, Input},
         leptos_dom::helpers::TimeoutHandle,
         mount_to_body, provide_context, set_timeout, set_timeout_with_handle,
         signal_prelude::*,
-        spawn_local, store_value, use_context, view, web_sys, CollectView, IntoView, NodeRef,
-        StoredValue,
+        spawn_local, store_value, use_context, view, CollectView, IntoView, NodeRef, StoredValue,
     },
     leptos_router::{Route, Router, Routes, A},
-    libp2p::futures::{future::join_all, FutureExt, StreamExt},
+    libp2p::futures::{future::join_all, FutureExt, StreamExt, TryFutureExt},
     rand::rngs::OsRng,
     std::{cmp::Ordering, convert::identity, fmt::Display, future::Future, time::Duration},
+    web_sys::wasm_bindgen::JsValue,
 };
 
 mod chat;
@@ -131,31 +130,6 @@ impl State {
 }
 
 fn App() -> impl IntoView {
-    async fn notify_about_invite(
-        (name, their_identity): (UserName, Identity),
-        chat: ChatName,
-        enc: enc::Keypair,
-        identity: Identity,
-        mut dispatch: Requests,
-    ) -> anyhow::Result<(UserName, MemberMeta)> {
-        let pf = dispatch.fetch_keys(their_identity).await.context("fetching profile")?;
-
-        let (cp, secret) = enc.encapsulate(&pf.enc, OsRng);
-
-        let mut payload = JoinRequestPayload { chat, name, identity }.to_bytes();
-        let tag = crypto::encrypt(&mut payload, secret, OsRng);
-        payload.extend(tag);
-
-        dispatch
-            .send_mail(their_identity, MailVariants::HardenedJoinRequest { cp, payload })
-            .await
-            .context("sending invite")?;
-
-        log::debug!("sent invite to {name}");
-
-        Ok((name, MemberMeta { secret, identity: their_identity }))
-    }
-
     let (rboot_phase, wboot_phase) = create_signal(None::<BootPhase>);
     let (errors, set_errors) = create_signal(None::<anyhow::Error>);
     provide_context(Errors(set_errors));
@@ -192,33 +166,30 @@ fn App() -> impl IntoView {
         Some(())
     });
 
-    let handle_mail = move |mut raw_mail: &[u8],
-                            dispatch: &Requests,
-                            enc: enc::Keypair,
-                            my_id: Identity,
-                            my_name: UserName,
-                            new_messages: &mut Vec<db::Message>| {
+    let handle_mail = move |mut raw_mail: &[u8], new_messages: &mut Vec<db::Message>| {
         let Some(mail) = MailVariants::decode(&mut raw_mail) else {
             anyhow::bail!("faild to decode mail, {raw_mail:?}");
         };
-        assert!(raw_mail.is_empty());
 
         match mail {
             MailVariants::ChatInvite { chat, cp } => {
-                let secret =
-                    enc.decapsulate_choosen(&cp).context("failed to decapsulate invite")?;
-
+                let secret = state
+                    .with_keys(|k| k.enc.decapsulate_choosen(&cp))?
+                    .context("failed to decapsulate invite")?;
                 state.vault.update(|v| _ = v.chats.insert(chat, ChatMeta::from_secret(secret)));
             }
             MailVariants::HardenedJoinRequest { cp, mut payload } => {
-                log::debug!("handling hardened join request");
-                let secret = enc.decapsulate(&cp).context("failed to decapsulate invite")?;
+                let secret = state
+                    .with_keys(|k| k.enc.decapsulate(&cp))?
+                    .context("failed to decapsulate invite")?;
 
                 let payload = crypto::decrypt(&mut payload, secret)
                     .context("failed to decrypt join request payload")?;
 
-                let JoinRequestPayload { chat, name, identity } =
+                let JoinRequestPayload { chat, name, identity, init_pk } =
                     <_>::decode(&mut &*payload).context("failed to decode join request payload")?;
+
+                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
 
                 if state.vault.with_untracked(|v| !v.hardened_chats.contains_key(&chat)) {
                     anyhow::bail!("request to join chat we dont have");
@@ -227,23 +198,29 @@ fn App() -> impl IntoView {
                 state.vault.update(|v| {
                     log::debug!("adding member to hardened chat");
                     let chat = v.hardened_chats.get_mut(&chat).expect("we just checked");
-                    chat.members.insert(name, MemberMeta { secret, identity });
+                    chat.members.insert(name, MemberMeta { dr, identity });
                 })
             }
             MailVariants::HardenedChatInvite { cp, mut payload } => {
                 log::debug!("handling hardened chat invite");
-                let enc = enc;
-                let secret =
-                    enc.decapsulate(&cp).context("failed to decapsulate hardened invite")?;
+                let secret = state
+                    .with_keys(|k| k.enc.decapsulate(&cp))?
+                    .context("failed to decapsulate hardened invite")?;
 
                 let payload = crypto::decrypt(&mut payload, secret)
                     .context("failed to decrypt hardened invite")?;
-                let HardenedChatInvitePayload { chat, inviter, inviter_id, members } =
+                let HardenedChatInvitePayload { chat, inviter, inviter_id, members, init_pk } =
                     <_>::decode(&mut &*payload).context("failed to decode hardened invite")?;
-                let dispatch = dispatch.clone();
+
+                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
+
                 handled_spawn_local("inviting hardened user user", async move {
-                    let members = join_all(members.into_iter().map(|id| {
-                        notify_about_invite(id, chat, enc.clone(), my_id, dispatch.clone())
+                    let dispatch = state.requests.get_value().context("no dispatch")?;
+                    let members = join_all(members.into_iter().map(|(name, id)| {
+                        dispatch
+                            .clone()
+                            .send_hardened_join_request(id, chat, state)
+                            .map_ok(move |dr| (name, dr))
                     }))
                     .await
                     .into_iter()
@@ -254,37 +231,41 @@ fn App() -> impl IntoView {
                         members
                             .into_iter()
                             .for_each(|(name, secret)| _ = meta.members.insert(name, secret));
-                        meta.members.insert(inviter, MemberMeta { secret, identity: inviter_id });
+                        meta.members.insert(inviter, MemberMeta { dr, identity: inviter_id });
                     });
 
                     Ok(())
                 });
             }
-            MailVariants::HardenedChatMessage { nonce, chat, mut content } => {
-                state.vault.update(|v| {
+            MailVariants::HardenedChatMessage { nonce, chat, header, mut content } => {
+                state.with_vault(|v| {
                     let Some((&chat, meta)) = v
                         .hardened_chats
                         .iter_mut()
                         .find(|(c, _)| crypto::hash::with_nonce(c.as_bytes(), nonce) == chat)
                     else {
                         log::warn!("received message for unknown chat");
-                        return;
+                        return Ok(());
                     };
 
                     let Some((&sender, content)) =
                         meta.members.iter_mut().find_map(|(name, mm)| {
-                            let decrypted = crypto::decrypt(&mut content, mm.secret)?;
+                            let secret = mm.dr.recv_message(header, OsRng)?;
+                            let decrypted = crypto::decrypt(&mut content, secret)?;
                             Some((name, std::str::from_utf8(decrypted).ok()?.into()))
                         })
                     else {
                         log::warn!("received message for chat we are not in");
-                        return;
+                        return Ok(());
                     };
 
-                    let message = db::Message { sender, owner: my_name, content, chat };
+                    let message =
+                        db::Message { sender, owner: state.with_keys(|k| k.name)?, content, chat };
                     new_messages.push(message.clone());
                     state.hardened_messages.set(Some((chat, message)));
-                });
+
+                    Ok(())
+                })?;
             }
         }
 
@@ -296,58 +277,31 @@ fn App() -> impl IntoView {
             return;
         };
 
-        let enc = keys.enc.clone();
-        let my_name = keys.name;
-        let my_id = keys.identity_hash();
-
         handled_spawn_local("initializing node", async move {
             navigate_to("/");
-            let identity = keys.identity_hash();
             let (node, vault, dispatch, vault_version, mail_action) =
                 Node::new(keys, |s| wboot_phase(Some(s)))
                     .await
                     .inspect_err(|_| navigate_to("/login"))?;
 
             let mut dispatch_clone = dispatch.clone();
-            let cloned_enc = enc.clone();
             handled_spawn_local("reading mail", async move {
-                let inner_dispatch = dispatch_clone.clone();
                 let Reminder(list) = dispatch_clone.read_mail(state).await?;
-
                 let mut new_messages = Vec::new();
                 for mail in chat_spec::unpack_mail(list) {
-                    handle_error(
-                        handle_mail(
-                            mail,
-                            &inner_dispatch,
-                            cloned_enc.clone(),
-                            my_id,
-                            my_name,
-                            &mut new_messages,
-                        )
-                        .context("receiving a mail"),
-                    );
+                    handle_error(handle_mail(mail, &mut new_messages).context("receiving a mail"));
                 }
                 db::save_messages(new_messages).await
             });
 
             let mut dispatch_clone = dispatch.clone();
             let listen = async move {
+                let identity = state.with_keys(UserKeys::identity_hash)?;
                 let mut account =
                     dispatch_clone.subscribe(identity).await.context("subscribing to profile")?;
                 while let Some(mail) = account.next().await {
                     let mut new_messages = Vec::new();
-                    handle_error(
-                        handle_mail(
-                            &mail,
-                            &dispatch_clone,
-                            enc.clone(),
-                            my_id,
-                            my_name,
-                            &mut new_messages,
-                        )
-                        .context("receiving a mail"),
-                    );
+                    handle_error(handle_mail(&mail, &mut new_messages).context("receiving a mail"));
                     handle_error(db::save_messages(new_messages).await);
                 }
 

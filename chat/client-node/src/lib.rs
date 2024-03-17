@@ -58,6 +58,8 @@ pub struct JoinRequestPayload {
     pub name: UserName,
     pub chat: ChatName,
     pub identity: Identity,
+    #[codec(with = codec::unsafe_as_raw_bytes)]
+    pub init_pk: double_ratchet::PublicKey,
 }
 
 #[derive(Default, Codec)]
@@ -109,10 +111,24 @@ pub struct RawChatMessage<'a> {
 
 #[derive(Codec)]
 pub enum MailVariants {
-    ChatInvite { chat: ChatName, cp: ChoosenCiphertext },
-    HardenedJoinRequest { cp: Ciphertext, payload: Vec<u8> },
-    HardenedChatMessage { nonce: Nonce, chat: crypto::Hash, content: Vec<u8> },
-    HardenedChatInvite { cp: Ciphertext, payload: Vec<u8> },
+    ChatInvite {
+        chat: ChatName,
+        cp: ChoosenCiphertext,
+    },
+    HardenedJoinRequest {
+        cp: Ciphertext,
+        payload: Vec<u8>,
+    },
+    HardenedChatMessage {
+        nonce: Nonce,
+        chat: crypto::Hash,
+        header: double_ratchet::MessageHeader,
+        content: Vec<u8>,
+    },
+    HardenedChatInvite {
+        cp: Ciphertext,
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Codec)]
@@ -120,6 +136,8 @@ pub struct HardenedChatInvitePayload {
     pub chat: ChatName,
     pub inviter: UserName,
     pub inviter_id: Identity,
+    #[codec(with = codec::unsafe_as_raw_bytes)]
+    pub init_pk: double_ratchet::PublicKey,
     pub members: Vec<(UserName, Identity)>,
 }
 
@@ -830,12 +848,13 @@ impl Requests {
             .sign;
         let keys = self.fetch_keys(to).await.context("fetching keys")?;
         let (cp, ss) = ctx.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
+        let (dr, init_pk) = DoubleRatchet::sender(ss, OsRng);
 
         let members = ctx.with_vault(|v| {
             let cm = v.hardened_chats.get_mut(&name).with_context(vault_chat_404(name))?;
             let members =
                 cm.members.iter().map(|(&name, m)| (name, m.identity)).collect::<Vec<_>>();
-            cm.members.insert(to_name, MemberMeta { secret: ss, identity: to });
+            cm.members.insert(to_name, MemberMeta { dr, identity: to });
             Ok(members)
         })?;
 
@@ -843,6 +862,7 @@ impl Requests {
             chat: name,
             inviter: ctx.with_keys(|k| k.name)?,
             inviter_id: ctx.with_keys(UserKeys::identity_hash)?,
+            init_pk,
             members,
         }
         .to_bytes();
@@ -863,11 +883,12 @@ impl Requests {
         fn send_single_invite(
             name: ChatName,
             message: &[u8],
-            meta: &MemberMeta,
+            meta: &mut MemberMeta,
             reqs: &Requests,
         ) -> impl Future<Output = Result<(), ChatError>> {
             let mut content = message.to_vec();
-            let tag = crypto::encrypt(&mut content, meta.secret, OsRng);
+            let (header, secret) = meta.dr.send_message();
+            let tag = crypto::encrypt(&mut content, secret, OsRng);
             content.extend(tag);
 
             let nonce = OsRng.gen::<Nonce>();
@@ -877,6 +898,7 @@ impl Requests {
                 let mail = MailVariants::HardenedChatMessage {
                     nonce,
                     chat: crypto::hash::with_nonce(name.as_bytes(), nonce),
+                    header,
                     content,
                 };
                 reqs.send_mail(identity, mail).await
@@ -884,12 +906,39 @@ impl Requests {
         }
 
         let requests = ctx.with_vault(move |v| {
-            let cm = v.hardened_chats.get(&name).with_context(vault_chat_404(name))?;
+            let cm = v.hardened_chats.get_mut(&name).with_context(vault_chat_404(name))?;
             let reqs =
-                cm.members.values().map(|meta| send_single_invite(name, message, meta, self));
+                cm.members.values_mut().map(|meta| send_single_invite(name, message, meta, self));
             Ok(futures::future::try_join_all(reqs))
         })?;
         requests.await.map(drop).map_err(Into::into)
+    }
+
+    pub async fn send_hardened_join_request(
+        mut self,
+        to: Identity,
+        chat: ChatName,
+        ctx: impl RequestContext,
+    ) -> Result<MemberMeta> {
+        let identity = ctx.with_keys(UserKeys::identity_hash)?;
+        let name = ctx.with_keys(|k| k.name)?;
+
+        let pf = self.fetch_keys(to).await.context("fetching profile")?;
+
+        let (cp, secret) = ctx.with_keys(|k| k.enc.encapsulate(&pf.enc, OsRng))?;
+        let (dr, init_pk) = DoubleRatchet::sender(secret, OsRng);
+
+        let mut payload = JoinRequestPayload { chat, name, identity, init_pk }.to_bytes();
+        let tag = crypto::encrypt(&mut payload, secret, OsRng);
+        payload.extend(tag);
+
+        self.send_mail(to, MailVariants::HardenedJoinRequest { cp, payload })
+            .await
+            .context("sending invite")?;
+
+        log::debug!("sent invite to {name}");
+
+        Ok(MemberMeta { dr, identity: to })
     }
 
     pub async fn update_member(

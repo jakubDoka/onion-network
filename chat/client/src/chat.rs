@@ -108,33 +108,13 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         }
 
         match cursor.get_untracked() {
-            Cursor::Normal(cursor) => {
-                let (new_cursor, Reminder(messages)) =
-                    requests.fetch_messages(chat, cursor).await?;
-                let secret = state.chat_secret(chat).context("getting chat secret")?;
-                for message in chat_spec::unpack_messages(messages.to_vec().as_mut_slice()) {
-                    let Some(chat_spec::Message { content: Reminder(content), .. }) =
-                        <_>::decode(&mut &*message)
-                    else {
-                        log::error!("server gave us undecodable message");
-                        continue;
-                    };
-
-                    let mut message = content.to_vec();
-                    let Some(decrypted) = crypto::decrypt(&mut message, secret) else {
-                        log::error!("message from server is corrupted");
-                        continue;
-                    };
-                    let Some(RawChatMessage { sender, content }) =
-                        RawChatMessage::decode(&mut &*decrypted)
-                    else {
-                        log::error!("failed to decode fetched message");
-                        continue;
-                    };
-                    prepend_message(sender, content.into());
+            Cursor::Normal(mut cursor) => {
+                for message in requests.fetch_and_decrypt_messages(chat, &mut cursor, state).await?
+                {
+                    append_message(message.sender, message.content);
                 }
-                set_red_all_messages(new_cursor == chat_spec::Cursor::INIT);
-                set_cursor(Cursor::Normal(new_cursor));
+                set_red_all_messages(cursor == chat_spec::Cursor::INIT);
+                set_cursor(Cursor::Normal(cursor));
             }
             Cursor::Hardened(cursor) => {
                 let messages = cursor.next(30).await?;
@@ -172,8 +152,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 return;
             };
 
-            append_message(sender, content.into());
-            log::info!("received message: {:?}", content);
+            append_message(sender, content);
         }
         ChatEvent::Member(identiy, member) => {
             if identiy == my_id {
@@ -395,7 +374,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let send_normal_message = move |chat, content: String| {
         handled_spawn_local("sending normal message", async move {
-            let content = RawChatMessage { sender: my_name, content: &content }.to_bytes();
+            let content = RawChatMessage { sender: my_name, content }.to_bytes();
             requests().send_encrypted_message(chat, content, state).await?;
             clear_input();
             Ok(())
@@ -404,7 +383,12 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let send_hardened_message = move |chat: ChatName, content: String| {
         handled_spawn_local("sending hardened message", async move {
-            requests().send_hardened_message(chat, content.as_bytes(), state).await?;
+            let undelivered =
+                requests().send_hardened_message(chat, content.as_bytes(), state).await?;
+
+            for name in undelivered {
+                log::info!("message not delivered to: {:?}", name);
+            }
 
             db::save_messages(vec![db::Message {
                 chat,

@@ -105,6 +105,8 @@ pub enum ChatError {
     Timeout,
     #[error("context dropped")]
     ContextDropped,
+    #[error("opposite party needs to send the message first")]
+    OppositePartyFirst,
 }
 
 impl ChatError {

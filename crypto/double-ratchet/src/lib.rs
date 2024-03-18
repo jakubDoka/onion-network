@@ -89,14 +89,18 @@ impl DoubleRatchet {
             self.index += 1;
         }
 
-        assert_ne!(self.receiver_chain, SharedSecret::default());
+        if self.receiver_chain == SharedSecret::default() {
+            return None;
+        }
 
         self.add_missing_message(message.sub_index);
         Some(kdf_sc(&mut self.receiver_chain))
     }
 
-    pub fn send_message(&mut self) -> (MessageHeader, SharedSecret) {
-        assert_ne!(self.sender_chain, SharedSecret::default());
+    pub fn send_message(&mut self) -> Option<(MessageHeader, SharedSecret)> {
+        if self.sender_chain == SharedSecret::default() {
+            return None;
+        }
 
         self.index += (self.sender_chain_index == 0) as u32;
         let header = MessageHeader {
@@ -107,7 +111,7 @@ impl DoubleRatchet {
         };
         let secret = kdf_sc(&mut self.sender_chain);
         self.sender_chain_index += 1;
-        (header, secret)
+        Some((header, secret))
     }
 
     fn find_missing_message(&mut self, message: MessageHeader) -> Option<SharedSecret> {
@@ -178,7 +182,7 @@ mod test {
         let mut messages = Vec::new();
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(bob.send_message());
+                messages.push(bob.send_message().unwrap());
             }
 
             for (msg, secret) in messages.drain(..) {
@@ -189,7 +193,7 @@ mod test {
 
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(alice.send_message());
+                messages.push(alice.send_message().unwrap());
             }
 
             for (msg, secret) in messages.drain(..) {
@@ -203,7 +207,7 @@ mod test {
         for i in 1..10 {
             dbg!(i);
             for _ in 0..i {
-                messages.push(alice.send_message());
+                messages.push(alice.send_message().unwrap());
             }
 
             for (msg, secret) in messages.drain(..).rev() {

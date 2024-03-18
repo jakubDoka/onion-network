@@ -13,23 +13,12 @@ use {
         profile::Profile,
     },
     anyhow::Context,
-    chat_client_node::{
-        BootPhase, ChatMeta, HardenedChatInvitePayload, JoinRequestPayload, MailVariants,
-        MemberMeta, Node, RequestContext, Requests, UserKeys, Vault,
-    },
+    chat_client_node::{BootPhase, MailVariants, Node, RequestContext, Requests, UserKeys, Vault},
     chat_spec::{ChatName, Nonce, Proof, UserName},
     codec::{Codec, Reminder},
-    double_ratchet::DoubleRatchet,
-    leptos::{
-        component, create_effect, create_node_ref,
-        html::{self, Input},
-        leptos_dom::helpers::TimeoutHandle,
-        mount_to_body, provide_context, set_timeout, set_timeout_with_handle,
-        signal_prelude::*,
-        spawn_local, store_value, use_context, view, CollectView, IntoView, NodeRef, StoredValue,
-    },
+    leptos::*,
     leptos_router::{Route, Router, Routes, A},
-    libp2p::futures::{future::join_all, FutureExt, StreamExt, TryFutureExt},
+    libp2p::futures::{FutureExt, StreamExt},
     rand::rngs::OsRng,
     std::{cmp::Ordering, convert::identity, fmt::Display, future::Future, time::Duration},
     web_sys::wasm_bindgen::JsValue,
@@ -112,18 +101,6 @@ impl State {
             .flatten()
     }
 
-    fn next_profile_proof(self, vault: &[u8]) -> Option<chat_spec::Proof<Reminder>> {
-        self.keys
-            .try_with_untracked(|keys| {
-                let keys = keys.as_ref()?;
-                self.vault_version.try_update_value(|nonce| {
-                    Some(Proof::new(&keys.sign, nonce, Reminder(vault), OsRng))
-                })
-            })
-            .flatten()
-            .flatten()
-    }
-
     fn chat_secret(self, chat_name: ChatName) -> Option<crypto::SharedSecret> {
         self.vault.with_untracked(|vault| vault.chats.get(&chat_name).map(|c| c.secret))
     }
@@ -135,142 +112,21 @@ fn App() -> impl IntoView {
     provide_context(Errors(set_errors));
     let state = State::default();
 
-    let serialized_vault = create_memo(move |_| {
-        log::debug!("vault serialized");
-        state.vault.with(Codec::to_bytes)
-    });
-    let timeout = store_value(None::<TimeoutHandle>);
-    let save_vault = move |keys: UserKeys, mut ed: Requests| {
-        let mut vault_bytes = serialized_vault.get_untracked();
-        crate::encrypt(&mut vault_bytes, keys.vault);
-        handled_spawn_local("saving vault", async move {
-            let proof = state.next_profile_proof(&vault_bytes).expect("logged in");
-            ed.set_vault(proof).await.context("setting vault")?;
-            log::debug!("saved vault");
-            Ok(())
-        });
-    };
-    create_effect(move |init| {
-        serialized_vault.track();
-        _ = init?;
-        let keys = state.keys.get_untracked()?;
-        let ed = state.requests.get_value()?;
-
-        if let Some(handle) = timeout.get_value() {
-            handle.clear()
+    async fn handle_mail(
+        mut raw_mail: &[u8],
+        new_messages: &mut Vec<db::Message>,
+        state: State,
+    ) -> Result<()> {
+        let mail = MailVariants::decode(&mut raw_mail).context("decoding mail")?;
+        let dispatch = state.requests.get_value().context("no dispatch")?;
+        if let Some((sender, content, chat)) = mail.handle(&state, dispatch).await? {
+            let message =
+                db::Message { sender, owner: state.with_keys(|k| k.name)?, content, chat };
+            new_messages.push(message.clone());
+            state.hardened_messages.set(Some((chat, message)));
         }
-        let handle =
-            set_timeout_with_handle(move || save_vault(keys, ed), Duration::from_secs(3)).unwrap();
-        timeout.set_value(Some(handle));
-
-        Some(())
-    });
-
-    let handle_mail = move |mut raw_mail: &[u8], new_messages: &mut Vec<db::Message>| {
-        let Some(mail) = MailVariants::decode(&mut raw_mail) else {
-            anyhow::bail!("faild to decode mail, {raw_mail:?}");
-        };
-
-        match mail {
-            MailVariants::ChatInvite { chat, cp } => {
-                let secret = state
-                    .with_keys(|k| k.enc.decapsulate_choosen(&cp))?
-                    .context("failed to decapsulate invite")?;
-                state.vault.update(|v| _ = v.chats.insert(chat, ChatMeta::from_secret(secret)));
-            }
-            MailVariants::HardenedJoinRequest { cp, mut payload } => {
-                let secret = state
-                    .with_keys(|k| k.enc.decapsulate(&cp))?
-                    .context("failed to decapsulate invite")?;
-
-                let payload = crypto::decrypt(&mut payload, secret)
-                    .context("failed to decrypt join request payload")?;
-
-                let JoinRequestPayload { chat, name, identity, init_pk } =
-                    <_>::decode(&mut &*payload).context("failed to decode join request payload")?;
-
-                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
-
-                if state.vault.with_untracked(|v| !v.hardened_chats.contains_key(&chat)) {
-                    anyhow::bail!("request to join chat we dont have");
-                }
-
-                state.vault.update(|v| {
-                    log::debug!("adding member to hardened chat");
-                    let chat = v.hardened_chats.get_mut(&chat).expect("we just checked");
-                    chat.members.insert(name, MemberMeta { dr, identity });
-                })
-            }
-            MailVariants::HardenedChatInvite { cp, mut payload } => {
-                log::debug!("handling hardened chat invite");
-                let secret = state
-                    .with_keys(|k| k.enc.decapsulate(&cp))?
-                    .context("failed to decapsulate hardened invite")?;
-
-                let payload = crypto::decrypt(&mut payload, secret)
-                    .context("failed to decrypt hardened invite")?;
-                let HardenedChatInvitePayload { chat, inviter, inviter_id, members, init_pk } =
-                    <_>::decode(&mut &*payload).context("failed to decode hardened invite")?;
-
-                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
-
-                handled_spawn_local("inviting hardened user user", async move {
-                    let dispatch = state.requests.get_value().context("no dispatch")?;
-                    let members = join_all(members.into_iter().map(|(name, id)| {
-                        dispatch
-                            .clone()
-                            .send_hardened_join_request(id, chat, state)
-                            .map_ok(move |dr| (name, dr))
-                    }))
-                    .await
-                    .into_iter()
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-
-                    state.vault.update(|v| {
-                        let meta = v.hardened_chats.entry(chat).or_default();
-                        members
-                            .into_iter()
-                            .for_each(|(name, secret)| _ = meta.members.insert(name, secret));
-                        meta.members.insert(inviter, MemberMeta { dr, identity: inviter_id });
-                    });
-
-                    Ok(())
-                });
-            }
-            MailVariants::HardenedChatMessage { nonce, chat, header, mut content } => {
-                state.with_vault(|v| {
-                    let Some((&chat, meta)) = v
-                        .hardened_chats
-                        .iter_mut()
-                        .find(|(c, _)| crypto::hash::with_nonce(c.as_bytes(), nonce) == chat)
-                    else {
-                        log::warn!("received message for unknown chat");
-                        return Ok(());
-                    };
-
-                    let Some((&sender, content)) =
-                        meta.members.iter_mut().find_map(|(name, mm)| {
-                            let secret = mm.dr.recv_message(header, OsRng)?;
-                            let decrypted = crypto::decrypt(&mut content, secret)?;
-                            Some((name, std::str::from_utf8(decrypted).ok()?.into()))
-                        })
-                    else {
-                        log::warn!("received message for chat we are not in");
-                        return Ok(());
-                    };
-
-                    let message =
-                        db::Message { sender, owner: state.with_keys(|k| k.name)?, content, chat };
-                    new_messages.push(message.clone());
-                    state.hardened_messages.set(Some((chat, message)));
-
-                    Ok(())
-                })?;
-            }
-        }
-
         Ok(())
-    };
+    }
 
     create_effect(move |_| {
         let Some(keys) = state.keys.get() else {
@@ -289,7 +145,7 @@ fn App() -> impl IntoView {
                 let Reminder(list) = dispatch_clone.read_mail(state).await?;
                 let mut new_messages = Vec::new();
                 for mail in chat_spec::unpack_mail(list) {
-                    handle_error(handle_mail(mail, &mut new_messages).context("receiving a mail"));
+                    handle_error(handle_mail(mail, &mut new_messages, state).await);
                 }
                 db::save_messages(new_messages).await
             });
@@ -301,7 +157,7 @@ fn App() -> impl IntoView {
                     dispatch_clone.subscribe(identity).await.context("subscribing to profile")?;
                 while let Some(mail) = account.next().await {
                     let mut new_messages = Vec::new();
-                    handle_error(handle_mail(&mail, &mut new_messages).context("receiving a mail"));
+                    handle_error(handle_mail(&mail, &mut new_messages, state).await);
                     handle_error(db::save_messages(new_messages).await);
                 }
 
@@ -449,7 +305,7 @@ fn Nav(my_name: UserName) -> impl IntoView {
     }
 }
 
-fn get_value(elem: NodeRef<Input>) -> String {
+fn get_value(elem: NodeRef<html::Input>) -> String {
     elem.get_untracked().unwrap().value()
 }
 
@@ -537,9 +393,4 @@ fn handled_spawn_local(
             errors.set(Some(e));
         }
     });
-}
-
-fn encrypt(data: &mut Vec<u8>, secret: crypto::SharedSecret) {
-    let arr = crypto::encrypt(data, secret, OsRng);
-    data.extend(arr);
 }

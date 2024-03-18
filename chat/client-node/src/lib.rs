@@ -18,7 +18,8 @@ use {
         core::upgrade::Version,
         futures::{
             channel::{mpsc, oneshot},
-            SinkExt, StreamExt,
+            future::join_all,
+            SinkExt, StreamExt, TryFutureExt,
         },
         identity::ed25519,
         swarm::{NetworkBehaviour, SwarmEvent},
@@ -104,9 +105,9 @@ pub struct MemberMeta {
 }
 
 #[derive(Codec)]
-pub struct RawChatMessage<'a> {
+pub struct RawChatMessage {
     pub sender: UserName,
-    pub content: &'a str,
+    pub content: String,
 }
 
 #[derive(Codec)]
@@ -129,6 +130,101 @@ pub enum MailVariants {
         cp: Ciphertext,
         payload: Vec<u8>,
     },
+}
+
+impl MailVariants {
+    pub async fn handle(
+        self,
+        ctx: &impl RequestContext,
+        requests: Requests,
+    ) -> Result<Option<(UserName, String, ChatName)>> {
+        match self {
+            MailVariants::ChatInvite { chat, cp } => {
+                let secret = ctx
+                    .with_keys(|k| k.enc.decapsulate_choosen(&cp))?
+                    .context("failed to decapsulate invite")?;
+                ctx.with_vault(|v| Ok(_ = v.chats.insert(chat, ChatMeta::from_secret(secret))))?;
+                Ok(None)
+            }
+            MailVariants::HardenedJoinRequest { cp, mut payload } => {
+                let secret = ctx
+                    .with_keys(|k| k.enc.decapsulate(&cp))?
+                    .context("failed to decapsulate invite")?;
+
+                let payload = crypto::decrypt(&mut payload, secret)
+                    .context("failed to decrypt join request payload")?;
+
+                let JoinRequestPayload { chat, name, identity, init_pk } =
+                    <_>::decode(&mut &*payload).context("failed to decode join request payload")?;
+
+                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
+
+                if ctx.with_vault(|v| Ok(!v.hardened_chats.contains_key(&chat)))? {
+                    anyhow::bail!("request to join chat we dont have");
+                }
+
+                ctx.with_vault(|v| {
+                    let chat = v.hardened_chats.get_mut(&chat).expect("we just checked");
+                    chat.members.insert(name, MemberMeta { dr, identity });
+                    Ok(None)
+                })
+            }
+            MailVariants::HardenedChatInvite { cp, mut payload } => {
+                log::debug!("handling hardened chat invite");
+                let secret = ctx
+                    .with_keys(|k| k.enc.decapsulate(&cp))?
+                    .context("failed to decapsulate hardened invite")?;
+
+                let payload = crypto::decrypt(&mut payload, secret)
+                    .context("failed to decrypt hardened invite")?;
+                let HardenedChatInvitePayload { chat, inviter, inviter_id, members, init_pk } =
+                    <_>::decode(&mut &*payload).context("failed to decode hardened invite")?;
+
+                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
+
+                let members = join_all(members.into_iter().map(|(name, id)| {
+                    requests
+                        .clone()
+                        .send_hardened_join_request(id, chat, ctx)
+                        .map_ok(move |dr| (name, dr))
+                }))
+                .await
+                .into_iter()
+                .collect::<anyhow::Result<Vec<_>>>()?;
+
+                ctx.with_vault(|v| {
+                    let meta = v.hardened_chats.entry(chat).or_default();
+                    members
+                        .into_iter()
+                        .for_each(|(name, secret)| _ = meta.members.insert(name, secret));
+                    meta.members.insert(inviter, MemberMeta { dr, identity: inviter_id });
+                    Ok(None)
+                })
+            }
+            MailVariants::HardenedChatMessage { nonce, chat, header, mut content } => ctx
+                .with_vault(|v| {
+                    let Some((&chat, meta)) = v
+                        .hardened_chats
+                        .iter_mut()
+                        .find(|(c, _)| crypto::hash::with_nonce(c.as_bytes(), nonce) == chat)
+                    else {
+                        log::warn!("received message for unknown chat");
+                        return Ok(None);
+                    };
+
+                    let Some((sender, content)) = meta.members.iter_mut().find_map(|(name, mm)| {
+                        let secret = mm.dr.recv_message(header, OsRng)?;
+                        let decrypted = crypto::decrypt(&mut content, secret)?;
+                        Some((*name, std::str::from_utf8(decrypted).ok()?.into()))
+                    }) else {
+                        log::warn!("received message for chat we are not in");
+                        return Ok(None);
+                    };
+
+                    Ok(Some((sender, content, chat)))
+                }),
+        }
+    }
 }
 
 #[derive(Codec)]
@@ -788,7 +884,7 @@ impl Requests {
         name: ChatName,
         cursor: &mut Cursor,
         ctx: impl RequestContext,
-    ) -> Result<Vec<(Identity, String)>> {
+    ) -> Result<Vec<RawChatMessage>> {
         let chat_meta =
             ctx.with_vault(|v| v.chats.get(&name).context("we are not part of the chat").copied())?;
 
@@ -800,8 +896,7 @@ impl Requests {
                 let message = chat_spec::Message::decode(&mut &message[..])?;
                 let mut content = message.content.0.to_owned();
                 let content = crypto::decrypt(&mut content, chat_meta.secret)?;
-                let content = std::str::from_utf8(content).ok()?;
-                Some((message.sender, content.to_owned()))
+                RawChatMessage::decode(&mut &*content)
             })
             .collect())
     }
@@ -879,46 +974,51 @@ impl Requests {
         name: ChatName,
         message: &[u8],
         ctx: impl RequestContext,
-    ) -> Result<()> {
+    ) -> Result<Vec<UserName>> {
         fn send_single_invite(
             name: ChatName,
             message: &[u8],
             meta: &mut MemberMeta,
             reqs: &Requests,
-        ) -> impl Future<Output = Result<(), ChatError>> {
+        ) -> impl Future<Output = Result<bool, ChatError>> {
             let mut content = message.to_vec();
-            let (header, secret) = meta.dr.send_message();
-            let tag = crypto::encrypt(&mut content, secret, OsRng);
-            content.extend(tag);
+            let payload = meta.dr.send_message();
 
             let nonce = OsRng.gen::<Nonce>();
             let identity = meta.identity;
             let mut reqs = reqs.clone();
             async move {
+                let Some((header, secret)) = payload else { return Ok(false) };
+                let tag = crypto::encrypt(&mut content, secret, OsRng);
+                content.extend(tag);
                 let mail = MailVariants::HardenedChatMessage {
                     nonce,
                     chat: crypto::hash::with_nonce(name.as_bytes(), nonce),
                     header,
                     content,
                 };
-                reqs.send_mail(identity, mail).await
+                reqs.send_mail(identity, mail).await.map(|()| true)
             }
         }
 
         let requests = ctx.with_vault(move |v| {
             let cm = v.hardened_chats.get_mut(&name).with_context(vault_chat_404(name))?;
-            let reqs =
-                cm.members.values_mut().map(|meta| send_single_invite(name, message, meta, self));
+            let reqs = cm.members.iter_mut().map(|(&unm, meta)| {
+                send_single_invite(name, message, meta, self).map_ok(move |b| (b, unm))
+            });
             Ok(futures::future::try_join_all(reqs))
         })?;
-        requests.await.map(drop).map_err(Into::into)
+        requests
+            .await
+            .map(|res| res.into_iter().filter_map(|(b, n)| b.then_some(n)).collect())
+            .map_err(Into::into)
     }
 
     pub async fn send_hardened_join_request(
         mut self,
         to: Identity,
         chat: ChatName,
-        ctx: impl RequestContext,
+        ctx: &impl RequestContext,
     ) -> Result<MemberMeta> {
         let identity = ctx.with_keys(UserKeys::identity_hash)?;
         let name = ctx.with_keys(|k| k.name)?;
@@ -1344,7 +1444,6 @@ impl TransactionHandler for WebSigner {
     ) -> Result<(), chain_api::Error> {
         let account_id = self.account_id_async().await?;
         let genesis_hash = chain_api::encode_then_hex(&inner.client.genesis_hash());
-        // These numbers aren't SCALE encoded; their bytes are just converted to hex:
         let spec_version =
             chain_api::to_hex(inner.client.runtime_version().spec_version.to_be_bytes());
         let transaction_version =

@@ -26,7 +26,7 @@ pub struct MessageHeader {
 }
 
 // TODO: encrypt headers
-#[derive(Codec, Default)]
+#[derive(Codec, Default, Clone)]
 pub struct DoubleRatchet {
     index: u32,
     root_chain: SharedSecret,

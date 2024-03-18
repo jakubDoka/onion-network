@@ -146,7 +146,8 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 return;
             };
 
-            let Some(RawChatMessage { sender, content }) = RawChatMessage::decode(&mut &*message)
+            let Some(RawChatMessage { sender, content, .. }) =
+                RawChatMessage::decode(&mut &*message)
             else {
                 log::warn!("message cannot be decoded: {:?}", message);
                 return;
@@ -374,7 +375,8 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let send_normal_message = move |chat, content: String| {
         handled_spawn_local("sending normal message", async move {
-            let content = RawChatMessage { sender: my_name, content }.to_bytes();
+            let content = RawChatMessage { sender: my_name, content, identity: Default::default() }
+                .to_bytes();
             requests().send_encrypted_message(chat, content, state).await?;
             clear_input();
             Ok(())
@@ -541,6 +543,7 @@ fn member_list_poppup(
         }
 
         members.get_untracked().unwrap().set_inner_html("");
+        cursor.set_value(Identity::default());
         load_members();
     });
 
@@ -624,8 +627,7 @@ fn editable_member(
     let kick = handled_async_callback(kick_ctx, move |_| async move {
         let name = name_sig.get_untracked().context("no chat selected")?;
         let mut requests = state.requests.get_value().unwrap();
-        let proof = state.next_chat_proof(name).context("getting chat proof")?;
-        requests.kick_member(proof, identity).await?;
+        requests.kick_member(name, identity, state).await?;
         root.get_untracked().unwrap().remove();
         Ok(())
     });

@@ -14,12 +14,11 @@ use {
     },
     anyhow::Context,
     chat_client_node::{BootPhase, MailVariants, Node, RequestContext, Requests, UserKeys, Vault},
-    chat_spec::{ChatName, Nonce, Proof, UserName},
+    chat_spec::{ChatName, Nonce, UserName},
     codec::{Codec, Reminder},
     leptos::*,
     leptos_router::{Route, Router, Routes, A},
     libp2p::futures::{FutureExt, StreamExt},
-    rand::rngs::OsRng,
     std::{cmp::Ordering, convert::identity, fmt::Display, future::Future, time::Duration},
     web_sys::wasm_bindgen::JsValue,
 };
@@ -86,19 +85,6 @@ impl State {
             let chat = v.chats.get_mut(&chat).expect("chat not found");
             chat.action_no = nonce;
         });
-    }
-
-    fn next_chat_proof(self, chat_name: ChatName) -> Option<chat_spec::Proof<ChatName>> {
-        self.keys
-            .try_with_untracked(|keys| {
-                let keys = keys.as_ref()?;
-                self.vault.try_update(|vault| {
-                    let chat = vault.chats.get_mut(&chat_name)?;
-                    Some(Proof::new(&keys.sign, &mut chat.action_no, chat_name, OsRng))
-                })
-            })
-            .flatten()
-            .flatten()
     }
 
     fn chat_secret(self, chat_name: ChatName) -> Option<crypto::SharedSecret> {

@@ -214,11 +214,16 @@ impl MailVariants {
                         return Ok(None);
                     };
 
-                    let Some((sender, content)) = meta.members.iter_mut().find_map(|(name, mm)| {
-                        let secret = mm.dr.recv_message(header, OsRng)?;
-                        let decrypted = crypto::decrypt(&mut content, secret)?;
-                        Some((*name, std::str::from_utf8(decrypted).ok()?.into()))
-                    }) else {
+                    let Some((sender, content)) =
+                        meta.members.iter_mut().find_map(|(&name, mm)| {
+                            let mut temp_dr = mm.dr.clone();
+                            let secret = temp_dr.recv_message(header, OsRng)?;
+                            let decrypted = crypto::decrypt(&mut content, secret)?;
+                            let message = std::str::from_utf8(decrypted).ok()?.into();
+                            mm.dr = temp_dr;
+                            Some((name, message))
+                        })
+                    else {
                         log::warn!("received message for chat we are not in");
                         return Ok(None);
                     };

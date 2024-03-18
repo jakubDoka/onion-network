@@ -107,6 +107,8 @@ pub struct MemberMeta {
 #[derive(Codec)]
 pub struct RawChatMessage {
     pub sender: UserName,
+    #[codec(skip)]
+    pub identity: Identity,
     pub content: String,
 }
 
@@ -897,6 +899,7 @@ impl Requests {
                 let mut content = message.content.0.to_owned();
                 let content = crypto::decrypt(&mut content, chat_meta.secret)?;
                 RawChatMessage::decode(&mut &*content)
+                    .map(|m| RawChatMessage { identity: message.sender, ..m })
             })
             .collect())
     }
@@ -1067,7 +1070,19 @@ impl Requests {
         self.dispatch(rpcs::ADD_MEMBER, Topic::Chat(proof.context), msg).await
     }
 
-    pub async fn kick_member(&mut self, proof: Proof<ChatName>, identity: Identity) -> Result<()> {
+    pub async fn kick_member(
+        &mut self,
+        from: ChatName,
+        identity: Identity,
+        ctx: impl RequestContext,
+    ) -> Result<()> {
+        let proof = ctx.with_vault(|v| {
+            let chat_meta = v.chats.get_mut(&from).with_context(vault_chat_404(from))?;
+            let action_no = &mut chat_meta.action_no;
+            let proof = ctx.with_keys(|k| Proof::new(&k.sign, action_no, from, OsRng))?;
+            Ok(proof)
+        })?;
+
         self.dispatch(rpcs::KICK_MEMBER, Topic::Chat(proof.context), (proof, identity)).await
     }
 
@@ -1244,6 +1259,24 @@ pub trait RequestContext {
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> Result<R>;
     fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R>;
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R>;
+}
+
+impl<T: RequestContext> RequestContext for &T {
+    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> Result<R>) -> Result<R> {
+        (*self).with_vault(action)
+    }
+
+    fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> Result<R> {
+        (*self).with_keys(action)
+    }
+
+    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
+        (*self).with_vault_version(action)
+    }
+
+    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
+        (*self).with_mail_action(action)
+    }
 }
 
 pub type RequestStream = mpsc::Receiver<RequestInit>;

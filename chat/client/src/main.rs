@@ -50,7 +50,6 @@ struct State {
 
 type Result<T> = anyhow::Result<T>;
 
-// TODO: emmit errors instead of unwraps
 impl RequestContext for State {
     fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> Result<R>) -> Result<R> {
         self.vault

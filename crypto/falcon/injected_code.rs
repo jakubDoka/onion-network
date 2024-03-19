@@ -183,17 +183,17 @@ mod tests {
 
     impl RngCore for TotallyRandom {
         fn next_u32(&mut self) -> u32 {
-            todo!()
+            unimplemented!()
         }
 
         fn next_u64(&mut self) -> u64 {
-            todo!()
+            unimplemented!()
         }
 
         fn fill_bytes(&mut self, _: &mut [u8]) {}
 
         fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
-            todo!()
+            unimplemented!()
         }
     }
 

@@ -107,7 +107,7 @@ config::env_config! {
         exposed_address: IpAddr,
         port: u16,
         nonce: u64,
-        chain_node: String,
+        chain_nodes: config::List<String>,
         node_account: String,
         node_contract: ContractId,
     }
@@ -157,7 +157,7 @@ async fn deal_with_chain(
     keys: &NodeKeys,
     is_new: bool,
 ) -> anyhow::Result<(Vec<(NodeData, NodeAddress)>, StakeEvents)> {
-    let ChainConfig { chain_node, node_account, node_contract, port, exposed_address, nonce } =
+    let ChainConfig { chain_nodes, node_account, node_contract, port, exposed_address, nonce } =
         config;
     let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
     let account = if node_account.starts_with("//") {
@@ -166,20 +166,18 @@ async fn deal_with_chain(
         chain_api::mnemonic_keypair(&node_account)
     };
 
-    let client = chain_api::Client::with_signer(&chain_node, account)
-        .await
-        .context("connecting to chain")?;
+    let mut others = chain_nodes.0.into_iter();
 
-    let node_list = client.list(node_contract.clone()).await.context("fetching node list")?;
-
-    let stream = client.node_contract_event_stream(node_contract.clone()).await?;
-    tokio::spawn(async move {
-        let mut stream = std::pin::pin!(stream);
-        // TODO: properly recover fro errors, add node pool to try
-        while let Some(event) = stream.next().await {
-            _ = chain_events_tx.send(event).await;
+    let (node_list, client) = 'a: {
+        for node in others.by_ref() {
+            let Ok(client) = chain_api::Client::with_signer(&node, account.clone()).await else {
+                continue;
+            };
+            let Ok(node_list) = client.list(node_contract.clone()).await else { continue };
+            break 'a (node_list, client);
         }
-    });
+        anyhow::bail!("failed to fetch node list");
+    };
 
     if is_new {
         let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
@@ -189,6 +187,30 @@ async fn deal_with_chain(
             .context("registeing to chain")?;
         log::info!("registered on chain");
     }
+
+    tokio::spawn(async move {
+        let mut stream = client.node_contract_event_stream(node_contract.clone()).await;
+        loop {
+            if let Ok(mut stream) = stream {
+                let mut stream = std::pin::pin!(stream);
+                while let Some(event) = stream.next().await {
+                    _ = chain_events_tx.send(event).await;
+                }
+            }
+
+            let Some(next) = others.next() else {
+                log::error!("failed to reconnect to chain");
+                std::process::exit(1);
+            };
+
+            let Ok(client) = chain_api::Client::with_signer(&next, account.clone()).await else {
+                stream = Err(chain_api::Error::Other("failed to reconnect to chain".into()));
+                continue;
+            };
+
+            stream = client.node_contract_event_stream(node_contract.clone()).await;
+        }
+    });
 
     log::info!("entered the network with {} nodes", node_list.len());
 

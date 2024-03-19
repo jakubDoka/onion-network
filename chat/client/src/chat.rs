@@ -146,14 +146,12 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 return;
             };
 
-            let Some(RawChatMessage { sender, content, .. }) =
-                RawChatMessage::decode(&mut &*message)
-            else {
+            let Some(msg) = RawChatMessage::decode(&mut &*message) else {
                 log::warn!("message cannot be decoded: {:?}", message);
                 return;
             };
 
-            append_message(sender, content);
+            append_message(msg.sender, msg.content);
         }
         ChatEvent::Member(identiy, member) => {
             if identiy == my_id {

@@ -113,6 +113,7 @@ pub struct RawChatMessage {
 }
 
 #[derive(Codec)]
+#[allow(clippy::large_enum_variant)]
 pub enum MailVariants {
     ChatInvite {
         chat: ChatName,
@@ -406,20 +407,25 @@ impl Node {
             _ = swarm.dial(route);
         }
 
-        loop {
-            // TODO: add timeout instead
-            match swarm.select_next_some().await {
-                SwarmEvent::Behaviour(BehaviourEvent::KeyShare(..)) => {
-                    let remining =
-                        node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance;
-                    set_state!(CollecringKeys(remining));
-                    if remining == 0 {
-                        break;
+        _ = timeout(
+            async {
+                loop {
+                    match swarm.select_next_some().await {
+                        SwarmEvent::Behaviour(BehaviourEvent::KeyShare(..)) => {
+                            let remining =
+                                node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance;
+                            set_state!(CollecringKeys(remining));
+                            if remining == 0 {
+                                break;
+                            }
+                        }
+                        e => log::debug!("{:?}", e),
                     }
                 }
-                e => log::debug!("{:?}", e),
-            }
-        }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
 
         let nodes = &swarm.behaviour_mut().key_share.keys;
         anyhow::ensure!(
@@ -711,7 +717,8 @@ impl Node {
                 id,
             ))) => {
                 if let Some(req) = self.pending_topic_search.remove(&id) {
-                    let (stream, peer_id) = stream.expect("TODO: somehow report this error");
+                    let Ok((stream, peer_id)) = stream else { return };
+
                     self.subscriptions.push(Subscription {
                         id,
                         peer_id,
@@ -1149,7 +1156,7 @@ impl Requests {
     pub async fn subscribe(
         &mut self,
         topic: impl Into<Topic>,
-    ) -> Result<mpsc::Receiver<SubscriptionMessage>> {
+    ) -> anyhow::Result<mpsc::Receiver<SubscriptionMessage>> {
         let (tx, mut rx) = mpsc::channel(0);
         let id = CallId::new();
         let topic: Topic = topic.into();

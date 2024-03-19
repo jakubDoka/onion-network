@@ -13,7 +13,9 @@ use {
         profile::Profile,
     },
     anyhow::Context,
-    chat_client_node::{BootPhase, MailVariants, Node, RequestContext, Requests, UserKeys, Vault},
+    chat_client_node::{
+        BootPhase, MailVariants, Node, RequestContext, Requests, UserKeys, Vault, VaultComponentId,
+    },
     chat_spec::{ChatName, Nonce, UserName},
     codec::{Codec, Reminder},
     leptos::*,
@@ -100,16 +102,19 @@ fn App() -> impl IntoView {
     async fn handle_mail(
         mut raw_mail: &[u8],
         new_messages: &mut Vec<db::Message>,
+        vault_updates: &mut Vec<VaultComponentId>,
         state: State,
     ) -> Result<()> {
         let mail = MailVariants::decode(&mut raw_mail).context("decoding mail")?;
         let dispatch = state.requests.get_value().context("no dispatch")?;
-        if let Some((sender, content, chat)) = mail.handle(&state, dispatch).await? {
+        let (message, change) = mail.handle(&state, dispatch).await?;
+        if let Some((sender, content, chat)) = message {
             let message =
                 db::Message { sender, owner: state.with_keys(|k| k.name)?, content, chat };
             new_messages.push(message.clone());
             state.hardened_messages.set(Some((chat, message)));
         }
+        vault_updates.extend(change);
         Ok(())
     }
 
@@ -129,10 +134,19 @@ fn App() -> impl IntoView {
             handled_spawn_local("reading mail", async move {
                 let Reminder(list) = dispatch_clone.read_mail(state).await?;
                 let mut new_messages = Vec::new();
+                let mut vault_updates = Vec::new();
                 for mail in chat_spec::unpack_mail(list) {
-                    handle_error(handle_mail(mail, &mut new_messages, state).await);
+                    handle_error(
+                        handle_mail(mail, &mut new_messages, &mut vault_updates, state).await,
+                    );
                 }
-                db::save_messages(new_messages).await
+                db::save_messages(new_messages).await?;
+                vault_updates.sort_unstable();
+                vault_updates.dedup();
+                for update in vault_updates {
+                    dispatch_clone.save_vault_component(update, &state).await?;
+                }
+                Ok(())
             });
 
             let mut dispatch_clone = dispatch.clone();
@@ -142,8 +156,15 @@ fn App() -> impl IntoView {
                     dispatch_clone.subscribe(identity).await.context("subscribing to profile")?;
                 while let Some(mail) = account.next().await {
                     let mut new_messages = Vec::new();
-                    handle_error(handle_mail(&mail, &mut new_messages, state).await);
+                    let mut vault_updates = Vec::new();
+                    handle_error(
+                        handle_mail(&mail, &mut new_messages, &mut vault_updates, state).await,
+                    );
                     handle_error(db::save_messages(new_messages).await);
+
+                    for update in vault_updates {
+                        dispatch_clone.save_vault_component(update, &state).await?;
+                    }
                 }
 
                 anyhow::Result::Ok(())

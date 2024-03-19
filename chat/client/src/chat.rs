@@ -310,14 +310,14 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         move || true,
         move |chat| async move {
             let Ok(chat) = ChatName::try_from(chat.as_str()) else {
-                anyhow::bail!("invalid chat name");
+                anyhow::bail!("invalid hardened chat name");
             };
 
             if state.vault.with_untracked(|v| v.hardened_chats.contains_key(&chat)) {
-                anyhow::bail!("chat already exists");
+                anyhow::bail!("hardened chat already exists");
             }
 
-            state.vault.update(|v| _ = v.hardened_chats.insert(chat, Default::default()));
+            requests().create_hardened_chat(chat, state).await.context("creating hardened chat")?;
 
             Ok(())
         },

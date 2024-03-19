@@ -1,12 +1,10 @@
 use {
     crate::OnlineLocation,
-    chat_spec::{
-        advance_nonce, rpcs, BorrowedProfile, ChatError, FetchProfileResp, Identity, Mail, Profile,
-        Proof,
-    },
+    chat_spec::{advance_nonce, rpcs, ChatError, FetchProfileResp, Identity, Mail, Profile, Proof},
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::mapref::entry::Entry,
     libp2p::futures::StreamExt,
+    std::collections::BTreeMap,
 };
 
 const MAIL_BOX_CAP: usize = 1024 * 1024;
@@ -16,9 +14,14 @@ type Result<T, E = ChatError> = std::result::Result<T, E>;
 pub async fn create(
     cx: super::Context,
     identity: Identity,
-    (proof, enc): (Proof<&[u8]>, crypto::enc::PublicKey),
+    (proof, vault, enc): (Proof<crypto::Hash>, Vec<&[u8]>, crypto::enc::PublicKey),
 ) -> Result<()> {
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
+
+    let vault =
+        vault.into_iter().map(|b| (crypto::hash::new(b), b.to_vec())).collect::<BTreeMap<_, _>>();
+    let vault_hash = vault.keys().copied().reduce(crypto::hash::combine).unwrap_or_default();
+    crate::ensure!(vault_hash == proof.context, ChatError::InvalidProof);
 
     match cx.profiles.entry(identity) {
         Entry::Vacant(entry) => {
@@ -28,7 +31,7 @@ pub async fn create(
                 vault_sig: proof.signature,
                 vault_version: proof.nonce,
                 mail_action: proof.nonce,
-                vault: proof.context.to_vec(),
+                vault,
                 mail: Vec::new(),
             });
             Ok(())
@@ -38,29 +41,50 @@ pub async fn create(
             account.vault_version = proof.nonce;
             account.vault_sig = proof.signature;
             account.vault.clear();
-            account.vault.extend(proof.context);
+            account.vault = vault;
             Ok(())
         }
         _ => Err(ChatError::AlreadyExists),
     }
 }
 
-pub async fn set_vault(cx: super::Context, proof: Proof<Reminder<'_>>) -> Result<()> {
+pub async fn update_vault(
+    cx: crate::Context,
+    identity: Identity,
+    (proof, old_hash, value): (Proof<crypto::Hash>, crypto::Hash, Option<Reminder<'_>>),
+) -> Result<()> {
+    let mut profile = cx.profiles.get_mut(&identity).ok_or(ChatError::NotFound)?;
+
     crate::ensure!(proof.verify(), ChatError::InvalidProof);
 
-    let identity = crypto::hash::new(proof.pk);
-    let profile = cx.profiles.get_mut(&identity);
+    if old_hash != crypto::Hash::default() {
+        crate::ensure!(profile.vault.contains_key(&old_hash), ChatError::NotFound);
+    }
 
-    crate::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
+    if let Some(value) = value {
+        profile.vault.insert(crypto::hash::new(value.0), Vec::new());
+    }
 
+    let hash = profile
+        .vault
+        .keys()
+        .copied()
+        .filter(|&h| h != old_hash)
+        .reduce(crypto::hash::combine)
+        .unwrap_or_default();
+    crate::ensure!(hash == proof.context, ChatError::InvalidProof);
     crate::ensure!(
         advance_nonce(&mut profile.vault_version, proof.nonce),
         ChatError::InvalidAction
     );
-    profile.vault_sig = proof.signature;
 
-    profile.vault.clear();
-    profile.vault.extend_from_slice(proof.context.0);
+    if old_hash != crypto::Hash::default() {
+        profile.vault.remove(&old_hash);
+    }
+    if let Some(value) = value {
+        profile.vault.insert(crypto::hash::new(value.0), value.0.to_vec());
+    }
+    profile.vault_sig = proof.signature;
 
     Ok(())
 }
@@ -88,16 +112,15 @@ pub async fn fetch_keys(cx: super::Context, identity: Identity, _: ()) -> Result
 }
 
 pub async fn fetch_vault(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {
-    log::info!(
-        "fetching vault for {:?} {:?}",
-        identity,
-        cx.profiles.iter().map(|e| *e.key()).collect::<Vec<_>>()
-    );
     cx.profiles
         .get(&identity)
         .ok_or(ChatError::NotFound)
         .map(|p| {
-            (p.value().vault_version, p.value().mail_action, Reminder(p.value().vault.as_slice()))
+            (
+                p.value().vault_version,
+                p.value().mail_action,
+                p.value().vault.values().collect::<Vec<_>>(),
+            )
                 .to_bytes()
         })
         .map(ReminderOwned)
@@ -159,7 +182,7 @@ pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
     let mut profiles = cx.repl_rpc(identity, rpcs::FETCH_PROFILE_FULL, identity).await;
     let mut latest_profile = None::<Profile>;
     while let Some((peer, Ok(resp))) = profiles.next().await {
-        let Some(profile_res) = Result::<BorrowedProfile>::decode(&mut resp.as_slice()) else {
+        let Some(profile_res) = Result::<Profile>::decode(&mut resp.as_slice()) else {
             log::warn!("invalid profile encoding from {:?}", peer);
             continue;
         };
@@ -184,10 +207,10 @@ pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
 
         if let Some(best) = latest_profile.as_ref() {
             if best.vault_version < profile.vault_version {
-                latest_profile = Some(profile.into());
+                latest_profile = Some(profile);
             }
         } else {
-            latest_profile = Some(profile.into());
+            latest_profile = Some(profile);
         }
     }
 

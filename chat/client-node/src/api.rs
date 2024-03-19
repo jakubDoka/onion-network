@@ -92,7 +92,7 @@ impl Api {
     #[wasm_bindgen]
     pub async fn create_hardened_chat(&mut self, chat_name: &str) -> Result<(), JsValue> {
         let chat = parse_chat_name(chat_name)?;
-        self.reqs.create_hardned_chat(chat, self.ctx.as_ref()).await.map_err(err_to_js)
+        self.reqs.create_hardened_chat(chat, self.ctx.as_ref()).await.map_err(err_to_js)
     }
 
     /// @throw
@@ -340,9 +340,17 @@ impl ProfileSubscription {
                 continue;
             };
 
-            if let Some((username, message, chatname)) =
-                mail.handle(self.context.as_ref(), self.reqs.clone()).await.map_err(err_to_js)?
-            {
+            let (message, id) =
+                mail.handle(self.context.as_ref(), self.reqs.clone()).await.map_err(err_to_js)?;
+
+            if let Some(vid) = id {
+                self.reqs
+                    .save_vault_component(vid, self.context.as_ref())
+                    .await
+                    .map_err(err_to_js)?;
+            }
+
+            if let Some((username, message, chatname)) = message {
                 return Ok(HardenedChatMessage {
                     sender: username.to_string(),
                     content: message.to_string(),
@@ -422,6 +430,7 @@ struct Member {
     inner: chat_spec::Member,
 }
 
+#[allow(non_snake_case)]
 #[wasm_bindgen]
 impl Member {
     #[wasm_bindgen]

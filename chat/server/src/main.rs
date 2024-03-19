@@ -358,7 +358,7 @@ impl Server {
                     rpcs::CREATE_PROFILE => create.repl();
                     rpcs::SEND_MAIL => send_mail.repl().restore();
                     rpcs::READ_MAIL => read_mail.repl().restore();
-                    rpcs::SET_VAULT => set_vault.repl().restore();
+                    rpcs::UPDATE_VAULT => update_vault.repl().restore();
                     rpcs::FETCH_PROFILE => fetch_keys.restore();
                     rpcs::FETCH_VAULT => fetch_vault.restore();
                 };
@@ -377,7 +377,7 @@ impl Server {
                     rpcs::CREATE_PROFILE => create;
                     rpcs::SEND_MAIL => send_mail.restore();
                     rpcs::READ_MAIL => read_mail.restore();
-                    rpcs::SET_VAULT => set_vault.restore();
+                    rpcs::UPDATE_VAULT => update_vault.restore();
                     rpcs::FETCH_PROFILE_FULL => fetch_full;
                 };
             ),

@@ -4,7 +4,7 @@ use {
     chain_api::{RawUserName, USER_NAME_CAP},
     codec::Codec,
     crypto::{enc, sign},
-    std::iter,
+    std::{collections::BTreeMap, iter},
 };
 
 pub const MAIL_BOX_CAP: usize = 1024 * 1024;
@@ -18,19 +18,51 @@ pub struct Profile {
     pub vault_sig: sign::Signature,
     pub vault_version: Nonce,
     pub mail_action: Nonce,
-    pub vault: Vec<u8>,
+    #[codec(with = profile_vault_codec)]
+    pub vault: BTreeMap<crypto::Hash, Vec<u8>>,
     pub mail: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Codec)]
-pub struct BorrowedProfile<'a> {
-    pub sign: sign::PublicKey,
-    pub enc: enc::PublicKey,
-    pub last_sig: sign::Signature,
-    pub vault_version: Nonce,
-    pub mail_action: Nonce,
-    pub vault: &'a [u8],
-    pub mail: &'a [u8],
+impl Profile {
+    pub fn is_valid(&self) -> bool {
+        Proof {
+            pk: self.sign,
+            context: Self::vault_hash(&self.vault),
+            nonce: self.vault_version,
+            signature: self.vault_sig,
+        }
+        .verify()
+    }
+
+    pub fn vault_hash(values: &BTreeMap<crypto::Hash, Vec<u8>>) -> crypto::Hash {
+        values.keys().copied().reduce(crypto::hash::combine).unwrap_or_default()
+    }
+}
+
+mod profile_vault_codec {
+    use codec::{Buffer, Codec};
+
+    pub fn encode(
+        values: &std::collections::BTreeMap<crypto::Hash, Vec<u8>>,
+        buffer: &mut impl Buffer,
+    ) -> Option<()> {
+        values.len().encode(buffer)?;
+        for v in values.values() {
+            v.encode(buffer)?;
+        }
+        Some(())
+    }
+
+    pub fn decode(buffer: &mut &[u8]) -> Option<std::collections::BTreeMap<crypto::Hash, Vec<u8>>> {
+        let len = usize::decode(buffer)?;
+        let mut values = std::collections::BTreeMap::new();
+        for _ in 0..len {
+            let value = Vec::<u8>::decode(buffer)?;
+            let key = crypto::hash::new(&value);
+            values.insert(key, value);
+        }
+        Some(values)
+    }
 }
 
 impl Profile {
@@ -48,47 +80,6 @@ impl Profile {
     pub fn push_mail(&mut self, content: &[u8]) {
         self.mail.extend((content.len() as u16).to_be_bytes());
         self.mail.extend_from_slice(content);
-    }
-}
-
-impl<'a> From<&'a Profile> for BorrowedProfile<'a> {
-    fn from(profile: &'a Profile) -> Self {
-        Self {
-            sign: profile.sign,
-            enc: profile.enc,
-            last_sig: profile.vault_sig,
-            vault_version: profile.vault_version,
-            mail_action: profile.mail_action,
-            vault: profile.vault.as_slice(),
-            mail: profile.mail.as_slice(),
-        }
-    }
-}
-
-impl<'a> BorrowedProfile<'a> {
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        Proof {
-            pk: self.sign,
-            signature: self.last_sig,
-            nonce: self.vault_version,
-            context: self.vault,
-        }
-        .verify()
-    }
-}
-
-impl<'a> From<BorrowedProfile<'a>> for Profile {
-    fn from(profile: BorrowedProfile<'a>) -> Self {
-        Self {
-            sign: profile.sign,
-            enc: profile.enc,
-            vault_sig: profile.last_sig,
-            vault_version: profile.vault_version,
-            mail_action: profile.mail_action,
-            vault: profile.vault.to_vec(),
-            mail: profile.mail.to_vec(),
-        }
     }
 }
 

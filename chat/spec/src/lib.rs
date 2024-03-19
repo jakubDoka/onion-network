@@ -44,7 +44,7 @@ pub mod rpcs {
         CREATE_PROFILE;
         SEND_MAIL;
         READ_MAIL;
-        SET_VAULT;
+        UPDATE_VAULT;
 
         SUBSCRIBE;
         UNSUBSCRIBE;

@@ -23,7 +23,6 @@ serde_json = "1.0.108"
 wasm-bindgen-futures = "0.4.38"
 
 libp2p = { workspace = true, features = ["noise", "macros", "yamux", "wasm-bindgen"] }
-rand = "0.8.5"
 anyhow = { workspace = true }
 
 crypto = { workspace = true }
@@ -31,7 +30,6 @@ chat-spec = { workspace = true }
 component-utils = { workspace = true }
 chat-client-node = { workspace = true }
 codec.workspace = true
-double-ratchet = { version = "0.1.0", path = "../../crypto/double-ratchet" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
 workspace = true

@@ -307,11 +307,13 @@ impl MailVariants {
 
                     let Some((sender, content)) =
                         meta.members.iter_mut().find_map(|(&name, mm)| {
+                            log::debug!("trying to decrypt message for {}", name);
                             let mut temp_dr = mm.dr.clone();
                             let secret = temp_dr.recv_message(header, OsRng)?;
                             let decrypted = crypto::decrypt(&mut content, secret)?;
                             let message = std::str::from_utf8(decrypted).ok()?.into();
                             mm.dr = temp_dr;
+                            log::debug!("message from {}: {}", name, message);
                             Some((name, message))
                         })
                     else {
@@ -1057,11 +1059,12 @@ impl Requests {
         let tag = crypto::encrypt(&mut payload, ss, OsRng);
         payload.extend(tag);
 
-        let mail = MailVariants::HardenedChatInvite { cp, payload };
-        self.send_mail(to, mail).await.context("sending invite")?;
         self.save_vault_component(VaultComponentId::HardenedChat(name), &ctx)
             .await
             .context("saving vault")?;
+
+        let mail = MailVariants::HardenedChatInvite { cp, payload };
+        self.send_mail(to, mail).await.context("sending invite")?;
 
         Ok(())
     }
@@ -1085,7 +1088,7 @@ impl Requests {
             let identity = meta.identity;
             let mut reqs = reqs.clone();
             async move {
-                let Some((header, secret)) = payload else { return Ok(false) };
+                let Some((header, secret)) = payload else { return Ok(true) };
                 let tag = crypto::encrypt(&mut content, secret, OsRng);
                 content.extend(tag);
                 let mail = MailVariants::HardenedChatMessage {
@@ -1094,7 +1097,7 @@ impl Requests {
                     header,
                     content,
                 };
-                reqs.send_mail(identity, mail).await.map(|()| true)
+                reqs.send_mail(identity, mail).await.map(|()| false)
             }
         }
 
@@ -1262,7 +1265,7 @@ impl Requests {
 
     pub fn unsubscribe(&mut self, topic: impl Into<Topic>) {
         let topic: Topic = topic.into();
-        self.sink.try_send(RequestInit::EndSubscription(topic)).unwrap();
+        _ = self.sink.try_send(RequestInit::EndSubscription(topic));
     }
 
     async fn create_chat(&mut self, name: ChatName, me: Identity) -> Result<()> {
@@ -1618,7 +1621,7 @@ impl TransactionHandler for WebSigner {
             .submit_and_watch()
             .await?;
 
-        chain_api::wait_for_in_block(progress).await.map(drop)
+        chain_api::wait_for_in_block(progress, true).await.map(drop)
     }
 }
 

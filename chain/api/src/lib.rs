@@ -10,10 +10,7 @@ pub use {
     subxt_signer::sr25519::{Keypair, Signature},
 };
 use {
-    chain_types::{
-        polkadot::{self},
-        Hash,
-    },
+    chain_types::{polkadot, Hash},
     futures::{StreamExt, TryFutureExt, TryStreamExt},
     std::str::FromStr,
     subxt::{
@@ -88,7 +85,7 @@ impl TransactionHandler for Keypair {
             .submit_and_watch()
             .await?;
 
-        wait_for_in_block(progress).await.map(drop)
+        wait_for_in_block(progress, false).await.map(drop)
     }
 }
 
@@ -109,10 +106,11 @@ impl TransactionHandler for () {
 
 pub async fn wait_for_in_block(
     mut progress: TxProgress<Config, OnlineClient<Config>>,
+    finalized: bool,
 ) -> Result<Hash> {
     while let Some(event) = progress.next().await {
         match event? {
-            subxt::tx::TxStatus::InBestBlock(b) => {
+            subxt::tx::TxStatus::InBestBlock(b) if !finalized => {
                 return b.wait_for_success().await.map(|r| r.extrinsic_hash());
             }
             subxt::tx::TxStatus::InFinalizedBlock(b) => {
@@ -179,6 +177,7 @@ impl<S: TransactionHandler> Client<S> {
                             .events()
                             .await?
                             .iter()
+                            .filter(|e| e.as_ref().map_or(true, |e| e.pallet_name() == "Staker"))
                             .map(|e| e.and_then(|e| e.as_root_event::<chain_types::Event>()))
                             .filter_map(|e| match e {
                                 Ok(chain_types::Event::Staker(e)) => Some(Ok(e)),

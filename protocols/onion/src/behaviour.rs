@@ -334,7 +334,7 @@ component_utils::gen_config! {
     /// The maximum interval between two packets before the connection is considered dead.
     keep_alive_interval: std::time::Duration = std::time::Duration::from_secs(30),
     /// size of the buffer for forwarding packets.
-    buffer_cap: usize = 1 << 13,
+    buffer_cap: usize = 1 << 16,
     /// Dial instead of emmiting a connection request.
     dial: bool = true,
 }

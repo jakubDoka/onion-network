@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(non_snake_case)]
 
 use {
     crate::{MailVariants, RawChatMessage, RequestContext, SubscriptionMessage},
@@ -430,7 +431,6 @@ struct Member {
     inner: chat_spec::Member,
 }
 
-#[allow(non_snake_case)]
 #[wasm_bindgen]
 impl Member {
     #[wasm_bindgen]

@@ -150,7 +150,7 @@ impl DoubleRatchet {
                 return self.find_missing_message(message);
             }
         } else {
-            self.add_missing_message(message.prev_sub_count);
+            self.add_missing_message(message.prev_sub_count)?;
 
             let reciever_rachet_input =
                 self.rachet_key.decapsulate(message.current_key, message.cp)?;
@@ -170,7 +170,7 @@ impl DoubleRatchet {
             return None;
         }
 
-        self.add_missing_message(message.sub_index);
+        self.add_missing_message(message.sub_index)?;
         Some(kdf_sc(&mut self.receiver_chain))
     }
 
@@ -201,8 +201,11 @@ impl DoubleRatchet {
             .map(|i| self.missing_messages.remove(i).1)
     }
 
-    fn add_missing_message(&mut self, latest_index: u32) {
-        assert!(latest_index >= self.receiver_chain_index);
+    #[must_use]
+    fn add_missing_message(&mut self, latest_index: u32) -> Option<()> {
+        if latest_index < self.receiver_chain_index {
+            return None;
+        }
 
         for sub_index in self.receiver_chain_index..latest_index {
             if let Err(val) = self.missing_messages.try_push((
@@ -215,6 +218,8 @@ impl DoubleRatchet {
         }
 
         self.receiver_chain_index = latest_index + 1;
+
+        Some(())
     }
 }
 

@@ -177,17 +177,8 @@ async fn deal_with_chain(
         anyhow::bail!("failed to fetch node list");
     };
 
-    if is_new {
-        let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
-        client
-            .join(keys.to_stored(), (exposed_address, port).into(), nonce)
-            .await
-            .context("registeing to chain")?;
-        log::info!("registered on chain");
-    }
-
+    let mut stream = client.node_contract_event_stream().await;
     tokio::spawn(async move {
-        let mut stream = client.node_contract_event_stream().await;
         loop {
             if let Ok(mut stream) = stream {
                 let mut stream = std::pin::pin!(stream);
@@ -209,6 +200,15 @@ async fn deal_with_chain(
             stream = client.node_contract_event_stream().await;
         }
     });
+
+    if is_new {
+        let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
+        client
+            .join(keys.to_stored(), (exposed_address, port).into(), nonce)
+            .await
+            .context("registeing to chain")?;
+        log::info!("registered on chain");
+    }
 
     log::info!("entered the network with {} nodes", node_list.len());
 

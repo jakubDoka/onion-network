@@ -1,3 +1,6 @@
 [submodule "forked/substrate-node-template"]
 	path = chain/substrate-node-template
 	url = git@github.com:jakubDoka/minimal-contract-chain.git
+[submodule "chain/substrate-tests"]
+	path = chain/substrate-tests
+	url = https://github.com/ghe0/substrate-tests

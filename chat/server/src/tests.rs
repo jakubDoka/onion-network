@@ -435,9 +435,14 @@ fn create_nodes(count: usize) -> FuturesUnordered<Server> {
     let nodes = node_data
         .iter()
         .map(|(config, keys)| {
-            (keys.to_stored(), (IpAddr::from(Ipv4Addr::LOCALHOST), config.port).into())
+            let NodeData { id, .. } = keys.to_stored();
+            Stake {
+                id,
+                addr: (IpAddr::from(Ipv4Addr::LOCALHOST), config.port).into(),
+                ..Stake::fake()
+            }
         })
-        .collect::<Vec<(NodeData, NodeAddress)>>();
+        .collect::<Vec<_>>();
 
     node_data
         .into_iter()

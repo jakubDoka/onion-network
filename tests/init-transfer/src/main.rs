@@ -4,14 +4,14 @@ async fn main() {
         struct Config {
             test_wallets: config::List<chain_api::AccountId>,
             balance: u128,
-            chain_node: String,
+            chain_nodes: String,
         }
     }
 
-    let Config { test_wallets, balance, chain_node } = Config::from_env();
+    let Config { test_wallets, balance, chain_nodes } = Config::from_env();
 
     let client =
-        chain_api::Client::with_signer(chain_node.as_str(), chain_api::dev_keypair("//Bob"))
+        chain_api::Client::with_signer(chain_nodes.as_str(), chain_api::dev_keypair("//Bob"))
             .await
             .unwrap();
 

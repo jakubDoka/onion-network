@@ -15,7 +15,7 @@ use {
     self::handlers::{chat::Chat, MissingTopic},
     crate::handlers::{Handler, Router},
     anyhow::Context as _,
-    chain_api::{ContractId, NodeAddress, NodeData},
+    chain_api::{NodeData, Stake},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
     crypto::{enc, sign},
@@ -109,7 +109,6 @@ config::env_config! {
         nonce: u64,
         chain_nodes: config::List<String>,
         node_account: String,
-        node_contract: ContractId,
     }
 }
 
@@ -156,9 +155,8 @@ async fn deal_with_chain(
     config: ChainConfig,
     keys: &NodeKeys,
     is_new: bool,
-) -> anyhow::Result<(Vec<(NodeData, NodeAddress)>, StakeEvents)> {
-    let ChainConfig { chain_nodes, node_account, node_contract, port, exposed_address, nonce } =
-        config;
+) -> anyhow::Result<(Vec<Stake>, StakeEvents)> {
+    let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = config;
     let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
     let account = if node_account.starts_with("//") {
         chain_api::dev_keypair(&node_account)
@@ -173,7 +171,7 @@ async fn deal_with_chain(
             let Ok(client) = chain_api::Client::with_signer(&node, account.clone()).await else {
                 continue;
             };
-            let Ok(node_list) = client.list(node_contract.clone()).await else { continue };
+            let Ok(node_list) = client.list_nodes().await else { continue };
             break 'a (node_list, client);
         }
         anyhow::bail!("failed to fetch node list");
@@ -182,14 +180,14 @@ async fn deal_with_chain(
     if is_new {
         let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
         client
-            .join(node_contract.clone(), keys.to_stored(), (exposed_address, port).into(), nonce)
+            .join(keys.to_stored(), (exposed_address, port).into(), nonce)
             .await
             .context("registeing to chain")?;
         log::info!("registered on chain");
     }
 
     tokio::spawn(async move {
-        let mut stream = client.node_contract_event_stream(node_contract.clone()).await;
+        let mut stream = client.node_contract_event_stream().await;
         loop {
             if let Ok(mut stream) = stream {
                 let mut stream = std::pin::pin!(stream);
@@ -208,7 +206,7 @@ async fn deal_with_chain(
                 continue;
             };
 
-            stream = client.node_contract_event_stream(node_contract.clone()).await;
+            stream = client.node_contract_event_stream().await;
         }
     });
 
@@ -238,7 +236,7 @@ impl Server {
     fn new(
         config: NodeConfig,
         keys: NodeKeys,
-        node_list: Vec<(NodeData, NodeAddress)>,
+        node_list: Vec<Stake>,
         stake_events: StakeEvents,
     ) -> anyhow::Result<Self> {
         let NodeConfig { port, ws_port, boot_nodes, idle_timeout, .. } = config;
@@ -321,9 +319,9 @@ impl Server {
 
         let node_data = node_list
             .into_iter()
-            .map(|(node, addr)| {
-                let pk = unpack_node_id(node.id)?;
-                let addr = unpack_node_addr(addr);
+            .map(|stake| {
+                let pk = unpack_node_id(stake.id)?;
+                let addr = unpack_node_addr(stake.addr);
                 Ok(Route::new(pk, addr))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -544,17 +542,17 @@ impl Server {
         };
 
         match event {
-            chain_api::StakeEvent::Joined(j) => {
-                let Ok(pk) = unpack_node_id(j.identity) else {
+            chain_api::StakeEvent::Joined { identity, addr } => {
+                let Ok(pk) = unpack_node_id(identity) else {
                     log::warn!("invalid node id");
                     return;
                 };
                 log::debug!("node joined the network: {pk:?}");
-                let route = Route::new(pk, unpack_node_addr(j.addr));
+                let route = Route::new(pk, unpack_node_addr(addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
-            chain_api::StakeEvent::Reclaimed(r) => {
-                let Ok(pk) = unpack_node_id(r.identity) else {
+            chain_api::StakeEvent::Reclaimed { identity } => {
+                let Ok(pk) = unpack_node_id(identity) else {
                     log::warn!("invalid node id");
                     return;
                 };
@@ -565,13 +563,13 @@ impl Server {
                     .table
                     .remove(libp2p::identity::PublicKey::from(pk).to_peer_id());
             }
-            chain_api::StakeEvent::AddrChanged(c) => {
-                let Ok(pk) = unpack_node_id(c.identity) else {
+            chain_api::StakeEvent::AddrChanged { identity, addr } => {
+                let Ok(pk) = unpack_node_id(identity) else {
                     log::warn!("invalid node id");
                     return;
                 };
                 log::debug!("node changed address: {pk:?}");
-                let route = Route::new(pk, unpack_node_addr(c.addr));
+                let route = Route::new(pk, unpack_node_addr(addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
         }

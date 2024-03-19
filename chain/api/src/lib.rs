@@ -1,46 +1,36 @@
-#![feature(lazy_cell)]
-
+pub use {
+    chain_types::runtime_types::{
+        pallet_node_staker::pallet::{
+            Event as StakeEvent, NodeAddress, NodeData, NodeIdentity, Stake,
+        },
+        pallet_user_manager::pallet::Profile,
+    },
+    serde_json::json,
+    subxt::{tx::TxPayload, Error, PolkadotConfig as Config},
+    subxt_signer::sr25519::{Keypair, Signature},
+};
 use {
     chain_types::{
-        node_staker,
-        polkadot::{
-            self,
-            contracts::calls::types::Call,
-            runtime_types::{sp_runtime::DispatchError, sp_weights::weight_v2::Weight},
-        },
-        runtime_types::pallet_contracts::primitives::{ContractResult, ExecReturnValue},
-        user_manager, Hash, InkMessage,
+        polkadot::{self},
+        Hash,
     },
     futures::{StreamExt, TryFutureExt, TryStreamExt},
-    parity_scale_codec::{Decode, Encode as _},
     std::str::FromStr,
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
-        tx::{Payload, TxProgress},
-        OnlineClient, PolkadotConfig,
+        tx::TxProgress,
+        OnlineClient,
     },
     subxt_signer::bip39::Mnemonic,
 };
-pub use {serde_json::json, subxt::tx::TxPayload};
 
 pub const USER_NAME_CAP: usize = 32;
 
-pub type Config = PolkadotConfig;
 pub type Balance = u128;
-pub type ContractId = <Config as subxt::Config>::AccountId;
 pub type AccountId = <Config as subxt::Config>::AccountId;
-pub type Error = subxt::Error;
-pub type Keypair = subxt_signer::sr25519::Keypair;
-pub type Signature = subxt_signer::sr25519::Signature;
-pub type CallPayload = Payload<Call>;
-pub type NodeAddress = node_staker::NodeAddress;
-pub type StakeEvent = node_staker::Event;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type Nonce = u64;
 pub type RawUserName = [u8; USER_NAME_CAP];
-pub type UserIdentity = user_manager::Profile;
-pub type NodeIdentity = node_staker::NodeIdentity;
-pub type NodeData = node_staker::NodeData;
 
 #[must_use]
 pub fn immortal_era() -> String {
@@ -118,7 +108,7 @@ impl TransactionHandler for () {
 }
 
 pub async fn wait_for_in_block(
-    mut progress: TxProgress<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+    mut progress: TxProgress<Config, OnlineClient<Config>>,
 ) -> Result<Hash> {
     while let Some(event) = progress.next().await {
         match event? {
@@ -175,7 +165,6 @@ pub struct Client<S: TransactionHandler> {
 impl<S: TransactionHandler> Client<S> {
     pub async fn node_contract_event_stream(
         &self,
-        contract: ContractId,
     ) -> Result<impl futures::Stream<Item = Result<StakeEvent>>, Error> {
         Ok(self
             .inner
@@ -184,21 +173,18 @@ impl<S: TransactionHandler> Client<S> {
             .subscribe_finalized()
             .await?
             .then(move |block| {
-                let contract = contract.clone();
                 async move {
                     Ok::<_, Error>(
                         block?
                             .events()
                             .await?
-                            .find::<polkadot::contracts::events::ContractEmitted>()
-                            .filter_map(Result::ok)
-                            .filter(move |event| event.contract == contract)
-                            .map(|event| {
-                                StakeEvent::decode(&mut event.data.as_slice()).map_err(|e| {
-                                    Error::Decode(subxt::error::DecodeError::custom(e))
-                                })
-                            })
-                            .collect::<Vec<_>>(),
+                            .iter()
+                            .map(|e| e.and_then(|e| e.as_root_event::<chain_types::Event>()))
+                            .filter_map(|e| match e {
+                                Ok(chain_types::Event::Staker(e)) => Some(Ok(e)),
+                                Ok(_) => None,
+                                Err(e) => Some(Err(e)),
+                            }),
                     )
                 }
                 .map_ok(futures::stream::iter)
@@ -219,174 +205,74 @@ impl<S: TransactionHandler> Client<S> {
         self.signer.handle(&self.inner, transaction, nonce).await
     }
 
-    pub async fn join(
-        &self,
-        dest: ContractId,
-        data: NodeData,
-        addr: NodeAddress,
-        nonce: Nonce,
-    ) -> Result<()> {
-        self.call_auto_weight(1_000_000, dest, node_staker::messages::join(data, addr), nonce).await
+    pub async fn join(&self, data: NodeData, addr: NodeAddress, nonce: Nonce) -> Result<()> {
+        self.signer.handle(&self.inner, chain_types::tx().staker().join(data, addr), nonce).await
     }
 
-    pub async fn list(&self, addr: ContractId) -> Result<Vec<(NodeData, NodeAddress)>> {
-        self.call_dry(0, addr, node_staker::messages::list()).await
+    pub async fn list_nodes(&self) -> Result<Vec<Stake>> {
+        self.inner
+            .client
+            .storage()
+            .at_latest()
+            .await?
+            .iter(chain_types::storage().staker().stakes_iter())
+            .await?
+            .map_ok(|(_, v)| v)
+            .try_collect()
+            .await
     }
 
     pub async fn vote(
         &self,
-        dest: ContractId,
         me: NodeIdentity,
         target: NodeIdentity,
-        weight: i32,
+        rating: i32,
         nonce: Nonce,
     ) -> Result<()> {
-        let call = node_staker::messages::vote(me, target, weight);
-        self.call_auto_weight(0, dest, call, nonce).await
+        self.signer
+            .handle(&self.inner, chain_types::tx().staker().vote(me, target, rating), nonce)
+            .await
     }
 
-    pub async fn reclaim(&self, dest: ContractId, me: NodeIdentity, nonce: Nonce) -> Result<()> {
-        self.call_auto_weight(0, dest, node_staker::messages::reclaim(me), nonce).await
+    pub async fn reclaim(&self, me: NodeIdentity, nonce: Nonce) -> Result<()> {
+        self.signer.handle(&self.inner, chain_types::tx().staker().reclaim(me), nonce).await
     }
 
-    pub async fn register(
-        &self,
-        dest: ContractId,
-        name: RawUserName,
-        data: UserIdentity,
-        nonce: Nonce,
-    ) -> Result<()> {
-        self.call_auto_weight(
-            0,
-            dest,
-            user_manager::messages::register_with_name(name, data),
-            nonce,
-        )
-        .await
-    }
-
-    pub async fn get_profile_by_name(
-        &self,
-        dest: ContractId,
-        name: RawUserName,
-    ) -> Result<Option<UserIdentity>> {
-        let call = user_manager::messages::get_profile_by_name(name);
-        self.call_dry(0, dest, call).await
-    }
-
-    pub async fn user_exists(&self, dest: ContractId, name: RawUserName) -> Result<bool> {
-        self.get_profile_by_name(dest, name).await.map(|p| p.is_some())
-    }
-
-    pub async fn get_username(&self, dest: ContractId, id: crypto::Hash) -> Result<RawUserName> {
-        let call = user_manager::messages::get_username(id);
-        self.call_dry(0, dest, call).await
-    }
-
-    async fn call_auto_weight<T: parity_scale_codec::Decode>(
-        &self,
-        value: Balance,
-        dest: ContractId,
-        call_data: impl InkMessage,
-        nonce: Nonce,
-    ) -> Result<T> {
-        let (res, mut weight) =
-            self.call_dry_low(value, dest.clone(), call_data.to_bytes()).await?;
-
-        weight.ref_time *= 10;
-        weight.proof_size *= 10;
-
+    pub async fn register(&self, name: RawUserName, data: Profile, nonce: Nonce) -> Result<()> {
         self.signer
             .handle(
                 &self.inner,
-                polkadot::tx().contracts().call(
-                    dest.into(),
-                    value,
-                    weight,
-                    None,
-                    call_data.to_bytes(),
-                ),
+                chain_types::tx().user_manager().register_with_name(data, name),
                 nonce,
             )
-            .await?;
+            .await
+    }
 
-        Ok(res)
+    pub async fn get_profile_by_name(&self, name: RawUserName) -> Result<Option<Profile>> {
+        let latest = self.inner.client.storage().at_latest().await?;
+        let Some(account_id) =
+            latest.fetch(&chain_types::storage().user_manager().username_to_owner(name)).await?
+        else {
+            return Ok(None);
+        };
+        latest.fetch(&chain_types::storage().user_manager().identities(account_id)).await
+    }
+
+    pub async fn user_exists(&self, name: RawUserName) -> Result<bool> {
+        let latest = self.inner.client.storage().at_latest().await?;
+        latest
+            .fetch(&chain_types::storage().user_manager().username_to_owner(name))
+            .await
+            .map(|o| o.is_some())
+    }
+
+    pub async fn get_username(&self, id: crypto::Hash) -> Result<Option<RawUserName>> {
+        let latest = self.inner.client.storage().at_latest().await?;
+        latest.fetch(&chain_types::storage().user_manager().identity_to_username(id)).await
     }
 
     pub async fn get_nonce(&self) -> Result<u64> {
         let id = self.signer.account_id_async().await?;
         self.inner.get_nonce(&id).await
     }
-
-    async fn call_dry<T: parity_scale_codec::Decode>(
-        &self,
-        value: Balance,
-        dest: ContractId,
-        call_data: impl InkMessage,
-    ) -> Result<T> {
-        self.call_dry_low(value, dest, call_data.to_bytes()).await.map(|(t, ..)| t)
-    }
-
-    async fn call_dry_low<T: parity_scale_codec::Decode>(
-        &self,
-        value: Balance,
-        dest: ContractId,
-        call_data: Vec<u8>,
-    ) -> Result<(T, Weight)> {
-        let (e, w) = self
-            .make_dry_call::<Result<T, ()>>(CallRequest {
-                origin: self.signer.account_id_async().await?,
-                dest: dest.clone(),
-                value,
-                gas_limit: None,
-                storage_deposit_limit: None,
-                input_data: call_data,
-            })
-            .await?;
-        let e = e.map_err(|()| Error::Other("contract returned `Err`".into()))?;
-        Ok((e, w))
-    }
-
-    async fn make_dry_call<T: parity_scale_codec::Decode>(
-        &self,
-        call: CallRequest,
-    ) -> Result<(T, Weight)> {
-        let bytes = call.encode();
-        let r = self.inner.legacy.state_call("ContractsApi_call", Some(&bytes), None).await?;
-
-        let r = <ContractResult<Result<ExecReturnValue, DispatchError>, Balance, ()>>::decode(
-            &mut r.as_slice(),
-        )
-        .map_err(|e| Error::Decode(subxt::error::DecodeError::custom(e)))?;
-
-        let res = r.result.map_err(|e| match e {
-            DispatchError::Module(me) => {
-                let meta = self.inner.client.metadata();
-                let pallet = meta.pallet_by_index(me.index);
-                let error = pallet.as_ref().and_then(|p| p.error_variant_by_index(me.error[0]));
-                Error::Other(format!(
-                    "dispatch error: {}.{}",
-                    pallet.map_or("unknown", |p| p.name()),
-                    error.map_or("unknown", |e| &e.name)
-                ))
-            }
-            e => Error::Other(format!("dispatch error: {e:?}")),
-        })?;
-        let res = T::decode(&mut res.data.as_slice())
-            .map_err(|e| Error::Decode(subxt::error::DecodeError::custom(e)))?;
-        Ok((res, r.gas_consumed))
-    }
-}
-
-/// A struct that encodes RPC parameters required for a call to a smart contract.
-///
-/// Copied from `pallet-contracts-rpc-runtime-api`.
-#[derive(parity_scale_codec::Encode)]
-struct CallRequest {
-    origin: AccountId,
-    dest: AccountId,
-    value: Balance,
-    gas_limit: Option<Weight>,
-    storage_deposit_limit: Option<Balance>,
-    input_data: Vec<u8>,
 }

@@ -52,11 +52,12 @@ pub fn Register(state: State) -> impl IntoView {
 
         let key = UserKeys::new(username_content, password.value().as_str());
 
-        let client =
-            chat_client_node::chain_node(username_content).await.context("chain is not reachable")?;
+        let client = chat_client_node::chain_node(username_content)
+            .await
+            .context("chain is not reachable")?;
 
         if client
-            .user_exists(chat_client_node::user_contract(), username_to_raw(username_content))
+            .user_exists(username_to_raw(username_content))
             .await
             .context("user contract call failed")?
         {
@@ -64,12 +65,7 @@ pub fn Register(state: State) -> impl IntoView {
         }
 
         client
-            .register(
-                chat_client_node::user_contract(),
-                username_to_raw(username_content),
-                key.to_identity(),
-                0,
-            )
+            .register(username_to_raw(username_content), key.to_identity(), 0)
             .await
             .context("failed to create user")?;
 

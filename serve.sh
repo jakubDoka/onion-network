@@ -9,9 +9,7 @@ creq subxt
 
 sod() { export "$1"="${!1:-$2}"; }
 
-sod CHAIN_NODE "ws://localhost:9944"
-sod NODE_CONTRACT "todo"
-sod USER_CONTRACT "todo"
+sod CHAIN_NODES "ws://localhost:9944"
 sod NODE_COUNT 15
 sod IDLE_TIMEOUT 2000
 sod FRONTEND_PORT 7777
@@ -21,7 +19,7 @@ sod RUST_BACKTRACE 1
 sod NODE_START 8800
 sod NETWORK_BOOT_NODE "/ip4/127.0.0.1/tcp/$((NODE_START + 100))/ws"
 sod MIN_NODES 5
-sod BALANCE 10000000000000
+sod BALANCE 100000000000000
 sod TEST_WALLETS 5CwfgYUrq24dTpfh2sQ2st1FNCR2fM2JFSn3EtdWyrGdEaER,5E7YrzVdg1ovRYfWLQG1bJV7FvZWJpnVnQ3nVCKEwpFzkX8s
 sod EXPOSED_ADDRESS 127.0.0.1
 
@@ -43,8 +41,6 @@ rebuild_workspace() {
 	cargo build $FLAGS --workspace \
 		--exclude chat-client \
 		--exclude chat-client-node \
-		--exclude node_staker \
-		--exclude user_manager \
 		--exclude topology-vis \
 		|| exit 1
 }
@@ -52,24 +48,16 @@ rebuild_workspace() {
 test -d crypto/falcon/falcon || (cd crypto/falcon && sh transpile.sh || exit 1)
 
 
-CHAIN_PATH="chain/substrate-node-template/target/release/node-template"
-test -e $CHAIN_PATH || (cd chain/substrate-node-template && cargo build --release)
+CHAIN_PATH="chain/substrate-tests/target/release/node-template"
+test -e $CHAIN_PATH || (cd chain/substrate-tests && cargo build --release)
 $CHAIN_PATH --dev > /dev/null 2>&1 &
-sleep 5
-subxt metadata > core/chain-types/metadata.scale
+sleep 2
+METADATA_FILE="chain/types/metadata.scale"
+test -e $METADATA_FILE || subxt metadata > $METADATA_FILE
 
 (cd chat/client/wallet-integration && npm i || exit 1)
-(cd contracts/node_staker && cargo contract build $WASM_FLAGS || exit 1)
-(cd contracts/user_manager && cargo contract build $WASM_FLAGS || exit 1)
 rebuild_workspace
 
-# setup chain
-export NODE_CONTRACT=$(cd contracts/node_staker &&\
-  cargo contract instantiate --suri //Charlie -x --skip-confirm --output-json | jq -r '.contract')
-export USER_CONTRACT=$(cd contracts/user_manager &&\
-  cargo contract instantiate --suri //Charlie -x --skip-confirm --output-json | jq -r '.contract')
-echo "node contract: $NODE_CONTRACT"
-echo "user contract: $USER_CONTRACT"
 $TARGET_DIR/init-transfer || exit 1
 
 # run

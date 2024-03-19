@@ -1,5 +1,4 @@
 use {
-    chain_api::ContractId,
     dht::Route,
     libp2p::{
         core::upgrade::Version, futures::StreamExt, multiaddr, swarm::NetworkBehaviour,
@@ -363,14 +362,10 @@ struct Behaviour {
     dht: dht::Behaviour,
 }
 
-fn node_contract() -> ContractId {
-    component_utils::build_env!(pub NODE_CONTRACT);
-    NODE_CONTRACT.parse().unwrap()
-}
-
 fn chain_node() -> String {
-    component_utils::build_env!(pub CHAIN_NODE);
-    CHAIN_NODE.to_string()
+    // TODO: handle multiple nodes
+    component_utils::build_env!(pub CHAIN_NODES);
+    CHAIN_NODES.to_string()
 }
 
 #[macroquad::main("Topology-Vis")]
@@ -417,11 +412,12 @@ async fn main() {
         let nodes = chain_api::Client::with_signer(&chain_node(), ())
             .await
             .unwrap()
-            .list(node_contract())
+            .list_nodes()
             .await
             .unwrap();
         log::info!("detected {} nodes", nodes.len());
-        for (node, ip) in nodes {
+        for node in nodes {
+            let ip = node.addr;
             let id = libp2p::identity::ed25519::PublicKey::try_from_bytes(&node.id).unwrap();
             let route = Route::new(id, unpack_node_addr(ip));
             let peer_id = route.peer_id();

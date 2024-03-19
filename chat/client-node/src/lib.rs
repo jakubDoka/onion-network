@@ -3,7 +3,7 @@
 use {
     anyhow::Context,
     argon2::Argon2,
-    chain_api::{ContractId, TransactionHandler, UserIdentity},
+    chain_api::{Profile, TransactionHandler},
     chat_spec::*,
     codec::{Codec, Reminder},
     component_utils::FindAndRemove,
@@ -332,9 +332,8 @@ impl Node {
 
         let (mut request_dispatch, commands) = Requests::new();
         let chain_api = chain_node(keys.name).await?;
-        let node_request = chain_api.list(node_contract());
-        let profile_request =
-            chain_api.get_profile_by_name(user_contract(), username_to_raw(keys.name));
+        let node_request = chain_api.list_nodes();
+        let profile_request = chain_api.get_profile_by_name(username_to_raw(keys.name));
         let (node_data, profile_hash) = futures::try_join!(node_request, profile_request)?;
         let profile_hash = profile_hash.context("profile not found")?;
         let profile = keys.to_identity();
@@ -394,9 +393,9 @@ impl Node {
 
         let nodes = node_data
             .into_iter()
-            .map(|(node, ip)| {
-                let id = unpack_node_id(node.id).unwrap();
-                let addr = unpack_node_addr(ip);
+            .map(|stake| {
+                let id = unpack_node_id(stake.id).unwrap();
+                let addr = unpack_node_addr(stake.addr);
                 Ok(Route::new(id, addr))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -1376,8 +1375,8 @@ impl UserKeys {
         crypto::hash::new(self.sign.public_key())
     }
 
-    pub fn to_identity(&self) -> UserIdentity {
-        UserIdentity {
+    pub fn to_identity(&self) -> Profile {
+        Profile {
             sign: crypto::hash::new(self.sign.public_key()),
             enc: crypto::hash::new(self.enc.public_key()),
         }
@@ -1414,12 +1413,9 @@ impl BootPhase {
     }
 }
 
-pub async fn fetch_profile(
-    my_name: UserName,
-    name: UserName,
-) -> Result<UserIdentity, anyhow::Error> {
+pub async fn fetch_profile(my_name: UserName, name: UserName) -> Result<Profile, anyhow::Error> {
     let client = chain_node(my_name).await?;
-    match client.get_profile_by_name(user_contract(), username_to_raw(name)).await {
+    match client.get_profile_by_name(username_to_raw(name)).await {
         Ok(Some(u)) => Ok(u),
         Ok(None) => anyhow::bail!("user {name} does not exist"),
         Err(e) => anyhow::bail!("failed to fetch user: {e}"),
@@ -1427,18 +1423,8 @@ pub async fn fetch_profile(
 }
 
 pub async fn chain_node(name: UserName) -> Result<chain_api::Client<WebSigner>, chain_api::Error> {
-    component_utils::build_env!(CHAIN_NODE);
-    chain_api::Client::with_signer(CHAIN_NODE, WebSigner(name)).await
-}
-
-pub fn user_contract() -> ContractId {
-    component_utils::build_env!(USER_CONTRACT);
-    ContractId::from_str(USER_CONTRACT).unwrap()
-}
-
-pub fn node_contract() -> ContractId {
-    component_utils::build_env!(NODE_CONTRACT);
-    ContractId::from_str(NODE_CONTRACT).unwrap()
+    component_utils::build_env!(CHAIN_NODES);
+    chain_api::Client::with_signer(CHAIN_NODES, WebSigner(name)).await
 }
 
 pub fn min_nodes() -> usize {

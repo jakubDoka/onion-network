@@ -4,7 +4,6 @@ members = [
 	"utils/*",
 	"tests/*",
 	"protocols/*",
-	"contracts/*",
 	"crypto/falcon/falcon",
 	"crypto/*",
 	"chat/*",
@@ -13,7 +12,7 @@ members = [
 
 exclude = [
 	"crypto/falcon",
-	"chain/substrate-node-template",
+	"chain/substrate-tests",
 ]
 
 [workspace.lints.clippy]
@@ -52,7 +51,6 @@ codec-derive = { path = "utils/codec-derive" }
 codec = { path = "utils/codec" }
 component-utils = { path = "utils/component-utils" }
 config = { path = "utils/config" }
-contract-macro = { path = "utils/contract-macro" }
 
 chain-api = { path = "chain/api", default-features = false }
 chain-types = { path = "chain/types", default-features = false }

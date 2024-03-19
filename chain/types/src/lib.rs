@@ -1,34 +1,10 @@
-use {self::node_staker::NodeData, subxt::PolkadotConfig};
-
-/// Trait implemented by [`smart_bench_macro::contract`] for all contract constructors.
-pub trait InkConstructor: codec::Encode {
-    const SELECTOR: [u8; 4];
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut call_data = Self::SELECTOR.to_vec();
-        <Self as codec::Encode>::encode_to(self, &mut call_data);
-        call_data
-    }
-}
-
-/// Trait implemented by [`smart_bench_macro::contract`] for all contract messages.
-pub trait InkMessage: codec::Encode {
-    const SELECTOR: [u8; 4];
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut call_data = Self::SELECTOR.to_vec();
-        <Self as codec::Encode>::encode_to(self, &mut call_data);
-        call_data
-    }
-}
-
-#[allow(clippy::needless_return)]
-#[subxt::subxt(runtime_metadata_path = "metadata.scale", generate_docs)]
-mod polkadot {}
-contract_macro::contract!("../../target/ink/node_staker/node_staker.contract");
-contract_macro::contract!("../../target/ink/user_manager/user_manager.contract");
-
-use {node_staker::NodeAddress, std::net::IpAddr};
+use {
+    self::polkadot::runtime_types::pallet_node_staker::pallet::{
+        NodeAddress, NodeData, Stake, Votes,
+    },
+    std::net::IpAddr,
+    subxt::PolkadotConfig,
+};
 pub use {
     polkadot::*,
     subxt::{self, ext::*},
@@ -44,6 +20,37 @@ pub type Error = subxt::Error;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub type Keypair = subxt_signer::sr25519::Keypair;
+
+#[allow(clippy::needless_return)]
+#[subxt::subxt(runtime_metadata_path = "metadata.scale", generate_docs)]
+mod polkadot {}
+
+impl Stake {
+    pub fn fake() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+impl Clone for Votes {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for Votes {}
+
+impl Clone for Stake {
+    fn clone(&self) -> Self {
+        Stake {
+            owner: self.owner.clone(),
+            amount: self.amount,
+            created_at: self.created_at,
+            votes: self.votes,
+            id: self.id,
+            addr: self.addr,
+        }
+    }
+}
 
 impl Clone for NodeAddress {
     fn clone(&self) -> Self {

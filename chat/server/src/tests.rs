@@ -16,7 +16,7 @@ async fn repopulate_account() {
     let [mut stream, used] = Stream::new_test();
     nodes.iter_mut().next().unwrap().clients.push(used);
 
-    stream.create_user(&mut nodes, &mut user).await;
+    stream.create_profile(&mut nodes, &mut user).await;
 
     assert_nodes(&nodes, |node| node.context.profiles.contains_key(&user.identity()));
 
@@ -62,8 +62,8 @@ async fn direct_messaging() {
 
     nodes.iter_mut().next().unwrap().clients.push(used);
     nodes.iter_mut().last().unwrap().clients.push(used2);
-    stream1.create_user(&mut nodes, &mut user).await;
-    stream2.create_user(&mut nodes, &mut user2).await;
+    stream1.create_profile(&mut nodes, &mut user).await;
+    stream2.create_profile(&mut nodes, &mut user2).await;
 
     stream1
         .test_req_simple(
@@ -141,8 +141,8 @@ async fn message_block_finalization() {
     let target = nodes.iter_mut().last().unwrap();
     target.clients.push(used2);
     let peer = *target.swarm.local_peer_id();
-    stream1.create_user(&mut nodes, &mut user).await;
-    stream2.create_user(&mut nodes, &mut user2).await;
+    stream1.create_profile(&mut nodes, &mut user).await;
+    stream2.create_profile(&mut nodes, &mut user2).await;
 
     let chat = ChatName::from("foo").unwrap();
 
@@ -236,7 +236,7 @@ async fn message_flooding() {
         .collect::<Vec<_>>();
 
     for (stream, user) in &mut streams {
-        stream.create_user(&mut nodes, user).await;
+        stream.create_profile(&mut nodes, user).await;
     }
 
     let chat = ChatName::from("foo").unwrap();
@@ -322,7 +322,7 @@ impl Stream {
         self.test_req(nodes, prefix, Some(topic.into()), body, expected).await;
     }
 
-    async fn create_user(&mut self, nodes: &mut FuturesUnordered<Server>, user: &mut Account) {
+    async fn create_profile(&mut self, nodes: &mut FuturesUnordered<Server>, user: &mut Account) {
         self.test_req(
             nodes,
             rpcs::CREATE_PROFILE,

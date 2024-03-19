@@ -564,13 +564,13 @@ impl Node {
 
         let vault = if vault.is_empty() && vault_nonce == 0 {
             set_state!(ProfileCreate);
-            let proof = Proof::new(&keys.sign, &mut vault_nonce, &[][..], OsRng);
+            let proof = Proof::new(&keys.sign, &mut vault_nonce, crypto::Hash::default(), OsRng);
             request_dispatch
                 .dispatch_direct(
                     &mut profile_stream,
                     rpcs::CREATE_PROFILE,
                     Topic::Profile(profile_hash.sign),
-                    &(proof, keys.enc.public_key()),
+                    &(proof, "", keys.enc.public_key()),
                 )
                 .await
                 .context("creating account")?;

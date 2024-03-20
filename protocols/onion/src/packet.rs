@@ -72,7 +72,7 @@ pub fn new_initial(
         wrap(client_kp, &pk, buffer);
     }
 
-    client_kp.public_key().encode(buffer).unwrap();
+    //client_kp.public_key().encode(buffer).unwrap();
 
     key
 }
@@ -100,15 +100,9 @@ pub fn peel_initial(
     node_kp: &Keypair,
     original_buffer: &mut [u8],
 ) -> Option<(Option<PeerId>, SharedSecret, usize)> {
-    #[derive(codec::Codec)]
-    struct PostPacket {
-        ciphertext: Ciphertext,
-        sender: PublicKey,
-    }
-
     let mut buffer = &mut *original_buffer;
-    let tail = buffer.take_mut(buffer.len() - std::mem::size_of::<PostPacket>()..)?;
-    let PostPacket { sender, ciphertext } = PostPacket::decode(&mut &*tail)?;
+    let tail = buffer.take_mut(buffer.len() - std::mem::size_of::<Ciphertext>()..)?;
+    let ciphertext = Ciphertext::decode(&mut &*tail)?;
     let ss = node_kp.decapsulate(&ciphertext).ok()?;
 
     if buffer.is_empty() {
@@ -122,7 +116,5 @@ pub fn peel_initial(
     let (buffer, tail) = buffer.split_at_mut(buffer.len() - *len as usize);
     let id = PeerId::from_bytes(tail).ok()?;
 
-    let len = buffer.len();
-    sender.encode(&mut &mut original_buffer[len..]).unwrap();
-    Some((Some(id), ss, len + std::mem::size_of::<PublicKey>()))
+    Some((Some(id), ss, buffer.len()))
 }

@@ -3,118 +3,100 @@ pub use crypto::{
     SharedSecret,
 };
 use {
-    aes_gcm::{
-        aead::{generic_array::GenericArray, OsRng},
-        aes::cipher::Unsigned,
-        AeadCore, AeadInPlace, Aes256Gcm, KeyInit,
-    },
-    codec::Codec,
-    crypto::enc::Ciphertext,
-    libp2p::{core::multihash::Multihash, identity::PeerId},
-    std::usize,
+    aes_gcm::aead::OsRng, arrayvec::ArrayVec, codec::Codec, crypto::enc::Ciphertext,
+    libp2p::identity::PeerId,
 };
 
 pub const OK: u8 = 0;
 pub const MISSING_PEER: u8 = 1;
 pub const OCCUPIED_PEER: u8 = 2;
-pub const ASOC_DATA: &[u8] =
-    concat!("asoc-", env!("CARGO_PKG_VERSION"), "-", env!("CARGO_PKG_NAME"),).as_bytes();
-pub const TAG_SIZE: usize = <Aes256Gcm as AeadCore>::TagSize::USIZE;
-pub const NONCE_SIZE: usize = <Aes256Gcm as AeadCore>::NonceSize::USIZE;
-pub const CONFIRM_PACKET_SIZE: usize = TAG_SIZE + NONCE_SIZE;
 pub const PATH_LEN: usize = 2;
 
-pub fn write_confirm(key: &SharedSecret, buffer: &mut [u8]) {
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let cipher = Aes256Gcm::new(&GenericArray::from(*key));
+const MAX_INNER_PACKET_SIZE: usize =
+    std::mem::size_of::<Ciphertext>() + std::mem::size_of::<PeerId>();
 
-    let tag = cipher
-        .encrypt_in_place_detached(&nonce, ASOC_DATA, &mut [])
-        .expect("we are certainly not that big");
-
-    buffer[..tag.len()].copy_from_slice(&tag);
-    buffer[tag.len()..].copy_from_slice(&nonce);
+#[derive(Codec)]
+struct InnerMostPacket {
+    #[codec(with = peer_id_codec)]
+    to: PeerId,
+    cp: Ciphertext,
 }
 
-pub fn verify_confirm(key: &SharedSecret, buffer: &mut [u8]) -> bool {
-    peel_wih_key(key, buffer).is_some()
+#[derive(Codec)]
+struct MiddlePacket {
+    cp: Ciphertext,
+    tag: [u8; crypto::TAG_SIZE],
+    bytes: ArrayVec<u8, MAX_INNER_PACKET_SIZE>,
 }
 
-pub fn wrap(client_kp: &Keypair, sender: &PublicKey, buffer: &mut Vec<u8>) {
-    let (cp, key) = client_kp.encapsulate(sender, OsRng);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let cipher = Aes256Gcm::new(&GenericArray::from(key));
-
-    let tag = cipher
-        .encrypt_in_place_detached(&nonce, ASOC_DATA, buffer)
-        .expect("we are certainly not that big");
-
-    buffer.extend_from_slice(&tag);
-    buffer.extend_from_slice(&nonce);
-    cp.encode(buffer).unwrap();
+#[derive(Codec)]
+pub struct OuterPacket {
+    #[codec(with = peer_id_codec)]
+    to: PeerId,
+    mid: MiddlePacket,
 }
 
-pub fn new_initial(
-    recipient: &PublicKey,
-    path: [(PublicKey, PeerId); PATH_LEN],
-    client_kp: &Keypair,
-    buffer: &mut Vec<u8>,
-) -> SharedSecret {
-    let (cp, key) = client_kp.encapsulate(recipient, OsRng);
-    cp.encode(buffer).unwrap();
+impl OuterPacket {
+    pub fn new(
+        recipient: PublicKey,
+        recipient_id: PeerId,
+        mid_recipient: PublicKey,
+        mid_id: PeerId,
+        client_kp: &Keypair,
+    ) -> (Self, SharedSecret) {
+        let (cp, key) = client_kp.encapsulate(&recipient, OsRng);
+        let inner = InnerMostPacket { to: recipient_id, cp };
 
-    for (pk, id) in path {
-        let prev_len = buffer.len();
-        let mh = Multihash::from(id);
-        mh.write(&mut *buffer).expect("write to vector cannot fail");
-        buffer.push((buffer.len() - prev_len) as u8);
+        let (cp, mid_key) = client_kp.encapsulate(&mid_recipient, OsRng);
+        let mut bytes = ArrayVec::new();
+        inner.encode(&mut bytes).unwrap();
+        let tag = crypto::encrypt(&mut bytes, mid_key, OsRng);
+        let mid = MiddlePacket { cp, tag, bytes };
 
-        wrap(client_kp, &pk, buffer);
+        (Self { to: mid_id, mid }, key)
+    }
+}
+
+mod peer_id_codec {
+    use {codec::WritableBuffer, libp2p::multihash::Multihash};
+
+    pub fn encode(
+        peer_id: &libp2p::identity::PeerId,
+        buffer: &mut impl codec::Buffer,
+    ) -> Option<()> {
+        let mh = Multihash::<64>::from(*peer_id);
+        mh.write(WritableBuffer { buffer }).ok()?;
+        Some(())
     }
 
-    //client_kp.public_key().encode(buffer).unwrap();
-
-    key
-}
-
-pub fn peel_wih_key(key: &SharedSecret, mut buffer: &mut [u8]) -> Option<usize> {
-    if buffer.len() < TAG_SIZE + NONCE_SIZE {
-        return None;
+    pub fn decode(buffer: &mut &[u8]) -> Option<libp2p::identity::PeerId> {
+        let mh = Multihash::<64>::read(buffer).ok()?;
+        libp2p::identity::PeerId::from_multihash(mh).ok()
     }
-
-    let mut tail;
-
-    (buffer, tail) = buffer.split_at_mut(buffer.len() - NONCE_SIZE);
-    let nonce = *GenericArray::from_slice(tail);
-    (buffer, tail) = buffer.split_at_mut(buffer.len() - TAG_SIZE);
-    let tag = *GenericArray::from_slice(tail);
-
-    let cipher = Aes256Gcm::new(&GenericArray::from(*key));
-
-    cipher.decrypt_in_place_detached(&nonce, ASOC_DATA, buffer, &tag).ok()?;
-
-    Some(buffer.len())
 }
 
-pub fn peel_initial(
+pub fn peel(
     node_kp: &Keypair,
-    original_buffer: &mut [u8],
-) -> Option<(Option<PeerId>, SharedSecret, usize)> {
-    let mut buffer = &mut *original_buffer;
-    let tail = buffer.take_mut(buffer.len() - std::mem::size_of::<Ciphertext>()..)?;
-    let ciphertext = Ciphertext::decode(&mut &*tail)?;
-    let ss = node_kp.decapsulate(&ciphertext).ok()?;
+    mut original_buffer: &mut [u8],
+) -> Option<(Result<PeerId, SharedSecret>, usize)> {
+    let prev_len = original_buffer.len();
 
-    if buffer.is_empty() {
-        return Some((None, ss, 0));
+    if let Some(op) = OuterPacket::decode(&mut &*original_buffer) {
+        op.mid.encode(&mut original_buffer).unwrap();
+        return Some((Ok(op.to), prev_len - original_buffer.len()));
     }
 
-    let packet_len = peel_wih_key(&ss, buffer)?;
+    if let Some(mp) = MiddlePacket::decode(&mut &*original_buffer) {
+        let ss = node_kp.decapsulate(&mp.cp).ok()?;
+        original_buffer[..mp.bytes.len()].copy_from_slice(&mp.bytes);
+        crypto::decrypt_separate_tag(&mut original_buffer[..mp.bytes.len()], ss, mp.tag)
+            .then_some(())?;
+        let ip = InnerMostPacket::decode(&mut &original_buffer[..mp.bytes.len()])?;
+        ip.cp.encode(&mut original_buffer)?;
+        return Some((Ok(ip.to), std::mem::size_of::<Ciphertext>()));
+    }
 
-    let buffer = &mut buffer[..packet_len];
-    let (len, buffer) = buffer.split_last_mut()?;
-    let (buffer, tail) = buffer.split_at_mut(buffer.len() - *len as usize);
-    let id = PeerId::from_bytes(tail).ok()?;
-
-    Some((Some(id), ss, buffer.len()))
+    let cp = Ciphertext::decode(&mut &*original_buffer)?;
+    let ss = node_kp.decapsulate(&cp).ok()?;
+    Some((Err(ss), 0))
 }

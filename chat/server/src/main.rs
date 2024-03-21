@@ -598,12 +598,10 @@ impl Server {
 
     fn handle_chat_event(&mut self, chat: ChatName, event: Vec<u8>) {
         for client in self.clients.iter_mut() {
-            log::info!("sending chat event to client: {:?}", chat);
             let Some(call) = client.subscriptions.get(&chat) else {
                 continue;
             };
 
-            log::info!("sending chat event to client: {:?}", chat);
             _ = client.inner.write((call, Reminder(&event)));
         }
     }

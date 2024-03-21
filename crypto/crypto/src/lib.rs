@@ -23,23 +23,26 @@ pub fn new_secret(mut rng: impl CryptoRngCore) -> SharedSecret {
 }
 
 pub fn decrypt(data: &mut [u8], secret: SharedSecret) -> Option<&mut [u8]> {
-    if data.len() < NONCE_SIZE + TAG_SIZE {
+    if data.len() < NONCE_SIZE + _TAG_SIZE {
         return None;
     }
+    let (data, postfix) = data.split_at_mut(data.len() - NONCE_SIZE - _TAG_SIZE);
+    decrypt_separate_tag(data, secret, postfix.try_into().unwrap()).then_some(data)
+}
 
-    let (data, postfix) = data.split_at_mut(data.len() - NONCE_SIZE - TAG_SIZE);
-    let nonce = <Nonce<<Aes256Gcm as AeadCore>::NonceSize>>::from_slice(&postfix[TAG_SIZE..]);
-    let tag = <Tag<Aes256Gcm>>::from_slice(&postfix[..TAG_SIZE]);
+pub fn decrypt_separate_tag(
+    data: &mut [u8],
+    secret: SharedSecret,
+    postfix: [u8; TAG_SIZE],
+) -> bool {
+    let nonce = <Nonce<<Aes256Gcm as AeadCore>::NonceSize>>::from_slice(&postfix[_TAG_SIZE..]);
+    let tag = <Tag<Aes256Gcm>>::from_slice(&postfix[.._TAG_SIZE]);
     let cipher = Aes256Gcm::new(&GenericArray::from(secret));
-    cipher.decrypt_in_place_detached(nonce, crate::ASOC_DATA, data, tag).ok().map(|()| data)
+    cipher.decrypt_in_place_detached(nonce, crate::ASOC_DATA, data, tag).is_ok()
 }
 
 #[must_use = "dont forget to append the array to the data"]
-pub fn encrypt(
-    data: &mut [u8],
-    secret: SharedSecret,
-    rng: impl CryptoRngCore,
-) -> [u8; TAG_SIZE + NONCE_SIZE] {
+pub fn encrypt(data: &mut [u8], secret: SharedSecret, rng: impl CryptoRngCore) -> [u8; TAG_SIZE] {
     let nonce = Aes256Gcm::generate_nonce(rng);
     let cipher = Aes256Gcm::new(&GenericArray::from(secret));
     let tag = cipher
@@ -50,7 +53,9 @@ pub fn encrypt(
 }
 
 const NONCE_SIZE: usize = <<Aes256Gcm as AeadCore>::NonceSize as Unsigned>::USIZE;
-const TAG_SIZE: usize = <<Aes256Gcm as AeadCore>::TagSize as Unsigned>::USIZE;
+const _TAG_SIZE: usize = <<Aes256Gcm as AeadCore>::TagSize as Unsigned>::USIZE;
+
+pub const TAG_SIZE: usize = _TAG_SIZE + NONCE_SIZE;
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "codec", derive(codec::Codec))]

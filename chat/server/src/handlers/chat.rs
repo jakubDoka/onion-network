@@ -18,7 +18,7 @@ use {
 
 const MAX_MESSAGE_SIZE: usize = 1024 - 40;
 const MESSAGE_FETCH_LIMIT: usize = 20;
-const BLOCK_SIZE: usize = 1024 * 32;
+const BLOCK_SIZE: usize = 1024 * 16;
 const MAX_UNFINALIZED_BLOCKS: usize = 5;
 const UNFINALIZED_BUFFER_CAP: usize = BLOCK_SIZE * MAX_UNFINALIZED_BLOCKS;
 const BLOCK_HISTORY: usize = 8;
@@ -278,7 +278,7 @@ pub async fn handle_message_block(
     let compressed_origin = dht::try_peer_id_to_ed(origin).map(U256::from).ok_or(NoReplicator)?;
     let chat = cx.chats.get(&name).ok_or(NotFound)?.clone();
 
-    let block = Block::from(block);
+    let block = Block::new(block, base_hash);
     let vote = BlockVote {
         number,
         block,
@@ -294,7 +294,7 @@ pub async fn handle_message_block(
         return Err(ChatError::Outdated);
     }
 
-    let latest_hash = chat.get_latest_hash(number).unwrap_or_default();
+    let latest_hash = chat.get_latest_base_hash(number);
     if base_hash != latest_hash {
         log::warn!("block not based on latest hash: us:\ne: {:?}\ng: {:?}", latest_hash, base_hash,);
         apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
@@ -474,9 +474,12 @@ pub struct Block {
     pub data: Vec<u8>,
 }
 
-impl From<&[u8]> for Block {
-    fn from(data: &[u8]) -> Self {
-        Self { hash: crypto::hash::new(data), data: data.to_vec() }
+impl Block {
+    pub fn new(data: &[u8], prev_hash: crypto::Hash) -> Self {
+        Self {
+            hash: crypto::hash::combine(crypto::hash::new(data), prev_hash),
+            data: data.to_vec(),
+        }
     }
 }
 
@@ -542,14 +545,11 @@ impl Chat {
             res
         };
 
+        let latest_hash = self.get_latest_base_hash(self.number);
         cx.repl_rpc_no_resp(
             name,
             rpcs::SEND_BLOCK,
-            (
-                self.number,
-                self.get_latest_hash(self.number).unwrap_or_default(),
-                Reminder(&self.buffer[..actual_block_size]),
-            ),
+            (self.number, latest_hash, Reminder(&self.buffer[..actual_block_size])),
         )
         .await;
 
@@ -557,7 +557,7 @@ impl Chat {
             number: self.number,
             yes: 1,
             no: 0,
-            block: Block::from(&self.buffer[..actual_block_size]),
+            block: Block::new(&self.buffer[..actual_block_size], latest_hash),
             votes: ReplVec::new(),
         });
     }
@@ -596,14 +596,14 @@ impl Chat {
         number: BlockNumber,
         buffer_len: usize,
     ) -> U256 {
-        let Some(last_block) = self.get_latest_hash(number) else {
+        let Some(last_block) = self.get_latest_block(number) else {
             return select_finalizer(members, crypto::Hash::default(), 0);
         };
 
-        select_finalizer(members, last_block, buffer_len)
+        select_finalizer(members, last_block.hash, buffer_len)
     }
 
-    pub fn get_latest_hash(&self, number: BlockNumber) -> Option<crypto::Hash> {
+    pub fn get_latest_block(&self, number: BlockNumber) -> Option<&Block> {
         self.votes
             .iter()
             .rfind(|v| {
@@ -611,7 +611,10 @@ impl Chat {
             })
             .map(|v| &v.block)
             .or(self.finalized.back())
-            .map(|b| b.hash)
+    }
+
+    pub fn get_latest_base_hash(&self, number: BlockNumber) -> crypto::Hash {
+        self.get_latest_block(number).map(|b| b.hash).unwrap_or_default()
     }
 
     fn process_vote_decision(

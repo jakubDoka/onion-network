@@ -244,7 +244,7 @@ async fn message_flooding() {
     let ((some_stream, some_user), others) = streams.split_first_mut().unwrap();
 
     some_stream
-        .test_req_simple(&mut nodes, rpcs::CREATE_CHAT, chat, (chat, some_user.identity()), Ok(()))
+        .test_req_simple(&mut nodes, rpcs::CREATE_CHAT, chat, some_user.identity(), Ok(()))
         .await;
 
     for (_, user) in others.iter_mut() {
@@ -253,7 +253,7 @@ async fn message_flooding() {
                 &mut nodes,
                 rpcs::ADD_MEMBER,
                 chat,
-                (some_user.proof(chat), user.identity()),
+                (some_user.proof(chat), user.identity(), Member::best()),
                 Ok(()),
             )
             .await;
@@ -327,7 +327,7 @@ impl Stream {
             nodes,
             rpcs::CREATE_PROFILE,
             Topic::Profile(user.identity()),
-            (user.proof(&[][..]), user.enc.public_key()),
+            (user.proof(crypto::Hash::default()), "", user.enc.public_key()),
             Ok::<(), ChatError>(()),
         )
         .await;

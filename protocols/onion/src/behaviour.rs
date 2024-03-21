@@ -1,12 +1,9 @@
 use {
     crate::{
-        packet::{self, ASOC_DATA, CONFIRM_PACKET_SIZE, MISSING_PEER},
+        packet::{self, OuterPacket, MISSING_PEER},
         Keypair, PublicKey, SharedSecret,
     },
-    aes_gcm::{
-        aead::{generic_array::GenericArray, OsRng},
-        AeadCore, AeadInPlace, Aes256Gcm, KeyInit,
-    },
+    aes_gcm::aead::OsRng,
     codec::{Codec, Reminder},
     component_utils::{ClosingStream, FindAndRemove, PacketReader, PacketWriter},
     core::{fmt, slice},
@@ -20,7 +17,7 @@ use {
         swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError, ToSwarm as TS},
     },
     std::{
-        collections::VecDeque, convert::Infallible, io, mem, ops::DerefMut, pin::Pin, sync::Arc,
+        collections::VecDeque, convert::Infallible, io, ops::DerefMut, pin::Pin, sync::Arc,
         task::Poll,
     },
     thiserror::Error,
@@ -69,17 +66,22 @@ impl Behaviour {
     /// Panics if path contains two equal elements in a row.
     pub fn open_path(
         &mut self,
-        [mut path @ .., (mut recipient, to)]: [(PublicKey, PeerId); crate::packet::PATH_LEN + 1],
+        [path @ .., (.., to)]: [(PublicKey, PeerId); crate::packet::PATH_LEN + 1],
     ) -> PathId {
         assert!(path.array_windows().all(|[a, b]| a.1 != b.1));
-
-        path.iter_mut().rev().for_each(|(k, _)| mem::swap(k, &mut recipient));
 
         let path_id = PathId::new();
 
         log::debug!("opening path to {}", to);
 
-        self.push_stream_request(StreamRequest { to, path_id, recipient, path });
+        self.push_stream_request(StreamRequest {
+            to,
+            path_id,
+            recipient: path[0].0,
+            recipient_id: path[0].1,
+            mid_recipient: path[1].0,
+            mid_id: path[1].1,
+        });
 
         path_id
     }
@@ -368,16 +370,12 @@ impl EncryptedStream {
 
     #[must_use = "write could have failed"]
     pub fn write<'a>(&mut self, data: impl Codec<'a>) -> Option<()> {
-        let aes = Aes256Gcm::new(GenericArray::from_slice(&self.key));
-        let nonce = Aes256Gcm::generate_nonce(OsRng);
-
         let mut writer = self.writer.guard();
         let reserved = writer.write([0u8; 2])?;
         let raw = writer.write(data)?;
-        let tag = aes.encrypt_in_place_detached(&nonce, ASOC_DATA, raw).expect("no");
-        let full_len = raw.len() + tag.len() + nonce.len();
-        writer.write_bytes(&tag)?;
-        writer.write_bytes(&nonce)?;
+        let tag = crypto::encrypt(raw, self.key, OsRng);
+        let full_len = raw.len() + tag.len();
+        writer.write(tag)?;
         reserved.copy_from_slice(&(full_len as u16).to_be_bytes());
 
         Some(())
@@ -401,12 +399,12 @@ impl EncryptedStream {
             }
         };
 
-        let Some(len) = packet::peel_wih_key(&self.key, read) else {
+        let Some(read) = crypto::decrypt(read, self.key) else {
             self.inner.take();
             return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
         };
 
-        Poll::Ready(Ok(&mut read[..len]))
+        Poll::Ready(Ok(read))
     }
 
     pub fn close(&mut self) {
@@ -578,8 +576,11 @@ async fn upgrade_outbound_low(
     let mut ss = [0; 32];
     let (buffer, peer_id) = match &incoming {
         IncomingOrRequest::Request(r) => {
-            ss = packet::new_initial(&r.recipient, r.path, &keypair, &mut written_packet);
-            (&written_packet, r.path[0].1)
+            let (pck, new_ss) =
+                OuterPacket::new(r.recipient, r.recipient_id, r.mid_recipient, r.mid_id, &keypair);
+            ss = new_ss;
+            pck.encode(&mut written_packet).unwrap();
+            (&written_packet, r.recipient_id)
         }
         IncomingOrRequest::Incoming(i) => (&i.meta.buffer, i.meta.to), // the peer id is arbitrary in
                                                                        // this case
@@ -609,10 +610,10 @@ async fn upgrade_outbound_low(
         crate::packet::OK => {
             log::debug!("received auth packet");
             let mut buffer = written_packet;
-            buffer.resize(CONFIRM_PACKET_SIZE, 0);
+            buffer.resize(crypto::TAG_SIZE, 0);
             stream.read(&mut buffer).await.map_err(OUpgradeError::ReadPacket)?;
 
-            if !packet::verify_confirm(&ss, &mut buffer) {
+            if crypto::decrypt(&mut buffer, ss).is_none() {
                 Err(OUpgradeError::AuthenticationFailed)
             } else {
                 Ok(ChannelMeta {
@@ -653,26 +654,28 @@ async fn upgrade_inbound_low(
     stream.read_exact(&mut buffer).await.map_err(IUpgradeError::ReadPacket)?;
 
     log::debug!("peeling packet: {}", len);
-    let (to, ss, new_len) =
-        crate::packet::peel_initial(&keypair, &mut buffer).ok_or(IUpgradeError::MalformedPacket)?;
+    let (res, new_len) =
+        crate::packet::peel(&keypair, &mut buffer).ok_or(IUpgradeError::MalformedPacket)?;
 
-    log::debug!("peeled packet to: {:?}", to);
+    log::debug!("peeled packet to: {:?}", res);
 
     log::debug!("received init packet");
-    let Some(to) = to else {
-        log::debug!("received incoming stream");
-        buffer.resize(CONFIRM_PACKET_SIZE + 1, 0);
-        packet::write_confirm(&ss, &mut buffer[1..]);
-        buffer[0] = packet::OK;
-        stream.write_all(&buffer).await.map_err(IUpgradeError::WriteAuthPacket)?;
+    match res {
+        Ok(to) => Ok(IncomingOrResponse::Incoming(IncomingStream {
+            stream,
+            meta: IncomingStreamMeta { to, buffer: buffer[..new_len].to_vec() },
+        })),
+        Err(ss) => {
+            log::debug!("received incoming stream");
+            buffer.resize(crypto::TAG_SIZE + 1, 0);
+            let tag = crypto::encrypt(&mut [], ss, OsRng);
+            buffer[1..].copy_from_slice(&tag);
+            buffer[0] = packet::OK;
+            stream.write_all(&buffer).await.map_err(IUpgradeError::WriteAuthPacket)?;
 
-        return Ok(IncomingOrResponse::Response(EncryptedStream::new(stream, ss, buffer_cap)));
-    };
-
-    Ok(IncomingOrResponse::Incoming(IncomingStream {
-        stream,
-        meta: IncomingStreamMeta { to, buffer: buffer[..new_len].to_vec() },
-    }))
+            Ok(IncomingOrResponse::Response(EncryptedStream::new(stream, ss, buffer_cap)))
+        }
+    }
 }
 
 component_utils::decl_stream_protocol!(ROUTING_PROTOCOL = "rot");
@@ -694,7 +697,9 @@ pub struct StreamRequest {
     to: PeerId,
     path_id: PathId,
     recipient: PublicKey,
-    path: [(PublicKey, PeerId); crate::packet::PATH_LEN],
+    recipient_id: PeerId,
+    mid_recipient: PublicKey,
+    mid_id: PeerId,
 }
 
 #[derive(Debug)]

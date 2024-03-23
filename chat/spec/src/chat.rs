@@ -48,7 +48,6 @@ bitflags::bitflags! {
         const SEND = 1 << 0;
         const INVITE = 1 << 1;
         const KICK = 1 << 2;
-        const RATE_LIMIT = 1 << 3;
     }
 }
 

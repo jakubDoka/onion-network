@@ -498,16 +498,6 @@ impl Member {
     pub fn set_can_invite(&mut self, can: bool) {
         self.inner.permissions.set(chat_spec::Permissions::INVITE, can);
     }
-
-    #[wasm_bindgen(getter)]
-    pub fn can_rate_limit(&self) -> bool {
-        self.inner.permissions.contains(chat_spec::Permissions::RATE_LIMIT)
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_can_rate_limit(&mut self, can: bool) {
-        self.inner.permissions.set(chat_spec::Permissions::RATE_LIMIT, can);
-    }
 }
 
 #[wasm_bindgen]

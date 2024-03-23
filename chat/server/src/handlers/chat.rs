@@ -30,10 +30,10 @@ fn default<T: Default>() -> T {
 }
 
 fn advance_nonce(nonce: &mut Nonce, new_nonce: Nonce) -> Result<()> {
-    if new_nonce <= *nonce {
+    if new_nonce != *nonce + 1 {
         return Err(ChatError::InvalidChatAction(*nonce));
     }
-    *nonce = new_nonce;
+    *nonce += 1;
     Ok(())
 }
 

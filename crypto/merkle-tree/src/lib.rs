@@ -18,8 +18,21 @@ impl MerkleHash for usize {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MerkleTree<T> {
     nodes: Vec<T>,
+}
+
+impl<T: Default + MerkleHash> Default for MerkleTree<T> {
+    fn default() -> Self {
+        Self::new(Default::default())
+    }
+}
+
+impl<T: MerkleHash> FromIterator<T> for MerkleTree<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::from_base(iter)
+    }
 }
 
 impl<T: MerkleHash> MerkleTree<T> {
@@ -50,10 +63,10 @@ impl<T: MerkleHash> MerkleTree<T> {
 
     #[must_use]
     pub fn root(&self) -> &T {
-        &self.nodes[(self.nodes.len().next_power_of_two() / 2) - 1]
+        &self.nodes[(self.nodes.len().next_power_of_two() / 2).saturating_sub(1)]
     }
 
-    pub fn psuh(&mut self, value: T) {
+    pub fn push(&mut self, value: T) {
         self.nodes.extend([Default::default(), value]);
 
         let mut cursor = self.nodes.len() - 1;
@@ -150,7 +163,7 @@ mod test {
         let mut tree = MerkleTree::new(1);
         for &seq in seq {
             assert_eq!(tree.nodes, seq);
-            tree.psuh(1);
+            tree.push(1);
         }
     }
 
@@ -159,7 +172,7 @@ mod test {
         let mut tree = MerkleTree::new(1);
 
         for i in 0..1000 {
-            tree.psuh(i);
+            tree.push(i);
 
             for (i, e) in (2..tree.nodes.len()).step_by(2).zip(0..) {
                 let proof = tree.proof(i);

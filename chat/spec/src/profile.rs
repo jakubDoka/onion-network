@@ -3,7 +3,8 @@ use {
     arrayvec::ArrayString,
     chain_api::{RawUserName, USER_NAME_CAP},
     codec::Codec,
-    crypto::{enc, sign},
+    crypto::{enc, sign, SharedSecret},
+    merkle_tree::MerkleTree,
     std::{collections::BTreeMap, iter},
 };
 
@@ -15,53 +16,120 @@ pub type UserName = ArrayString<32>;
 pub struct Profile {
     pub sign: sign::PublicKey,
     pub enc: enc::PublicKey,
-    pub vault_sig: sign::Signature,
-    pub vault_version: Nonce,
+    pub vault: Vault,
     pub mail_action: Nonce,
-    #[codec(with = profile_vault_codec)]
-    pub vault: BTreeMap<crypto::Hash, Vec<u8>>,
     pub mail: Vec<u8>,
 }
 
 impl Profile {
     pub fn is_valid(&self) -> bool {
-        Proof {
-            pk: self.sign,
-            context: Self::vault_hash(&self.vault),
-            nonce: self.vault_version,
-            signature: self.vault_sig,
-        }
-        .verify()
-    }
-
-    pub fn vault_hash(values: &BTreeMap<crypto::Hash, Vec<u8>>) -> crypto::Hash {
-        values.keys().copied().reduce(crypto::hash::combine).unwrap_or_default()
+        self.vault.is_valid(self.sign)
     }
 }
 
-mod profile_vault_codec {
-    use codec::{Buffer, Codec};
+#[derive(Codec, Clone)]
+pub struct Vault {
+    pub version: Nonce,
+    pub sig: sign::Signature,
+    pub values: BTreeMap<crypto::Hash, Vec<u8>>,
+    #[codec(skip)]
+    pub merkle_tree: MerkleTree<crypto::Hash>,
+}
 
-    pub fn encode(
-        values: &std::collections::BTreeMap<crypto::Hash, Vec<u8>>,
-        buffer: &mut impl Buffer,
-    ) -> Option<()> {
-        values.len().encode(buffer)?;
-        for v in values.values() {
-            v.encode(buffer)?;
-        }
-        Some(())
+impl Vault {
+    pub fn prepare(mut self, pk: sign::PublicKey) -> Option<Self> {
+        self.recompute();
+        self.is_valid(pk).then_some(self)
     }
 
-    pub fn decode(buffer: &mut &[u8]) -> Option<std::collections::BTreeMap<crypto::Hash, Vec<u8>>> {
-        let len = usize::decode(buffer)?;
-        let mut values = std::collections::BTreeMap::new();
-        for _ in 0..len {
-            let value = Vec::<u8>::decode(buffer)?;
-            let key = crypto::hash::new(&value);
-            values.insert(key, value);
+    pub fn is_valid(&self, pk: sign::PublicKey) -> bool {
+        Proof { pk, context: *self.merkle_tree.root(), nonce: self.version, signature: self.sig }
+            .verify()
+    }
+
+    pub fn recompute(&mut self) {
+        self.merkle_tree.clear([0; 32]);
+        for (k, v) in self.values.iter() {
+            let leaf = crypto::hash::combine(*k, crypto::hash::new(v));
+            self.merkle_tree.push(leaf);
         }
-        Some(values)
+    }
+
+    pub fn try_remove(&mut self, key: crypto::Hash, proof: Proof<crypto::Hash>) -> bool {
+        if !proof.verify() {
+            return false;
+        }
+
+        if proof.nonce <= self.version {
+            return false;
+        }
+
+        let Some(v) = self.values.remove(&key) else {
+            return false;
+        };
+
+        // TODO: we might be able to avoid full recompute and update smartly
+        self.recompute();
+
+        if proof.context != *self.merkle_tree.root() {
+            self.values.insert(key, v);
+            return false;
+        }
+
+        self.version = proof.nonce;
+        self.sig = proof.signature;
+
+        true
+    }
+
+    pub fn try_insert(
+        &mut self,
+        key: crypto::Hash,
+        value: Vec<u8>,
+        proof: Proof<crypto::Hash>,
+    ) -> bool {
+        if !proof.verify() {
+            return false;
+        }
+
+        if proof.nonce <= self.version {
+            return false;
+        }
+
+        let prev = self.values.insert(key, value);
+
+        // TODO: we might be able to avoid full recompute and update smartly
+        self.recompute();
+
+        if proof.context != *self.merkle_tree.root() {
+            if let Some(prev) = prev {
+                self.values.insert(key, prev);
+            } else {
+                self.values.remove(&key);
+            }
+
+            return false;
+        }
+
+        self.version = proof.nonce;
+        self.sig = proof.signature;
+
+        true
+    }
+
+    pub fn get_ecrypted<T: for<'a> Codec<'a>>(
+        &self,
+        key: crypto::Hash,
+        encryption_key: SharedSecret,
+    ) -> Option<T> {
+        let mut value = self.values.get(&key)?.clone();
+        let value = crypto::decrypt(&mut value, encryption_key)?;
+        T::decode(&mut &*value)
+    }
+
+    pub fn get_plaintext<T: for<'a> Codec<'a>>(&self, key: crypto::Hash) -> Option<T> {
+        let value = self.values.get(&key)?;
+        T::decode(&mut value.as_slice())
     }
 }
 

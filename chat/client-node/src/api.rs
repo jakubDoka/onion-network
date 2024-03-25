@@ -335,23 +335,26 @@ impl ProfileSubscription {
     /// @throw
     #[wasm_bindgen]
     pub async fn next(&mut self) -> Result<HardenedChatMessage, JsValue> {
+        let mut messages = Vec::new();
+        let mut changes = Vec::new();
         while let Some(bytes) = self.stream.next().await {
             let Some(mail) = MailVariants::decode(&mut &bytes[..]) else {
                 log::warn!("invalid message: {:?}", bytes);
                 continue;
             };
 
-            let (message, id) =
-                mail.handle(self.context.as_ref(), self.reqs.clone()).await.map_err(err_to_js)?;
+            mail.handle(self.context.as_ref(), self.reqs.clone(), &mut changes, &mut messages)
+                .await
+                .map_err(err_to_js)?;
 
-            if let Some(vid) = id {
+            for vid in changes.drain(..) {
                 self.reqs
                     .save_vault_component(vid, self.context.as_ref())
                     .await
                     .map_err(err_to_js)?;
             }
 
-            if let Some((username, message, chatname)) = message {
+            if let Some((username, message, chatname)) = messages.pop() {
                 return Ok(HardenedChatMessage {
                     sender: username.to_string(),
                     content: message.to_string(),

@@ -1,8 +1,4 @@
-use {
-    crate::{FixedAesPayload, SharedSecret, ASOC_DATA},
-    core::array,
-    rand_core::CryptoRngCore,
-};
+use {crate::SharedSecret, core::array, rand_core::CryptoRngCore};
 
 #[derive(Clone)]
 #[cfg_attr(feature = "codec", derive(codec::Codec))]
@@ -15,8 +11,7 @@ pub struct Ciphertext {
 #[derive(Clone)]
 #[cfg_attr(feature = "codec", derive(codec::Codec))]
 pub struct ChoosenCiphertext {
-    #[cfg_attr(feature = "codec", codec(with = codec::unsafe_as_raw_bytes))]
-    pl: FixedAesPayload<32>,
+    xored_secret: SharedSecret,
     cp: Ciphertext,
 }
 
@@ -73,7 +68,7 @@ impl Keypair {
         mut rng: impl CryptoRngCore,
     ) -> ChoosenCiphertext {
         let (cp, key) = self.encapsulate(public_key, &mut rng);
-        ChoosenCiphertext { pl: FixedAesPayload::new(secret, &key, ASOC_DATA, rng), cp }
+        ChoosenCiphertext { xored_secret: array::from_fn(|i| secret[i] ^ key[i]), cp }
     }
 
     pub fn decapsulate(&self, ciphertext: &Ciphertext) -> Result<SharedSecret, DecapsulationError> {
@@ -87,7 +82,7 @@ impl Keypair {
         ciphertext: &ChoosenCiphertext,
     ) -> Result<SharedSecret, DecapsulationError> {
         let secret = self.decapsulate(&ciphertext.cp)?;
-        Ok(ciphertext.pl.decrypt(secret, ASOC_DATA)?)
+        Ok(array::from_fn(|i| secret[i] ^ ciphertext.xored_secret[i]))
     }
 }
 

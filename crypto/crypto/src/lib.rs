@@ -1,20 +1,28 @@
 #![no_std]
 #![feature(error_in_core)]
 
-use aes_gcm::{
-    aead::{generic_array::GenericArray, Tag},
-    aes::cipher::Unsigned,
-    AeadCore, AeadInPlace, Aes256Gcm, KeyInit, KeySizeUser, Nonce,
+use {
+    aes_gcm::{
+        aead::{generic_array::GenericArray, Tag},
+        aes::cipher::Unsigned,
+        AeadCore, AeadInPlace, Aes256Gcm, KeyInit, KeySizeUser, Nonce,
+    },
+    rand_core::CryptoRngCore,
 };
-
-pub const ASOC_DATA: &[u8] = concat!("pqc-orion-crypto/enc/", env!("CARGO_PKG_VERSION")).as_bytes();
+pub use {hash::Hash, rand_core};
 
 pub mod enc;
 pub mod hash;
 pub mod sign;
 
-use rand_core::CryptoRngCore;
-pub use {hash::Hash, rand_core};
+const NONCE_SIZE: usize = <<Aes256Gcm as AeadCore>::NonceSize as Unsigned>::USIZE;
+const _TAG_SIZE: usize = <<Aes256Gcm as AeadCore>::TagSize as Unsigned>::USIZE;
+
+pub const ASOC_DATA: &[u8] = concat!("pqc-orion-crypto/enc/", env!("CARGO_PKG_VERSION")).as_bytes();
+pub const TAG_SIZE: usize = _TAG_SIZE + NONCE_SIZE;
+pub const SHARED_SECRET_SIZE: usize = <<Aes256Gcm as KeySizeUser>::KeySize as Unsigned>::USIZE;
+
+pub type SharedSecret = [u8; SHARED_SECRET_SIZE];
 
 pub fn new_secret(mut rng: impl CryptoRngCore) -> SharedSecret {
     let mut secret = [0; SHARED_SECRET_SIZE];
@@ -51,50 +59,3 @@ pub fn encrypt(data: &mut [u8], secret: SharedSecret, rng: impl CryptoRngCore) -
 
     unsafe { core::mem::transmute((tag, nonce)) }
 }
-
-const NONCE_SIZE: usize = <<Aes256Gcm as AeadCore>::NonceSize as Unsigned>::USIZE;
-const _TAG_SIZE: usize = <<Aes256Gcm as AeadCore>::TagSize as Unsigned>::USIZE;
-
-pub const TAG_SIZE: usize = _TAG_SIZE + NONCE_SIZE;
-
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "codec", derive(codec::Codec))]
-pub struct FixedAesPayload<const SIZE: usize> {
-    data: [u8; SIZE],
-    #[cfg_attr(feature = "codec", codec(with = codec::unsafe_as_raw_bytes))]
-    tag: Tag<Aes256Gcm>,
-    #[cfg_attr(feature = "codec", codec(with = codec::unsafe_as_raw_bytes))]
-    nonce: Nonce<<Aes256Gcm as AeadCore>::NonceSize>,
-}
-
-impl<const SIZE: usize> FixedAesPayload<SIZE> {
-    pub fn new(
-        mut data: [u8; SIZE],
-        key: &SharedSecret,
-        asoc_data: &[u8],
-        rng: impl CryptoRngCore,
-    ) -> Self {
-        let nonce = Aes256Gcm::generate_nonce(rng);
-        let cipher = Aes256Gcm::new(&GenericArray::from(*key));
-        let tag = cipher
-            .encrypt_in_place_detached(&nonce, asoc_data, &mut data)
-            .expect("cannot fail from the implementation");
-        Self { data, tag, nonce }
-    }
-
-    pub fn decrypt(
-        self,
-        key: SharedSecret,
-        asoc_data: &[u8],
-    ) -> Result<[u8; SIZE], aes_gcm::Error> {
-        let mut data = self.data;
-        let cipher = Aes256Gcm::new(&GenericArray::from(key));
-        cipher
-            .decrypt_in_place_detached(&self.nonce, asoc_data, &mut data, &self.tag)
-            .map(|()| data)
-    }
-}
-
-pub const SHARED_SECRET_SIZE: usize = <<Aes256Gcm as KeySizeUser>::KeySize as Unsigned>::USIZE;
-
-pub type SharedSecret = [u8; SHARED_SECRET_SIZE];

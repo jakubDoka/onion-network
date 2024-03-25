@@ -39,12 +39,14 @@ pub mod rpcs {
         FETCH_MEMBERS;
 
         FETCH_PROFILE;
-        FETCH_VAULT;
         FETCH_PROFILE_FULL;
         CREATE_PROFILE;
         SEND_MAIL;
         READ_MAIL;
-        UPDATE_VAULT;
+        INSERT_TO_VAULT;
+        REMOVE_FROM_VAULT;
+        FETCH_VAULT;
+        FETCH_VAULT_KEY;
 
         SUBSCRIBE;
         UNSUBSCRIBE;

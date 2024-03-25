@@ -107,14 +107,14 @@ fn App() -> impl IntoView {
     ) -> Result<()> {
         let mail = MailVariants::decode(&mut raw_mail).context("decoding mail")?;
         let dispatch = state.requests.get_value().context("no dispatch")?;
-        let (message, change) = mail.handle(&state, dispatch).await?;
-        if let Some((sender, content, chat)) = message {
+        let mut messages = Vec::new();
+        mail.handle(&state, dispatch, vault_updates, &mut messages).await?;
+        if let Some((sender, content, chat)) = messages.pop() {
             let message =
                 db::Message { sender, owner: state.with_keys(|k| k.name)?, content, chat };
             new_messages.push(message.clone());
             state.hardened_messages.set(Some((chat, message)));
         }
-        vault_updates.extend(change);
         Ok(())
     }
 

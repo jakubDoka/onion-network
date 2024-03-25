@@ -54,7 +54,7 @@ impl Keypair {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PublicKey([u8; PUBLICKEYBYTES]);
 
 impl PublicKey {

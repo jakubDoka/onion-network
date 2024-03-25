@@ -28,8 +28,7 @@ use {
     onion::{EncryptedStream, PathId, SharedSecret},
     rand::{rngs::OsRng, seq::IteratorRandom, CryptoRng, Rng, RngCore},
     std::{
-        borrow::Cow,
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, HashMap, HashSet},
         convert::{identity, Infallible},
         future::Future,
         io,
@@ -67,90 +66,138 @@ pub struct JoinRequestPayload {
     pub chat: ChatName,
     pub identity: Identity,
     #[codec(with = codec::unsafe_as_raw_bytes)]
-    pub init_pk: double_ratchet::PublicKey,
+    pub init: double_ratchet::InitiatiorKey,
 }
 
-#[derive(Default)]
 pub struct Vault {
-    pub chats_hash: crypto::Hash,
     pub chats: HashMap<ChatName, ChatMeta>,
     pub hardened_chats: HashMap<ChatName, HardenedChatMeta>,
-    pub theme_hash: crypto::Hash,
     pub theme: Theme,
+    raw: chat_spec::Vault,
+}
+
+impl Default for Vault {
+    fn default() -> Self {
+        Self::deserialize(Default::default(), Default::default())
+    }
+}
+
+fn constant_key(name: &str) -> SharedSecret {
+    crypto::hash::new(crypto::hash::new(name))
+}
+
+fn hardened_chat_key_hash(name: ChatName) -> crypto::Hash {
+    crypto::hash::combine(
+        crypto::hash::new(name.as_bytes()),
+        crypto::hash::new("hardened_chat_key"),
+    )
+}
+
+fn hardened_chat_hash(name: ChatName) -> crypto::Hash {
+    crypto::hash::new(name.as_bytes())
+}
+
+fn chats() -> SharedSecret {
+    constant_key("chats")
+}
+
+fn theme() -> SharedSecret {
+    constant_key("theme")
+}
+
+fn hardened_chats() -> SharedSecret {
+    constant_key("hardened_chat_names")
+}
+
+fn get_encrypted<T: for<'a> Codec<'a>>(
+    key: crypto::Hash,
+    decryption_key: SharedSecret,
+    values: &BTreeMap<crypto::Hash, Vec<u8>>,
+) -> Option<T> {
+    values.get(&key).and_then(|v| <_>::decode(&mut &*decrypt(&mut v.to_owned(), decryption_key)?))
+}
+
+fn get_plain<T: for<'a> Codec<'a>>(
+    key: crypto::Hash,
+    values: &BTreeMap<crypto::Hash, Vec<u8>>,
+) -> Option<T> {
+    values.get(&key).and_then(|v| <_>::decode(&mut v.as_slice()))
 }
 
 impl Vault {
-    pub fn from_encrypted_components(components: &[&[u8]], key: SharedSecret) -> Self {
-        let mut base = Self::default();
+    fn deserialize(values: BTreeMap<crypto::Hash, Vec<u8>>, key: SharedSecret) -> Self {
+        let hardened_chats: Vec<ChatName> =
+            get_encrypted(hardened_chats(), key, &values).unwrap_or_default();
+        let hardened_chats = hardened_chats
+            .into_iter()
+            .map(|name| (hardened_chat_hash(name), name))
+            .filter_map(|(hash, name)| Some((name, get_encrypted(hash, key, &values)?)))
+            .collect();
 
-        for component in components {
-            let hash = crypto::hash::new(component);
-            let mut component = component.to_vec();
-            let Some(component) = decrypt(&mut component, key) else { continue };
-            let Some(component) = VaultComponent::decode(&mut &*component) else { continue };
-            match component {
-                VaultComponent::Chats(chats) => {
-                    base.chats = chats.into_owned();
-                    base.chats_hash = hash;
-                }
-                VaultComponent::HardenedChat(name, meta) => {
-                    base.hardened_chats
-                        .insert(name, HardenedChatMeta { hash, ..meta.into_owned() });
-                }
-                VaultComponent::Theme(theme) => {
-                    base.theme_hash = hash;
-                    base.theme = theme;
-                }
-            }
+        Self {
+            chats: get_encrypted(chats(), key, &values).unwrap_or_default(),
+            theme: get_plain(theme(), &values).unwrap_or_default(),
+            hardened_chats,
+            raw: {
+                let mut raw = chat_spec::Vault {
+                    values,
+                    merkle_tree: Default::default(),
+                    sig: unsafe { std::mem::zeroed() },
+                    version: 0,
+                };
+                raw.recompute();
+                raw
+            },
         }
-
-        base
     }
 
-    pub fn total_hash(&self) -> crypto::Hash {
-        let mut all_hashes = [self.chats_hash, self.theme_hash]
-            .into_iter()
-            .chain(self.hardened_chats.values().map(|hc| hc.hash))
-            .filter(|&h| h != crypto::Hash::default())
-            .collect::<Vec<_>>();
-        all_hashes.sort_unstable();
-        all_hashes.into_iter().reduce(crypto::hash::combine).unwrap_or_default()
+    pub fn merkle_hash(&self) -> crypto::Hash {
+        *self.raw.merkle_tree.root()
     }
 
     pub fn shapshot(
         &mut self,
         id: VaultComponentId,
         key: SharedSecret,
-    ) -> (crypto::Hash, Option<Vec<u8>>) {
-        let (bytes, prev_hash) = match id {
-            VaultComponentId::Chats => {
-                (VaultComponent::Chats(Cow::Borrowed(&self.chats)).to_bytes(), &mut self.chats_hash)
-            }
+    ) -> Option<(crypto::Hash, Vec<u8>)> {
+        let hash = match id {
+            VaultComponentId::Chats => chats(),
+            VaultComponentId::Theme => theme(),
+            VaultComponentId::HardenedChatNames => hardened_chats(),
+            VaultComponentId::HardenedChatPk(name, _) => hardened_chat_key_hash(name),
+            VaultComponentId::HardenedChat(name) => hardened_chat_hash(name),
+        };
+
+        let value = match id {
+            VaultComponentId::Chats => encrypt(self.chats.to_bytes(), key),
+            VaultComponentId::Theme => self.theme.to_bytes(),
             VaultComponentId::HardenedChat(name) => {
-                let chat = self.hardened_chats.get_mut(&name).expect("we just checked");
-                (VaultComponent::HardenedChat(name, Cow::Borrowed(chat)).to_bytes(), &mut chat.hash)
+                self.hardened_chats.get(&name).map(|chat| encrypt(chat.to_bytes(), key))?
             }
-            VaultComponentId::Theme => {
-                (VaultComponent::Theme(self.theme).to_bytes(), &mut self.theme_hash)
+            VaultComponentId::HardenedChatPk(_, pk) => pk.to_bytes().to_vec(),
+            VaultComponentId::HardenedChatNames => {
+                encrypt(self.hardened_chats.keys().cloned().collect::<Vec<_>>().to_bytes(), key)
             }
         };
 
-        let data = encrypt(bytes, key);
-        (std::mem::replace(prev_hash, crypto::hash::new(&data)), Some(data))
+        if self.raw.values.get(&hash) == Some(&value) {
+            return None;
+        }
+
+        self.raw.values.insert(hash, value.clone());
+        self.raw.recompute();
+
+        Some((hash, value))
     }
 }
 
-#[derive(Codec)]
-enum VaultComponent<'a> {
-    Chats(Cow<'a, HashMap<ChatName, ChatMeta>>),
-    HardenedChat(ChatName, Cow<'a, HardenedChatMeta>),
-    Theme(Theme),
-}
-
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[allow(clippy::large_enum_variant)]
 pub enum VaultComponentId {
     Chats,
     HardenedChat(ChatName),
+    HardenedChatPk(ChatName, double_ratchet::PublicKey),
+    HardenedChatNames,
     Theme,
 }
 
@@ -180,14 +227,14 @@ impl ChatMeta {
 #[derive(Default, Codec, Clone)]
 pub struct HardenedChatMeta {
     pub members: HashMap<UserName, MemberMeta>,
-    #[codec(skip)]
-    pub hash: crypto::Hash,
 }
 
 #[derive(Codec, Clone)]
 pub struct MemberMeta {
     pub dr: DoubleRatchet,
     pub identity: crypto::Hash,
+    #[codec(skip)]
+    pub public_key: Option<double_ratchet::PublicKey>,
 }
 
 #[derive(Codec)]
@@ -226,14 +273,16 @@ impl MailVariants {
         self,
         ctx: &impl RequestContext,
         requests: Requests,
-    ) -> Result<(Option<(UserName, String, ChatName)>, Option<VaultComponentId>)> {
+        updates: &mut Vec<VaultComponentId>,
+        messages: &mut Vec<(UserName, MessageContent, ChatName)>,
+    ) -> Result<()> {
         match self {
             MailVariants::ChatInvite { chat, cp } => {
                 let secret = ctx
                     .with_keys(|k| k.enc.decapsulate_choosen(&cp))?
                     .context("failed to decapsulate invite")?;
                 ctx.with_vault(|v| Ok(_ = v.chats.insert(chat, ChatMeta::from_secret(secret))))?;
-                Ok((None, Some(VaultComponentId::Chats)))
+                updates.push(VaultComponentId::Chats);
             }
             MailVariants::HardenedJoinRequest { cp, mut payload } => {
                 let secret = ctx
@@ -243,10 +292,11 @@ impl MailVariants {
                 let payload = crypto::decrypt(&mut payload, secret)
                     .context("failed to decrypt join request payload")?;
 
-                let JoinRequestPayload { chat, name, identity, init_pk } =
+                let JoinRequestPayload { chat, name, identity, init } =
                     <_>::decode(&mut &*payload).context("failed to decode join request payload")?;
 
-                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
+                let dr = DoubleRatchet::recipient(secret, init, OsRng);
+                updates.push(VaultComponentId::HardenedChatPk(chat, dr.public_key()));
 
                 if ctx.with_vault(|v| Ok(!v.hardened_chats.contains_key(&chat)))? {
                     anyhow::bail!("request to join chat we dont have");
@@ -254,11 +304,12 @@ impl MailVariants {
 
                 ctx.with_vault(|v| {
                     let chat = v.hardened_chats.get_mut(&chat).expect("we just checked");
-                    chat.members.insert(name, MemberMeta { dr, identity });
+                    chat.members.insert(name, MemberMeta { dr, identity, public_key: None });
                     Ok(())
                 })?;
 
-                Ok((None, Some(VaultComponentId::HardenedChat(chat))))
+                updates.push(VaultComponentId::HardenedChat(chat));
+                updates.push(VaultComponentId::HardenedChatNames);
             }
             MailVariants::HardenedChatInvite { cp, mut payload } => {
                 log::debug!("handling hardened chat invite");
@@ -268,10 +319,11 @@ impl MailVariants {
 
                 let payload = crypto::decrypt(&mut payload, secret)
                     .context("failed to decrypt hardened invite")?;
-                let HardenedChatInvitePayload { chat, inviter, inviter_id, members, init_pk } =
+                let HardenedChatInvitePayload { chat, inviter, inviter_id, members, init } =
                     <_>::decode(&mut &*payload).context("failed to decode hardened invite")?;
 
-                let dr = DoubleRatchet::recipient(init_pk, secret, OsRng);
+                let dr = DoubleRatchet::recipient(secret, init, OsRng);
+                updates.push(VaultComponentId::HardenedChatPk(chat, dr.public_key()));
 
                 let members = join_all(members.into_iter().map(|(name, id)| {
                     requests
@@ -288,28 +340,33 @@ impl MailVariants {
                     members
                         .into_iter()
                         .for_each(|(name, secret)| _ = meta.members.insert(name, secret));
-                    meta.members.insert(inviter, MemberMeta { dr, identity: inviter_id });
+                    meta.members.insert(inviter, MemberMeta {
+                        dr,
+                        identity: inviter_id,
+                        public_key: None,
+                    });
                     Ok(())
                 })?;
 
-                Ok((None, Some(VaultComponentId::HardenedChat(chat))))
+                updates.push(VaultComponentId::HardenedChat(chat));
+                updates.push(VaultComponentId::HardenedChatNames);
             }
-            MailVariants::HardenedChatMessage { nonce, chat, header, mut content } => ctx
-                .with_vault(|v| {
+            MailVariants::HardenedChatMessage { nonce, chat, header, mut content } => {
+                return ctx.with_vault(|v| {
                     let Some((&chat, meta)) = v
                         .hardened_chats
                         .iter_mut()
                         .find(|(c, _)| crypto::hash::with_nonce(c.as_bytes(), nonce) == chat)
                     else {
                         log::warn!("received message for unknown chat");
-                        return Ok((None, None));
+                        return Ok(());
                     };
 
                     let Some((sender, content)) =
                         meta.members.iter_mut().find_map(|(&name, mm)| {
                             log::debug!("trying to decrypt message for {}", name);
                             let mut temp_dr = mm.dr.clone();
-                            let secret = temp_dr.recv_message(header, OsRng)?;
+                            let secret = temp_dr.recv(header, OsRng).ok()?;
                             let decrypted = crypto::decrypt(&mut content, secret)?;
                             let message = std::str::from_utf8(decrypted).ok()?.into();
                             mm.dr = temp_dr;
@@ -318,12 +375,18 @@ impl MailVariants {
                         })
                     else {
                         log::warn!("received message for chat we are not in");
-                        return Ok((None, None));
+                        return Ok(());
                     };
 
-                    Ok((Some((sender, content, chat)), Some(VaultComponentId::HardenedChat(chat))))
-                }),
+                    messages.push((sender, content, chat));
+                    updates.push(VaultComponentId::HardenedChat(chat));
+
+                    Ok(())
+                })
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -332,9 +395,9 @@ pub struct HardenedChatInvitePayload {
     pub chat: ChatName,
     pub inviter: UserName,
     pub inviter_id: Identity,
-    #[codec(with = codec::unsafe_as_raw_bytes)]
-    pub init_pk: double_ratchet::PublicKey,
     pub members: Vec<(UserName, Identity)>,
+    #[codec(with = codec::unsafe_as_raw_bytes)]
+    pub init: double_ratchet::InitiatiorKey,
 }
 
 pub fn try_set_color(name: &str, value: u32) -> Result<(), JsValue> {
@@ -549,7 +612,7 @@ impl Node {
 
         set_state!(VaultLoad);
         let (mut vault_nonce, mail_action, vault) = match request_dispatch
-            .dispatch_direct::<(Nonce, Nonce, Vec<&[u8]>)>(
+            .dispatch_direct::<(Nonce, Nonce, BTreeMap<crypto::Hash, Vec<u8>>)>(
                 &mut profile_stream,
                 rpcs::FETCH_VAULT,
                 Topic::Profile(profile_hash.sign),
@@ -564,6 +627,8 @@ impl Node {
             }
         };
 
+        log::info!("{:?}", vault);
+
         let vault = if vault.is_empty() && vault_nonce == 0 {
             set_state!(ProfileCreate);
             let proof = Proof::new(&keys.sign, &mut vault_nonce, crypto::Hash::default(), OsRng);
@@ -577,9 +642,9 @@ impl Node {
                 .await
                 .context("creating account")?;
 
-            Default::default()
+            Vault::default()
         } else {
-            Vault::from_encrypted_components(&vault, keys.vault)
+            Vault::deserialize(vault, keys.vault)
         };
         let _ = vault.theme.apply();
 
@@ -1023,6 +1088,9 @@ impl Requests {
         ctx.with_vault(|v| Ok(v.hardened_chats.insert(name, HardenedChatMeta::default())))?;
         self.save_vault_component(VaultComponentId::HardenedChat(name), &ctx)
             .await
+            .context("saving vault")?;
+        self.save_vault_component(VaultComponentId::HardenedChatNames, &ctx)
+            .await
             .context("saving vault")
     }
 
@@ -1038,13 +1106,16 @@ impl Requests {
             .sign;
         let keys = self.fetch_keys(to).await.context("fetching keys")?;
         let (cp, ss) = ctx.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
-        let (dr, init_pk) = DoubleRatchet::sender(ss, OsRng);
+        let (dr, init) = DoubleRatchet::sender(ss, OsRng);
+        self.save_vault_component(VaultComponentId::HardenedChatPk(name, dr.public_key()), &ctx)
+            .await
+            .context("saving vault")?;
 
         let members = ctx.with_vault(|v| {
             let cm = v.hardened_chats.get_mut(&name).with_context(vault_chat_404(name))?;
             let members =
                 cm.members.iter().map(|(&name, m)| (name, m.identity)).collect::<Vec<_>>();
-            cm.members.insert(to_name, MemberMeta { dr, identity: to });
+            cm.members.insert(to_name, MemberMeta { dr, identity: to, public_key: None });
             Ok(members)
         })?;
 
@@ -1052,8 +1123,8 @@ impl Requests {
             chat: name,
             inviter: ctx.with_keys(|k| k.name)?,
             inviter_id: ctx.with_keys(UserKeys::identity_hash)?,
-            init_pk,
             members,
+            init,
         }
         .to_bytes();
         let tag = crypto::encrypt(&mut payload, ss, OsRng);
@@ -1081,9 +1152,11 @@ impl Requests {
             meta: &mut MemberMeta,
             reqs: &Requests,
         ) -> impl Future<Output = Result<bool, ChatError>> {
+            let payload = meta.public_key.map(|pk| meta.dr.send(pk, OsRng));
+            if payload.map_or(false, |(header, _)| header.is_major()) {
+                meta.public_key = None;
+            }
             let mut content = message.to_vec();
-            let payload = meta.dr.send_message();
-
             let nonce = OsRng.gen::<Nonce>();
             let identity = meta.identity;
             let mut reqs = reqs.clone();
@@ -1101,6 +1174,26 @@ impl Requests {
             }
         }
 
+        let missing_keys = ctx.with_vault(|v| {
+            let cm = v.hardened_chats.get(&name).with_context(vault_chat_404(name))?;
+            let iter = cm.members.iter().filter(|(_, meta)| meta.public_key.is_none()).map(
+                |(&nm, meta)| {
+                    self.clone()
+                        .fetch_hardened_chat_key(name, meta.identity)
+                        .map_ok(move |v| (nm, v))
+                },
+            );
+            Ok(futures::future::join_all(iter))
+        })?;
+
+        for (nm, key) in missing_keys.await.into_iter().map(Result::unwrap) {
+            ctx.with_vault(|v| {
+                v.hardened_chats.get_mut(&name).unwrap().members.get_mut(&nm).unwrap().public_key =
+                    Some(key);
+                Ok(())
+            })?;
+        }
+
         let s = &mut *self;
         let requests = ctx.with_vault(move |v| {
             let cm = v.hardened_chats.get_mut(&name).with_context(vault_chat_404(name))?;
@@ -1116,6 +1209,25 @@ impl Requests {
         Ok(res)
     }
 
+    pub async fn fetch_hardened_chat_key(
+        mut self,
+        name: ChatName,
+        identity: Identity,
+    ) -> Result<double_ratchet::PublicKey> {
+        let hash = hardened_chat_key_hash(name);
+        self.fetch_vault_key(identity, hash).await.and_then(|Reminder(data)| {
+            Ok(double_ratchet::PublicKey::from_bytes(data.try_into().context("invalid key")?))
+        })
+    }
+
+    pub async fn fetch_vault_key(
+        &mut self,
+        identity: Identity,
+        key: crypto::Hash,
+    ) -> Result<Reminder> {
+        self.dispatch(rpcs::FETCH_VAULT_KEY, Topic::Profile(identity), key).await
+    }
+
     pub async fn send_hardened_join_request(
         mut self,
         to: Identity,
@@ -1128,9 +1240,9 @@ impl Requests {
         let pf = self.fetch_keys(to).await.context("fetching profile")?;
 
         let (cp, secret) = ctx.with_keys(|k| k.enc.encapsulate(&pf.enc, OsRng))?;
-        let (dr, init_pk) = DoubleRatchet::sender(secret, OsRng);
+        let (dr, init) = DoubleRatchet::sender(secret, OsRng);
 
-        let mut payload = JoinRequestPayload { chat, name, identity, init_pk }.to_bytes();
+        let mut payload = JoinRequestPayload { chat, name, identity, init }.to_bytes();
         let tag = crypto::encrypt(&mut payload, secret, OsRng);
         payload.extend(tag);
 
@@ -1140,7 +1252,7 @@ impl Requests {
 
         log::debug!("sent invite to {name}");
 
-        Ok(MemberMeta { dr, identity: to })
+        Ok(MemberMeta { dr, identity: to, public_key: None })
     }
 
     pub async fn update_member(
@@ -1193,13 +1305,21 @@ impl Requests {
         self.dispatch(rpcs::FETCH_MESSAGES, Topic::Chat(name), cursor).await
     }
 
-    pub async fn update_vault<'a>(
-        &'a mut self,
+    pub async fn insert_to_vault(
+        &mut self,
         proof: Proof<crypto::Hash>,
-        old_hash: crypto::Hash,
-        data: Option<Reminder<'_>>,
+        key: crypto::Hash,
+        data: Vec<u8>,
     ) -> Result<()> {
-        self.dispatch(rpcs::UPDATE_VAULT, proof.topic(), (proof, old_hash, data)).await
+        self.dispatch(rpcs::INSERT_TO_VAULT, proof.topic(), (proof, key, data)).await
+    }
+
+    pub async fn remove_from_vault(
+        &mut self,
+        proof: Proof<crypto::Hash>,
+        key: crypto::Hash,
+    ) -> Result<()> {
+        self.dispatch(rpcs::REMOVE_FROM_VAULT, proof.topic(), (proof, key)).await
     }
 
     pub async fn fetch_keys(&mut self, identity: Identity) -> Result<FetchProfileResp> {
@@ -1286,12 +1406,14 @@ impl Requests {
         ctx: &impl RequestContext,
     ) -> Result<()> {
         let key = ctx.with_keys(|k| k.vault)?;
-        let (hash, data) = ctx.with_vault(|v| Ok(v.shapshot(id, key)))?;
-        let total_hash = ctx.with_vault(|v| Ok(v.total_hash()))?;
+        let Some((hash, data)) = ctx.with_vault(|v| Ok(v.shapshot(id, key)))? else {
+            return Ok(());
+        };
+        let total_hash = ctx.with_vault(|v| Ok(v.merkle_hash()))?;
         let proof = ctx.with_keys(|k| {
             ctx.with_vault_version(|nonce| Proof::new(&k.sign, nonce, total_hash, OsRng))
         })??;
-        self.update_vault(proof, hash, data.as_deref().map(Reminder)).await
+        self.insert_to_vault(proof, hash, data).await
     }
 
     async fn dispatch_direct<'a, R: Codec<'a>>(

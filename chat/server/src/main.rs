@@ -1,5 +1,4 @@
 #![feature(iter_advance_by)]
-#![feature(associated_type_bounds)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(array_windows)]
 #![feature(iter_collect_into)]
@@ -358,9 +357,11 @@ impl Server {
                     rpcs::CREATE_PROFILE => create.repl();
                     rpcs::SEND_MAIL => send_mail.repl().restore();
                     rpcs::READ_MAIL => read_mail.repl().restore();
-                    rpcs::UPDATE_VAULT => update_vault.repl().restore();
+                    rpcs::INSERT_TO_VAULT => insert_to_vault.repl().restore();
+                    rpcs::REMOVE_FROM_VAULT => remove_from_vault.repl().restore();
                     rpcs::FETCH_PROFILE => fetch_keys.restore();
                     rpcs::FETCH_VAULT => fetch_vault.restore();
+                    rpcs::FETCH_VAULT_KEY => fetch_vault_key.restore();
                 };
             ),
             server_router: handlers::router!(
@@ -377,7 +378,8 @@ impl Server {
                     rpcs::CREATE_PROFILE => create;
                     rpcs::SEND_MAIL => send_mail.restore();
                     rpcs::READ_MAIL => read_mail.restore();
-                    rpcs::UPDATE_VAULT => update_vault.restore();
+                    rpcs::INSERT_TO_VAULT => insert_to_vault.restore();
+                    rpcs::REMOVE_FROM_VAULT => remove_from_vault.restore();
                     rpcs::FETCH_PROFILE_FULL => fetch_full;
                 };
             ),

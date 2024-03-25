@@ -2,7 +2,6 @@
 #![feature(macro_metavar_expr)]
 #![feature(slice_take)]
 #![feature(slice_from_ptr_range)]
-#![feature(slice_split_at_unchecked)]
 
 #[macro_export]
 macro_rules! build_env {

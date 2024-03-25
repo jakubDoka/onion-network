@@ -1,6 +1,8 @@
 use {
     crate::OnlineLocation,
-    chat_spec::{advance_nonce, rpcs, ChatError, FetchProfileResp, Identity, Mail, Profile, Proof},
+    chat_spec::{
+        advance_nonce, rpcs, ChatError, FetchProfileResp, Identity, Mail, Profile, Proof, Vault,
+    },
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::mapref::entry::Entry,
     libp2p::futures::StreamExt,
@@ -14,79 +16,74 @@ type Result<T, E = ChatError> = std::result::Result<T, E>;
 pub async fn create(
     cx: super::Context,
     identity: Identity,
-    (proof, vault, enc): (Proof<crypto::Hash>, Vec<&[u8]>, crypto::enc::PublicKey),
+    (proof, values, enc): (
+        Proof<crypto::Hash>,
+        BTreeMap<crypto::Hash, Vec<u8>>,
+        crypto::enc::PublicKey,
+    ),
 ) -> Result<()> {
-    crate::ensure!(proof.verify(), ChatError::InvalidProof);
-
-    let vault =
-        vault.into_iter().map(|b| (crypto::hash::new(b), b.to_vec())).collect::<BTreeMap<_, _>>();
-    let vault_hash = vault.keys().copied().reduce(crypto::hash::combine).unwrap_or_default();
-    crate::ensure!(vault_hash == proof.context, ChatError::InvalidProof);
-
+    let vault = Vault {
+        version: proof.nonce,
+        sig: proof.signature,
+        values,
+        merkle_tree: Default::default(),
+    }
+    .prepare(proof.pk)
+    .ok_or(ChatError::InvalidProof)?;
     match cx.profiles.entry(identity) {
         Entry::Vacant(entry) => {
             entry.insert(Profile {
                 sign: proof.pk,
                 enc,
-                vault_sig: proof.signature,
-                vault_version: proof.nonce,
-                mail_action: proof.nonce,
                 vault,
+                mail_action: proof.nonce,
                 mail: Vec::new(),
             });
             Ok(())
         }
-        Entry::Occupied(mut entry) if entry.get().vault_version < proof.nonce => {
-            let account = entry.get_mut();
-            account.vault_version = proof.nonce;
-            account.vault_sig = proof.signature;
-            account.vault.clear();
-            account.vault = vault;
+        Entry::Occupied(mut entry) if entry.get().vault.version < proof.nonce => {
+            entry.get_mut().vault = vault;
             Ok(())
         }
         _ => Err(ChatError::AlreadyExists),
     }
 }
 
-pub async fn update_vault(
+pub async fn insert_to_vault(
     cx: crate::Context,
     identity: Identity,
-    (proof, old_hash, value): (Proof<crypto::Hash>, crypto::Hash, Option<Reminder<'_>>),
+    (proof, key, value): (Proof<crypto::Hash>, crypto::Hash, Vec<u8>),
 ) -> Result<()> {
-    let mut profile = cx.profiles.get_mut(&identity).ok_or(ChatError::NotFound)?;
-
-    crate::ensure!(proof.verify(), ChatError::InvalidProof);
-
-    if old_hash != crypto::Hash::default() {
-        crate::ensure!(profile.vault.contains_key(&old_hash), ChatError::NotFound);
-    }
-
-    if let Some(value) = value {
-        profile.vault.insert(crypto::hash::new(value.0), Vec::new());
-    }
-
-    let hash = profile
+    cx.profiles
+        .get_mut(&identity)
+        .ok_or(ChatError::NotFound)?
         .vault
-        .keys()
-        .copied()
-        .filter(|&h| h != old_hash)
-        .reduce(crypto::hash::combine)
-        .unwrap_or_default();
-    crate::ensure!(hash == proof.context, ChatError::InvalidProof);
-    crate::ensure!(
-        advance_nonce(&mut profile.vault_version, proof.nonce),
-        ChatError::InvalidAction
-    );
+        .try_insert(key, value, proof)
+        .then_some(())
+        .ok_or(ChatError::InvalidProof)
+}
 
-    if old_hash != crypto::Hash::default() {
-        profile.vault.remove(&old_hash);
-    }
-    if let Some(value) = value {
-        profile.vault.insert(crypto::hash::new(value.0), value.0.to_vec());
-    }
-    profile.vault_sig = proof.signature;
+pub async fn remove_from_vault(
+    cx: crate::Context,
+    identity: Identity,
+    (proof, key): (Proof<crypto::Hash>, crypto::Hash),
+) -> Result<()> {
+    cx.profiles
+        .get_mut(&identity)
+        .ok_or(ChatError::NotFound)?
+        .vault
+        .try_remove(key, proof)
+        .then_some(())
+        .ok_or(ChatError::InvalidProof)
+}
 
-    Ok(())
+pub async fn fetch_vault_key(
+    cx: crate::Context,
+    identity: Identity,
+    key: crypto::Hash,
+) -> Result<ReminderOwned> {
+    let profile = cx.profiles.get(&identity).ok_or(ChatError::NotFound)?;
+    profile.vault.values.get(&key).ok_or(ChatError::NotFound).cloned().map(ReminderOwned)
 }
 
 pub async fn read_mail(
@@ -116,12 +113,7 @@ pub async fn fetch_vault(cx: super::Context, identity: Identity, _: ()) -> Resul
         .get(&identity)
         .ok_or(ChatError::NotFound)
         .map(|p| {
-            (
-                p.value().vault_version,
-                p.value().mail_action,
-                p.value().vault.values().collect::<Vec<_>>(),
-            )
-                .to_bytes()
+            (p.value().vault.version, p.value().mail_action, &p.value().vault.values).to_bytes()
         })
         .map(ReminderOwned)
 }
@@ -206,7 +198,7 @@ pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
         }
 
         if let Some(best) = latest_profile.as_ref() {
-            if best.vault_version < profile.vault_version {
+            if best.vault.version < profile.vault.version {
                 latest_profile = Some(profile);
             }
         } else {

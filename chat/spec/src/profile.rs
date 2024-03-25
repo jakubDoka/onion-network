@@ -3,7 +3,7 @@ use {
     arrayvec::ArrayString,
     chain_api::{RawUserName, USER_NAME_CAP},
     codec::Codec,
-    crypto::{enc, sign, SharedSecret},
+    crypto::{enc, hash, sign, SharedSecret},
     merkle_tree::MerkleTree,
     std::{collections::BTreeMap, iter},
 };
@@ -48,11 +48,8 @@ impl Vault {
     }
 
     pub fn recompute(&mut self) {
-        self.merkle_tree.clear([0; 32]);
-        for (k, v) in self.values.iter() {
-            let leaf = crypto::hash::combine(*k, crypto::hash::new(v));
-            self.merkle_tree.push(leaf);
-        }
+        self.merkle_tree =
+            self.values.iter().map(|(&k, v)| hash::combine(k, hash::new(v))).collect();
     }
 
     pub fn try_remove(&mut self, key: crypto::Hash, proof: Proof<crypto::Hash>) -> bool {

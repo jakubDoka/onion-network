@@ -23,7 +23,7 @@ pub struct MerkleTree<T> {
     nodes: Vec<T>,
 }
 
-impl<T: Default + MerkleHash> Default for MerkleTree<T> {
+impl<T: MerkleHash> Default for MerkleTree<T> {
     fn default() -> Self {
         Self::new(Default::default())
     }
@@ -46,15 +46,24 @@ impl<T: MerkleHash> MerkleTree<T> {
                 return node;
             }
 
-            let mid = nodes.len() / 2;
+            let mid = MerkleTree::<T>::mid_point(nodes.len());
             let (left, right) = nodes.split_at_mut(mid);
             let (mid, right) = right.split_first_mut().unwrap();
 
-            *mid = T::combine(comute_recur(left), comute_recur(right));
+            if right.is_empty() {
+                *mid = comute_recur(left);
+            } else {
+                *mid = T::combine(comute_recur(left), comute_recur(right));
+            }
+
             *mid
         }
 
         let mut nodes = base.into_iter().intersperse(Default::default()).collect::<Vec<_>>();
+
+        if nodes.is_empty() {
+            return Self::default();
+        }
 
         comute_recur(&mut nodes);
 
@@ -63,7 +72,11 @@ impl<T: MerkleHash> MerkleTree<T> {
 
     #[must_use]
     pub fn root(&self) -> &T {
-        &self.nodes[(self.nodes.len().next_power_of_two() / 2).saturating_sub(1)]
+        &self.nodes[Self::mid_point(self.nodes.len())]
+    }
+
+    fn mid_point(len: usize) -> usize {
+        (len.next_power_of_two() / 2).saturating_sub(1)
     }
 
     pub fn push(&mut self, value: T) {
@@ -164,6 +177,20 @@ mod test {
         for &seq in seq {
             assert_eq!(tree.nodes, seq);
             tree.push(1);
+        }
+    }
+
+    #[test]
+    fn collect_eplty() {
+        for i in 1..10 {
+            dbg!(i);
+            let tree = (0..i).collect::<MerkleTree<_>>();
+            let tree_incremental = (1..i).fold(MerkleTree::new(0), |mut tree, i| {
+                tree.push(i);
+                tree
+            });
+
+            assert_eq!(tree.nodes, tree_incremental.nodes);
         }
     }
 

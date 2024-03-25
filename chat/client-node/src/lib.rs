@@ -86,11 +86,8 @@ fn constant_key(name: &str) -> SharedSecret {
     crypto::hash::new(crypto::hash::new(name))
 }
 
-fn hardened_chat_key_hash(name: ChatName) -> crypto::Hash {
-    crypto::hash::combine(
-        crypto::hash::new(name.as_bytes()),
-        crypto::hash::new("hardened_chat_key"),
-    )
+fn hardened_chat_key_hash(name: ChatName, identity: Identity) -> crypto::Hash {
+    crypto::hash::combine(crypto::hash::new(name.as_bytes()), identity)
 }
 
 fn hardened_chat_hash(name: ChatName) -> crypto::Hash {
@@ -164,7 +161,9 @@ impl Vault {
             VaultComponentId::Chats => chats(),
             VaultComponentId::Theme => theme(),
             VaultComponentId::HardenedChatNames => hardened_chats(),
-            VaultComponentId::HardenedChatPk(name, _) => hardened_chat_key_hash(name),
+            VaultComponentId::HardenedChatPk(name, identity, _) => {
+                hardened_chat_key_hash(name, identity)
+            }
             VaultComponentId::HardenedChat(name) => hardened_chat_hash(name),
         };
 
@@ -174,7 +173,7 @@ impl Vault {
             VaultComponentId::HardenedChat(name) => {
                 self.hardened_chats.get(&name).map(|chat| encrypt(chat.to_bytes(), key))?
             }
-            VaultComponentId::HardenedChatPk(_, pk) => pk.to_bytes().to_vec(),
+            VaultComponentId::HardenedChatPk(_, _, pk) => pk.to_bytes().to_vec(),
             VaultComponentId::HardenedChatNames => {
                 encrypt(self.hardened_chats.keys().cloned().collect::<Vec<_>>().to_bytes(), key)
             }
@@ -196,7 +195,7 @@ impl Vault {
 pub enum VaultComponentId {
     Chats,
     HardenedChat(ChatName),
-    HardenedChatPk(ChatName, double_ratchet::PublicKey),
+    HardenedChatPk(ChatName, Identity, double_ratchet::PublicKey),
     HardenedChatNames,
     Theme,
 }
@@ -272,7 +271,7 @@ impl MailVariants {
     pub async fn handle(
         self,
         ctx: &impl RequestContext,
-        requests: Requests,
+        mut requests: Requests,
         updates: &mut Vec<VaultComponentId>,
         messages: &mut Vec<(UserName, MessageContent, ChatName)>,
     ) -> Result<()> {
@@ -296,7 +295,7 @@ impl MailVariants {
                     <_>::decode(&mut &*payload).context("failed to decode join request payload")?;
 
                 let dr = DoubleRatchet::recipient(secret, init, OsRng);
-                updates.push(VaultComponentId::HardenedChatPk(chat, dr.public_key()));
+                updates.push(VaultComponentId::HardenedChatPk(chat, identity, dr.public_key()));
 
                 if ctx.with_vault(|v| Ok(!v.hardened_chats.contains_key(&chat)))? {
                     anyhow::bail!("request to join chat we dont have");
@@ -323,7 +322,7 @@ impl MailVariants {
                     <_>::decode(&mut &*payload).context("failed to decode hardened invite")?;
 
                 let dr = DoubleRatchet::recipient(secret, init, OsRng);
-                updates.push(VaultComponentId::HardenedChatPk(chat, dr.public_key()));
+                updates.push(VaultComponentId::HardenedChatPk(chat, inviter_id, dr.public_key()));
 
                 let members = join_all(members.into_iter().map(|(name, id)| {
                     requests
@@ -352,37 +351,57 @@ impl MailVariants {
                 updates.push(VaultComponentId::HardenedChatNames);
             }
             MailVariants::HardenedChatMessage { nonce, chat, header, mut content } => {
-                return ctx.with_vault(|v| {
-                    let Some((&chat, meta)) = v
-                        .hardened_chats
+                let Some(chat) = ctx.with_vault(|v| {
+                    Ok(v.hardened_chats
                         .iter_mut()
                         .find(|(c, _)| crypto::hash::with_nonce(c.as_bytes(), nonce) == chat)
-                    else {
-                        log::warn!("received message for unknown chat");
-                        return Ok(());
-                    };
+                        .map(|(&c, _)| c))
+                })?
+                else {
+                    log::warn!("received message for chat we are not in");
+                    return Ok(());
+                };
 
-                    let Some((sender, content)) =
+                requests.encuse_hardened_particiant_keys(chat, ctx).await?;
+
+                return ctx.with_vault(|v| {
+                    let meta = v.hardened_chats.get_mut(&chat).expect("we just checked");
+
+                    let Some((sender, content, update_our_key)) =
                         meta.members.iter_mut().find_map(|(&name, mm)| {
-                            log::debug!("trying to decrypt message for {}", name);
                             let mut temp_dr = mm.dr.clone();
-                            let secret = temp_dr.recv(header, OsRng).ok()?;
-                            let decrypted = crypto::decrypt(&mut content, secret)?;
+                            let meta = mm
+                                .public_key
+                                .and_then(|pk| temp_dr.recv(header, pk, OsRng).ok())
+                                .unwrap();
+                            let decrypted = crypto::decrypt(&mut content, meta.key)?;
                             let message = std::str::from_utf8(decrypted).ok()?.into();
+                            if meta.rotated_their_kyber_key {
+                                mm.public_key = None;
+                            }
                             mm.dr = temp_dr;
-                            log::debug!("message from {}: {}", name, message);
-                            Some((name, message))
+                            Some((
+                                name,
+                                message,
+                                meta.rotated_our_kyber_key
+                                    .then(|| (mm.dr.public_key(), mm.identity)),
+                            ))
                         })
                     else {
-                        log::warn!("received message for chat we are not in");
+                        log::warn!(
+                            "received message for chat we are in but we cant decrypt the messages"
+                        );
                         return Ok(());
                     };
 
                     messages.push((sender, content, chat));
                     updates.push(VaultComponentId::HardenedChat(chat));
+                    if let Some((pk, id)) = update_our_key {
+                        updates.push(VaultComponentId::HardenedChatPk(chat, id, pk))
+                    }
 
                     Ok(())
-                })
+                });
             }
         }
 
@@ -1107,9 +1126,12 @@ impl Requests {
         let keys = self.fetch_keys(to).await.context("fetching keys")?;
         let (cp, ss) = ctx.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
         let (dr, init) = DoubleRatchet::sender(ss, OsRng);
-        self.save_vault_component(VaultComponentId::HardenedChatPk(name, dr.public_key()), &ctx)
-            .await
-            .context("saving vault")?;
+        self.save_vault_component(
+            VaultComponentId::HardenedChatPk(name, to, dr.public_key()),
+            &ctx,
+        )
+        .await
+        .context("saving vault")?;
 
         let members = ctx.with_vault(|v| {
             let cm = v.hardened_chats.get_mut(&name).with_context(vault_chat_404(name))?;
@@ -1152,7 +1174,7 @@ impl Requests {
             meta: &mut MemberMeta,
             reqs: &Requests,
         ) -> impl Future<Output = Result<bool, ChatError>> {
-            let payload = meta.public_key.map(|pk| meta.dr.send(pk, OsRng));
+            let payload = meta.public_key.map(|pk| meta.dr.send(pk));
             if payload.map_or(false, |(header, _)| header.is_major()) {
                 meta.public_key = None;
             }
@@ -1174,25 +1196,7 @@ impl Requests {
             }
         }
 
-        let missing_keys = ctx.with_vault(|v| {
-            let cm = v.hardened_chats.get(&name).with_context(vault_chat_404(name))?;
-            let iter = cm.members.iter().filter(|(_, meta)| meta.public_key.is_none()).map(
-                |(&nm, meta)| {
-                    self.clone()
-                        .fetch_hardened_chat_key(name, meta.identity)
-                        .map_ok(move |v| (nm, v))
-                },
-            );
-            Ok(futures::future::join_all(iter))
-        })?;
-
-        for (nm, key) in missing_keys.await.into_iter().map(Result::unwrap) {
-            ctx.with_vault(|v| {
-                v.hardened_chats.get_mut(&name).unwrap().members.get_mut(&nm).unwrap().public_key =
-                    Some(key);
-                Ok(())
-            })?;
-        }
+        self.encuse_hardened_particiant_keys(name, &ctx).await?;
 
         let s = &mut *self;
         let requests = ctx.with_vault(move |v| {
@@ -1209,12 +1213,41 @@ impl Requests {
         Ok(res)
     }
 
+    pub async fn encuse_hardened_particiant_keys(
+        &mut self,
+        name: ChatName,
+        ctx: &impl RequestContext,
+    ) -> Result<()> {
+        let missing_keys = ctx.with_vault(|v| {
+            let cm = v.hardened_chats.get(&name).with_context(vault_chat_404(name))?;
+            let iter = cm.members.iter().filter(|(_, meta)| meta.public_key.is_none()).map(
+                |(&nm, meta)| {
+                    self.clone()
+                        .fetch_hardened_chat_key(name, meta.identity, &ctx)
+                        .map_ok(move |v| (nm, v))
+                },
+            );
+            Ok(futures::future::join_all(iter))
+        })?;
+
+        for (nm, key) in missing_keys.await.into_iter().filter_map(Result::ok) {
+            ctx.with_vault(|v| {
+                v.hardened_chats.get_mut(&name).unwrap().members.get_mut(&nm).unwrap().public_key =
+                    Some(key);
+                Ok(())
+            })?;
+        }
+
+        Ok(())
+    }
+
     pub async fn fetch_hardened_chat_key(
         mut self,
         name: ChatName,
         identity: Identity,
+        ctx: &impl RequestContext,
     ) -> Result<double_ratchet::PublicKey> {
-        let hash = hardened_chat_key_hash(name);
+        let hash = hardened_chat_key_hash(name, ctx.with_keys(UserKeys::identity_hash)?);
         self.fetch_vault_key(identity, hash).await.and_then(|Reminder(data)| {
             Ok(double_ratchet::PublicKey::from_bytes(data.try_into().context("invalid key")?))
         })

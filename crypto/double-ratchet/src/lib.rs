@@ -25,32 +25,31 @@ pub struct DoubleRatchet {
     receiver: Chain,
     key: RatchetKey,
     prev_sub_count: u32,
-    prev_key: SharedSecret,
+    prev_key: Option<SharedSecret>,
     last_x25519: [u8; 32],
     missing_messages: ArrayVec<(MessageId, SharedSecret), MAX_KEPT_MISSING_MESSAGES>,
 }
 
 impl DoubleRatchet {
     pub fn recipient(root: SharedSecret, init: InitiatiorKey, mut rng: impl CryptoRngCore) -> Self {
+        let key = RatchetKey::random_from_rng(&mut rng);
         let mut root = Chain::from(root);
-        let mut prev_key = [0u8; 32];
-        rng.fill_bytes(&mut prev_key);
+        let sender_input = key.expand_x25519().diffie_hellman(&init).to_bytes();
         Self {
             receiver: Chain::new_init(root.next_sc()),
-            sender: root.next_rk(prev_key).into(),
+            sender: root.next_rk(sender_input).into(),
             root,
-            key: RatchetKey::random_from_rng(&mut rng),
-            prev_key,
+            key,
             last_x25519: init.to_bytes(),
             ..Default::default()
         }
     }
 
     pub fn sender(root: SharedSecret, rng: impl CryptoRngCore) -> (Self, InitiatiorKey) {
-        let rachet_key = RatchetKey::random_from_rng(rng);
+        let key = RatchetKey::random_from_rng(rng);
         let mut root = Chain::from(root);
         let sender = Chain::new_init(root.next_sc());
-        (Self { sender, root, key: rachet_key, ..Default::default() }, rachet_key.x25519_pk())
+        (Self { sender, root, key, ..Default::default() }, key.x25519_pk())
     }
 
     pub fn public_key(&self) -> kyber::PublicKey {
@@ -60,70 +59,75 @@ impl DoubleRatchet {
     pub fn recv(
         &mut self,
         message: MessageHeader,
+        senders_pk: PublicKey,
         mut rng: impl CryptoRngCore,
-    ) -> Result<SharedSecret, RecvError> {
+    ) -> Result<RecvMessageMeta, RecvError> {
         if message.id.step < self.root.step {
             return self.find_missing_message(message);
         }
 
-        if message.id.step == self.root.step {
+        let (rotated_our_kyber_key, rotated_their_kyber_key) = if message.id.step == self.root.step
+        {
             if message.id.sub_step < self.receiver.step {
                 return self.find_missing_message(message);
             }
+            (false, false)
         } else {
             self.add_missing_message(message.prev_sub_count)?;
 
-            let exchanged = match message.cp {
+            let reciever_input = match message.cp {
                 Some(cp) => self.key.decapsulate(message.x25519, cp)?,
                 None => self.key.expand_x25519().diffie_hellman(&message.x25519).to_bytes(),
             };
-            let reciever_input = xor(exchanged, message.xored_secret);
 
             self.key = RatchetKey::random_from_rng(&mut rng);
 
-            rng.fill_bytes(&mut self.prev_key);
+            // both sides rotate with kyber once each 64 steps
+            self.prev_key = (self.root.step % 64 < 2)
+                .then(|| x25519_dalek::StaticSecret::random_from_rng(rng).to_bytes());
             self.prev_sub_count = std::mem::take(&mut self.sender.step);
             self.last_x25519 = message.x25519.to_bytes();
 
-            self.receiver = self.root.next_rk(reciever_input).into();
-            self.sender = self.root.next_rk(self.prev_key).into();
+            let sender_input = match self.prev_key {
+                Some(prev) => self.key.encapsulate(senders_pk, message.x25519, prev).0,
+                None => self.key.expand_x25519().diffie_hellman(&message.x25519).to_bytes(),
+            };
+
+            self.receiver = self.root.next_rk(dbg!(reciever_input)).into();
+            self.sender = self.root.next_rk(sender_input).into();
             self.root.step += 1;
-        }
 
-        self.add_missing_message(message.id.sub_step)?;
-        Ok(self.receiver.next_sc())
-    }
-
-    pub fn send(
-        &mut self,
-        recip_pk: PublicKey,
-        rng: impl CryptoRngCore,
-    ) -> (MessageHeader, SharedSecret) {
-        self.root.step += (self.sender.step == 0) as u32;
-
-        let (ss, cp) = if self.root.step % 64 < 2 {
-            let (ss, cp) = self.key.encapsulate(recip_pk, self.last_x25519.into(), rng);
-            (ss, Some(cp))
-        } else {
-            let ss = self.key.expand_x25519().diffie_hellman(&self.last_x25519.into());
-            (ss.to_bytes(), None)
+            (self.prev_key.is_some(), message.cp.is_some())
         };
 
+        self.add_missing_message(message.id.sub_step)?;
+        Ok(RecvMessageMeta {
+            key: self.receiver.next_sc(),
+            rotated_our_kyber_key,
+            rotated_their_kyber_key,
+        })
+    }
+
+    pub fn send(&mut self, recip_pk: PublicKey) -> (MessageHeader, SharedSecret) {
+        self.root.step += (self.sender.step == 0) as u32;
         let header = MessageHeader {
             id: MessageId { step: self.root.step, sub_step: self.sender.step },
             prev_sub_count: self.prev_sub_count,
-            cp,
+            cp: self.prev_key.map(|prev| Ciphertext(recip_pk.enc(&prev).0)),
             x25519: self.key.x25519_pk(),
-            xored_secret: xor(ss, self.prev_key),
         };
         (header, self.sender.next_sc())
     }
 
-    fn find_missing_message(&mut self, message: MessageHeader) -> Result<SharedSecret, RecvError> {
+    fn find_missing_message(
+        &mut self,
+        message: MessageHeader,
+    ) -> Result<RecvMessageMeta, RecvError> {
         self.missing_messages
             .iter()
             .position(|&(header, _)| header == message.id)
             .map(|i| self.missing_messages.remove(i).1)
+            .map(Into::into)
             .ok_or(RecvError::MissingMessage)
     }
 
@@ -145,10 +149,22 @@ impl DoubleRatchet {
     }
 }
 
+pub struct RecvMessageMeta {
+    pub key: SharedSecret,
+    pub rotated_our_kyber_key: bool,
+    pub rotated_their_kyber_key: bool,
+}
+
+impl From<SharedSecret> for RecvMessageMeta {
+    fn from(key: SharedSecret) -> Self {
+        Self { key, rotated_our_kyber_key: false, rotated_their_kyber_key: false }
+    }
+}
+
 #[derive(Debug)]
 pub enum RecvError {
     MissingMessage,
-    Encapsulation,
+    Decapsulation,
     InvalidState,
 }
 
@@ -185,12 +201,10 @@ impl RatchetKey {
         &self,
         kyber: kyber::PublicKey,
         x25519: x25519_dalek::PublicKey,
-        mut rng: impl CryptoRngCore,
+        enc_bytes: [u8; ENC_SEEDBYTES],
     ) -> (SharedSecret, Ciphertext) {
         let x = self.expand_x25519();
-        let mut enc_seed_bytes = [0u8; ENC_SEEDBYTES];
-        rng.fill_bytes(&mut enc_seed_bytes);
-        let (kyber_shared, k) = kyber.enc(&enc_seed_bytes);
+        let (kyber_shared, k) = kyber.enc(&enc_bytes);
         let x = x.diffie_hellman(&x25519).to_bytes();
         (xor(x, k), Ciphertext(kyber_shared))
     }
@@ -201,7 +215,7 @@ impl RatchetKey {
         cp: Ciphertext,
     ) -> Result<SharedSecret, RecvError> {
         let (kyber_shared, x) = self.expand();
-        let k = kyber_shared.dec(&cp.0).ok_or(RecvError::Encapsulation)?;
+        let k = kyber_shared.dec(&cp.0).ok_or(RecvError::Decapsulation)?;
         let x = x.diffie_hellman(&x25519).to_bytes();
         Ok(xor(k, x))
     }
@@ -235,7 +249,6 @@ pub struct MessageHeader {
     cp: Option<Ciphertext>,
     #[codec(with = codec::unsafe_as_raw_bytes)]
     x25519: x25519_dalek::PublicKey,
-    xored_secret: SharedSecret,
 }
 
 impl MessageHeader {
@@ -310,8 +323,8 @@ mod test {
         let (mut alice, init) = DoubleRatchet::sender(shared_secret, rng);
         let mut bob = DoubleRatchet::recipient(shared_secret, init, rng);
 
-        let (msg, secret) = alice.send(bob.public_key(), rng);
-        let secret2 = bob.recv(msg, rng).unwrap();
+        let (msg, secret) = alice.send(bob.public_key());
+        let secret2 = bob.recv(msg, alice.public_key(), rng).unwrap().key;
         assert_eq!(secret, secret2);
     }
 
@@ -326,22 +339,22 @@ mod test {
         let mut messages = Vec::new();
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(bob.send(alice.public_key(), rng));
+                messages.push(bob.send(alice.public_key()));
             }
 
             for (msg, secret) in messages.drain(..) {
-                let secret2 = alice.recv(msg, rng).unwrap();
+                let secret2 = alice.recv(msg, bob.public_key(), rng).unwrap().key;
                 assert_eq!(secret, secret2);
             }
         }
 
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(alice.send(bob.public_key(), rng));
+                messages.push(alice.send(bob.public_key()));
             }
 
             for (msg, secret) in messages.drain(..) {
-                let secret2 = bob.recv(msg, rng).unwrap();
+                let secret2 = bob.recv(msg, alice.public_key(), rng).unwrap().key;
                 assert_eq!(secret, secret2);
             }
 
@@ -350,7 +363,7 @@ mod test {
 
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(alice.send(bob.public_key(), rng));
+                messages.push(alice.send(bob.public_key()));
             }
 
             for (i, (msg, secret)) in messages.drain(..).rev().enumerate() {
@@ -358,7 +371,7 @@ mod test {
                     break;
                 }
 
-                let secret2 = bob.recv(msg, rng).unwrap();
+                let secret2 = bob.recv(msg, alice.public_key(), rng).unwrap().key;
                 assert_eq!(secret, secret2);
             }
 

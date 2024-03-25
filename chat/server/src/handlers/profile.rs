@@ -49,6 +49,7 @@ pub async fn create(
     }
 }
 
+// TODO: optimize this to do updates in bulk
 pub async fn insert_to_vault(
     cx: crate::Context,
     identity: Identity,

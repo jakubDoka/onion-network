@@ -539,6 +539,7 @@ impl MailVariants {
                     Ok((nm, message))
                 })?;
 
+                updates.push(VaultComponentId::Friend(message.0));
                 messages.push(message);
             }
         }

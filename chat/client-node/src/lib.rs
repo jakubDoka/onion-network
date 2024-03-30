@@ -34,6 +34,10 @@ mod node;
 mod requests;
 mod vault;
 
+pub fn encode_direct_chat_name(name: UserName) -> String {
+    format!("{}{}", name, " ".repeat(32))
+}
+
 fn encrypt(mut data: Vec<u8>, secret: SharedSecret) -> Vec<u8> {
     let tag = crypto::encrypt(&mut data, secret, OsRng);
     data.extend(tag);

@@ -3,7 +3,7 @@ use {
         db, handled_async_callback, handled_async_closure, handled_callback, handled_spawn_local,
     },
     anyhow::Context,
-    chat_client_node::{MessageContent, RawChatMessage},
+    chat_client_node::{encode_direct_chat_name, MessageContent, RawChatMessage},
     chat_spec::{ChatError, ChatEvent, ChatName, Identity, Member, Permissions, Rank, UserName},
     codec::{Codec, Reminder},
     component_utils::DropFn,
@@ -102,8 +102,10 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         }
 
         if is_friend.get_untracked() && matches!(cursor.get_untracked(), Cursor::Normal(_)) {
-            let cursor =
-                db::MessageCursor::new(chat, my_name).await.context("opening message cursor")?;
+            log::info!("switching to hardened cursor, {}", chat);
+            let cursor = db::MessageCursor::new(encode_direct_chat_name(chat), my_name)
+                .await
+                .context("opening message cursor")?;
             set_cursor(Cursor::Hardened(cursor));
         }
 
@@ -365,12 +367,17 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         });
     };
 
-    let send_friend_message = move |chat: UserName, content: String| {
+    let send_friend_message = move |to_user: UserName, content: String| {
         handled_spawn_local("sending hardened message", async move {
-            requests().send_frined_message(chat, content.clone(), state).await?;
+            requests().send_frined_message(to_user, content.clone(), state).await?;
 
             append_message(my_name, content.clone());
-            let message = db::Message { chat, sender: my_name, owner: chat, content };
+            let message = db::Message {
+                chat: encode_direct_chat_name(to_user),
+                sender: my_name,
+                owner: my_name,
+                content,
+            };
             db::save_messages(vec![message]).await.context("saving our message locally")?;
 
             clear_input();

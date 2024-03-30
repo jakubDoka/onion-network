@@ -1,12 +1,9 @@
-use {
-    crate::handle_js_err,
-    chat_spec::{ChatName, UserName},
-};
+use {crate::handle_js_err, chat_spec::UserName};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct Message {
     pub owner: UserName,
-    pub chat: ChatName,
+    pub chat: String,
     pub sender: UserName,
     pub content: String,
 }
@@ -47,7 +44,7 @@ pub struct MessageCursor {
 }
 
 impl MessageCursor {
-    pub async fn new(chat: ChatName, owner: UserName) -> anyhow::Result<Self> {
+    pub async fn new(chat: String, owner: UserName) -> anyhow::Result<Self> {
         let inner = ffi::MessageCursor::new(chat.to_string(), owner.to_string());
         Ok(Self { inner })
     }

@@ -14,8 +14,8 @@ use {
     },
     anyhow::Context,
     chat_client_node::{
-        BootPhase, FriendMessage, MailVariants, Node, RequestContext, Requests, UserKeys, Vault,
-        VaultComponentId,
+        encode_direct_chat_name, BootPhase, FriendMessage, MailVariants, Node, RequestContext,
+        Requests, UserKeys, Vault, VaultComponentId,
     },
     chat_spec::{ChatName, Nonce, UserName},
     codec::{Codec, Reminder},
@@ -117,7 +117,7 @@ fn App() -> impl IntoView {
                 sender,
                 owner: state.with_keys(|k| k.name)?,
                 content,
-                chat: ChatName::default(),
+                chat: encode_direct_chat_name(sender),
             };
             new_messages.push(message.clone());
             state.friend_messages.set(Some((sender, message)));

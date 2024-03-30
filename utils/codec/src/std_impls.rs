@@ -2,6 +2,7 @@ use {
     crate::{Buffer, Codec},
     std::{
         borrow::{Borrow, Cow},
+        collections::HashSet,
         hash::BuildHasher,
         io,
         sync::Arc,
@@ -30,6 +31,28 @@ impl<'a, K: Codec<'a> + Eq + std::hash::Hash, V: Codec<'a>, H: BuildHasher + Def
             let k = K::decode(buffer)?;
             let v = V::decode(buffer)?;
             s.insert(k, v);
+        }
+        Some(s)
+    }
+}
+
+impl<'a, T: Codec<'a> + Eq + std::hash::Hash> Codec<'a> for HashSet<T> {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        self.len().encode(buffer)?;
+        for i in self {
+            i.encode(buffer)?;
+        }
+        Some(())
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let len = usize::decode(buffer)?;
+        if len > buffer.len() {
+            return None;
+        }
+        let mut s = Self::with_capacity(len);
+        for _ in 0..len {
+            s.insert(<T>::decode(buffer)?);
         }
         Some(s)
     }

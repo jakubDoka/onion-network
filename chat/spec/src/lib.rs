@@ -1,4 +1,5 @@
 #![feature(iter_next_chunk)]
+#![feature(let_chains)]
 #![feature(slice_take)]
 #![feature(iter_advance_by)]
 #![feature(macro_metavar_expr)]

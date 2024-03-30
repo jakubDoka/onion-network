@@ -14,7 +14,8 @@ use {
     },
     anyhow::Context,
     chat_client_node::{
-        BootPhase, MailVariants, Node, RequestContext, Requests, UserKeys, Vault, VaultComponentId,
+        BootPhase, FriendMessage, MailVariants, Node, RequestContext, Requests, UserKeys, Vault,
+        VaultComponentId,
     },
     chat_spec::{ChatName, Nonce, UserName},
     codec::{Codec, Reminder},
@@ -37,6 +38,7 @@ pub fn main() {
     } else {
         log::Level::Error
     });
+
     mount_to_body(App)
 }
 
@@ -47,36 +49,37 @@ struct State {
     vault: RwSignal<Vault>,
     vault_version: StoredValue<Nonce>,
     mail_action: StoredValue<Nonce>,
-    hardened_messages: RwSignal<Option<(ChatName, db::Message)>>,
+    friend_messages: RwSignal<Option<(ChatName, db::Message)>>,
 }
 
 type Result<T> = anyhow::Result<T>;
 
+fn rc_error(name: &'static str) -> impl FnOnce() -> String {
+    move || format!("{name} not available, might need to reload")
+}
+
 impl RequestContext for State {
-    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> Result<R>) -> Result<R> {
-        self.vault
-            .try_update(|vault| action(vault))
-            .context("vault not available, might need reload")
-            .and_then(identity)
+    fn try_with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> Result<R>) -> Result<R> {
+        self.vault.try_update(action).with_context(rc_error("vault")).and_then(identity)
+    }
+
+    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> Result<R> {
+        self.vault.try_update(action).with_context(rc_error("vault"))
     }
 
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> Result<R> {
         self.keys
             .try_with_untracked(|keys| keys.as_ref().map(action))
             .flatten()
-            .context("keys not available, might need reload")
+            .with_context(rc_error("keys"))
     }
 
     fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
-        self.vault_version
-            .try_update_value(action)
-            .context("vault version not available, might need reload")
+        self.vault_version.try_update_value(action).with_context(rc_error("vault version"))
     }
 
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
-        self.mail_action
-            .try_update_value(action)
-            .context("mail action not available, might need reload")
+        self.mail_action.try_update_value(action).with_context(rc_error("mail action"))
     }
 }
 
@@ -109,11 +112,15 @@ fn App() -> impl IntoView {
         let dispatch = state.requests.get_value().context("no dispatch")?;
         let mut messages = Vec::new();
         mail.handle(&state, dispatch, vault_updates, &mut messages).await?;
-        if let Some((sender, content, chat)) = messages.pop() {
-            let message =
-                db::Message { sender, owner: state.with_keys(|k| k.name)?, content, chat };
+        if let Some((sender, FriendMessage::DirectMessage { content })) = messages.pop() {
+            let message = db::Message {
+                sender,
+                owner: state.with_keys(|k| k.name)?,
+                content,
+                chat: ChatName::default(),
+            };
             new_messages.push(message.clone());
-            state.hardened_messages.set(Some((chat, message)));
+            state.friend_messages.set(Some((sender, message)));
         }
         Ok(())
     }

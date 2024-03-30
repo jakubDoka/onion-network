@@ -20,14 +20,14 @@ sod NODE_START 8800
 sod NETWORK_BOOT_NODE "/ip4/127.0.0.1/tcp/$((NODE_START + 100))/ws"
 sod MIN_NODES 5
 sod BALANCE 100000000000000
-sod TEST_WALLETS 5CwfgYUrq24dTpfh2sQ2st1FNCR2fM2JFSn3EtdWyrGdEaER,5E7YrzVdg1ovRYfWLQG1bJV7FvZWJpnVnQ3nVCKEwpFzkX8s,5CveKLTBDy6vFbgE1DwXHwPRcswa1kRSLY8rL3Yx5qUhsSCo
-sod EXPOSED_ADDRESS 127.0.0.1
+sod TEST_WALLETS "5CwfgYUrq24dTpfh2sQ2st1FNCR2fM2JFSn3EtdWyrGdEaER,5E7YrzVdg1ovRYfWLQG1bJV7FvZWJpnVnQ3nVCKEwpFzkX8s,5CveKLTBDy6vFbgE1DwXHwPRcswa1kRSLY8rL3Yx5qUhsSCo"
+sod EXPOSED_ADDRESS "127.0.0.1"
 
 TARGET_DIR="target/debug"
 if [ "$1" = "release" ]; then
-  FLAGS="--profile native-optimized"
-  WASM_FLAGS="--release"
-  TARGET_DIR="target/native-optimized"
+	FLAGS="--profile native-optimized"
+	WASM_FLAGS="--release"
+	TARGET_DIR="target/native-optimized"
 fi
 
 on_exit() { killall node-template chat-server runner trunk live-server; }

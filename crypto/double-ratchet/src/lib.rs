@@ -1,133 +1,191 @@
 #![feature(slice_take)]
 #![feature(let_chains)]
+pub use kyber::PublicKey;
 use {
     arrayvec::ArrayVec,
     codec::Codec,
     hkdf::Hkdf,
-    kyber::{CIPHERTEXTBYTES, ENC_SEEDBYTES},
+    kyber::{CIPHERTEXTBYTES, KEY_SEEDBYTES},
     rand_core::CryptoRngCore,
     sha2::Sha256,
     std::array,
+    x25519_dalek::StaticSecret,
 };
-pub use {kyber::PublicKey, x25519_dalek::PublicKey as InitiatiorKey};
 
 const MAX_KEPT_MISSING_MESSAGES: usize = 5;
+const KYBER_PERIOD: u32 = 35;
 const SUB_CONSTANT: SharedSecret = [0u8; 32];
-const RATCHET_SEED_SIZE: usize = 32 + 64;
 
 type SharedSecret = [u8; 32];
+type Ciphertext = [u8; CIPHERTEXTBYTES];
+type KyberSeed = [u8; KEY_SEEDBYTES];
+type Hash = [u8; 32];
+
+pub struct InitiatiorKey {
+    x25519: x25519_dalek::PublicKey,
+    kyber: kyber::PublicKey,
+}
 
 // TODO: encrypt headers
-#[derive(Codec, Default, Clone)]
+#[derive(Codec, Clone)]
 pub struct DoubleRatchet {
     root: Chain,
     sender: Chain,
+    receiver_hash: Hash,
     receiver: Chain,
-    key: RatchetKey,
+    sender_hash: Hash,
     prev_sub_count: u32,
-    prev_key: Option<SharedSecret>,
-    last_x25519: [u8; 32],
+    kyber: KyberSeed,
+    cp: Ciphertext,
+    ss: SharedSecret,
+    #[codec(with = codec::unsafe_as_raw_bytes)]
+    x25519: StaticSecret,
     missing_messages: ArrayVec<(MessageId, SharedSecret), MAX_KEPT_MISSING_MESSAGES>,
 }
 
 impl DoubleRatchet {
-    pub fn recipient(root: SharedSecret, init: InitiatiorKey, mut rng: impl CryptoRngCore) -> Self {
-        let key = RatchetKey::random_from_rng(&mut rng);
+    pub fn recipient(
+        root: SharedSecret,
+        init: InitiatiorKey,
+        mut rng: impl CryptoRngCore,
+    ) -> (Self, SharedSecret) {
+        let kyber: KyberSeed = random_array(&mut rng);
+        let x25519 = StaticSecret::random_from_rng(&mut rng);
+
         let mut root = Chain::from(root);
-        let sender_input = key.expand_x25519().diffie_hellman(&init).to_bytes();
-        Self {
-            receiver: Chain::new_init(root.next_sc()),
-            sender: root.next_rk(sender_input).into(),
+        let sender_hash = dbg!(blake3::hash(&root.root)).into();
+        let id = root.next_sc();
+        let receiver = Chain::new_init(root.next_sc());
+        let receiver_hash = dbg!(blake3::hash(&receiver.root)).into();
+
+        let dh = x25519.diffie_hellman(&init.x25519).to_bytes();
+        let (cp, ss) = init.kyber.enc(&random_array(&mut rng));
+
+        let sender: Chain = root.next_rk(dh).into();
+
+        let s = Self {
+            receiver,
+            sender,
+            sender_hash,
+            receiver_hash,
             root,
-            key,
-            last_x25519: init.to_bytes(),
-            ..Default::default()
-        }
+            kyber,
+            cp,
+            ss,
+            x25519,
+            ..unsafe { std::mem::zeroed() }
+        };
+        (s, id)
     }
 
-    pub fn sender(root: SharedSecret, rng: impl CryptoRngCore) -> (Self, InitiatiorKey) {
-        let key = RatchetKey::random_from_rng(rng);
+    pub fn sender(
+        root: SharedSecret,
+        mut rng: impl CryptoRngCore,
+    ) -> (Self, InitiatiorKey, SharedSecret) {
+        let kyber: KyberSeed = random_array(&mut rng);
+        let x25519 = StaticSecret::random_from_rng(&mut rng);
         let mut root = Chain::from(root);
+        let receiver_hash = dbg!(blake3::hash(&root.root)).into();
+        let id = root.next_sc();
         let sender = Chain::new_init(root.next_sc());
-        (Self { sender, root, key, ..Default::default() }, key.x25519_pk())
+        let sender_hash = dbg!(blake3::hash(&sender.root)).into();
+        let key = InitiatiorKey {
+            x25519: (&x25519).into(),
+            kyber: kyber::Keypair::new(&kyber).publickey(),
+        };
+        let s = Self {
+            sender,
+            sender_hash,
+            receiver_hash,
+            root,
+            kyber,
+            x25519,
+            ..unsafe { std::mem::zeroed() }
+        };
+        (s, key, id)
     }
 
-    pub fn public_key(&self) -> kyber::PublicKey {
-        self.key.expand().0.publickey()
+    pub fn receiver_hash(&self) -> Hash {
+        self.receiver_hash
+    }
+
+    pub fn sender_hash(&self) -> Hash {
+        self.sender_hash
     }
 
     pub fn recv(
         &mut self,
         message: MessageHeader,
-        senders_pk: PublicKey,
         mut rng: impl CryptoRngCore,
-    ) -> Result<RecvMessageMeta, RecvError> {
+    ) -> Result<SharedSecret, RecvError> {
         if message.id.step < self.root.step {
             return self.find_missing_message(message);
         }
 
-        let (rotated_our_kyber_key, rotated_their_kyber_key) = if message.id.step == self.root.step
-        {
+        if message.id.step == self.root.step {
             if message.id.sub_step < self.receiver.step {
                 return self.find_missing_message(message);
             }
-            (false, false)
         } else {
             self.add_missing_message(message.prev_sub_count)?;
 
-            let reciever_input = match message.cp {
-                Some(cp) => self.key.decapsulate(message.x25519, cp)?,
-                None => self.key.expand_x25519().diffie_hellman(&message.x25519).to_bytes(),
-            };
+            let mut receiver_input = self.x25519.diffie_hellman(&message.x25519).to_bytes();
+            self.x25519 = StaticSecret::random_from_rng(&mut rng);
+            if let Some(kyb) = message.kyber {
+                receiver_input = xor(
+                    receiver_input,
+                    kyber::Keypair::new(&self.kyber)
+                        .dec(&kyb.cp)
+                        .ok_or(RecvError::Decapsulation)?,
+                );
+                self.kyber = random_array(&mut rng);
+                let (cp, ss) = kyb.public.enc(&random_array(&mut rng));
+                self.cp = cp;
+                self.ss = ss;
+            }
 
-            self.key = RatchetKey::random_from_rng(&mut rng);
-
-            // both sides rotate with kyber once each 64 steps
-            self.prev_key = (self.root.step % 64 < 2)
-                .then(|| x25519_dalek::StaticSecret::random_from_rng(rng).to_bytes());
             self.prev_sub_count = std::mem::take(&mut self.sender.step);
-            self.last_x25519 = message.x25519.to_bytes();
 
-            let sender_input = match self.prev_key {
-                Some(prev) => self.key.encapsulate(senders_pk, message.x25519, prev).0,
-                None => self.key.expand_x25519().diffie_hellman(&message.x25519).to_bytes(),
-            };
+            let mut sender_input = self.x25519.diffie_hellman(&message.x25519).to_bytes();
+            let by_the_time_we_get_to_send_offset = 2;
+            if (self.root.step + by_the_time_we_get_to_send_offset) % KYBER_PERIOD == 0 {
+                sender_input = xor(sender_input, std::mem::take(&mut self.ss));
+            }
 
-            self.receiver = self.root.next_rk(dbg!(reciever_input)).into();
+            self.receiver = self.root.next_rk(receiver_input).into();
+            self.receiver_hash = dbg!(blake3::hash(&self.receiver.root)).into();
             self.sender = self.root.next_rk(sender_input).into();
             self.root.step += 1;
-
-            (self.prev_key.is_some(), message.cp.is_some())
-        };
+        }
 
         self.add_missing_message(message.id.sub_step)?;
-        Ok(RecvMessageMeta {
-            key: self.receiver.next_sc(),
-            rotated_our_kyber_key,
-            rotated_their_kyber_key,
-        })
+        Ok(self.receiver.next_sc())
     }
 
-    pub fn send(&mut self, recip_pk: PublicKey) -> (MessageHeader, SharedSecret) {
-        self.root.step += (self.sender.step == 0) as u32;
+    pub fn send(&mut self) -> (MessageHeader, SharedSecret) {
+        if self.sender.step == 0 {
+            self.root.step += 1;
+            self.sender_hash = dbg!(blake3::hash(&self.sender.root)).into();
+        }
+
         let header = MessageHeader {
             id: MessageId { step: self.root.step, sub_step: self.sender.step },
             prev_sub_count: self.prev_sub_count,
-            cp: self.prev_key.map(|prev| Ciphertext(recip_pk.enc(&prev).0)),
-            x25519: self.key.x25519_pk(),
+            // odd number to make participants alternate
+            kyber: (self.root.step % KYBER_PERIOD == 0).then(|| Kyber {
+                public: kyber::Keypair::new(&self.kyber).publickey(),
+                cp: self.cp,
+            }),
+            x25519: (&self.x25519).into(),
         };
         (header, self.sender.next_sc())
     }
 
-    fn find_missing_message(
-        &mut self,
-        message: MessageHeader,
-    ) -> Result<RecvMessageMeta, RecvError> {
+    fn find_missing_message(&mut self, message: MessageHeader) -> Result<SharedSecret, RecvError> {
         self.missing_messages
             .iter()
             .position(|&(header, _)| header == message.id)
             .map(|i| self.missing_messages.remove(i).1)
-            .map(Into::into)
             .ok_or(RecvError::MissingMessage)
     }
 
@@ -149,18 +207,6 @@ impl DoubleRatchet {
     }
 }
 
-pub struct RecvMessageMeta {
-    pub key: SharedSecret,
-    pub rotated_our_kyber_key: bool,
-    pub rotated_their_kyber_key: bool,
-}
-
-impl From<SharedSecret> for RecvMessageMeta {
-    fn from(key: SharedSecret) -> Self {
-        Self { key, rotated_our_kyber_key: false, rotated_their_kyber_key: false }
-    }
-}
-
 #[derive(Debug)]
 pub enum RecvError {
     MissingMessage,
@@ -168,73 +214,17 @@ pub enum RecvError {
     InvalidState,
 }
 
-#[derive(Debug, Clone, Copy, Codec)]
-struct RatchetKey {
-    seed: [u8; RATCHET_SEED_SIZE],
-}
-
-impl RatchetKey {
-    fn random_from_rng(mut rng: impl CryptoRngCore) -> Self {
-        let mut seed = [0u8; RATCHET_SEED_SIZE];
-        rng.fill_bytes(&mut seed);
-        Self { seed }
-    }
-
-    fn expand(&self) -> (kyber::Keypair, x25519_dalek::StaticSecret) {
-        let (kyber_seed, x) = unsafe { std::mem::transmute(self.seed) };
-        (kyber::Keypair::new(&kyber_seed), x)
-    }
-
-    fn expand_x25519(&self) -> x25519_dalek::StaticSecret {
-        let (kyber_seed, x) = unsafe { std::mem::transmute(self.seed) };
-        if false {
-            _ = kyber::Keypair::new(&kyber_seed);
+impl std::fmt::Display for RecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecvError::MissingMessage => write!(f, "missing message"),
+            RecvError::Decapsulation => write!(f, "decapsulation failed"),
+            RecvError::InvalidState => write!(f, "invalid state"),
         }
-        x
-    }
-
-    fn x25519_pk(&self) -> x25519_dalek::PublicKey {
-        (&self.expand_x25519()).into()
-    }
-
-    fn encapsulate(
-        &self,
-        kyber: kyber::PublicKey,
-        x25519: x25519_dalek::PublicKey,
-        enc_bytes: [u8; ENC_SEEDBYTES],
-    ) -> (SharedSecret, Ciphertext) {
-        let x = self.expand_x25519();
-        let (kyber_shared, k) = kyber.enc(&enc_bytes);
-        let x = x.diffie_hellman(&x25519).to_bytes();
-        (xor(x, k), Ciphertext(kyber_shared))
-    }
-
-    fn decapsulate(
-        &self,
-        x25519: x25519_dalek::PublicKey,
-        cp: Ciphertext,
-    ) -> Result<SharedSecret, RecvError> {
-        let (kyber_shared, x) = self.expand();
-        let k = kyber_shared.dec(&cp.0).ok_or(RecvError::Decapsulation)?;
-        let x = x.diffie_hellman(&x25519).to_bytes();
-        Ok(xor(k, x))
     }
 }
 
-impl Default for RatchetKey {
-    fn default() -> Self {
-        Self { seed: [0u8; RATCHET_SEED_SIZE] }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Codec)]
-struct Ciphertext([u8; CIPHERTEXTBYTES]);
-
-impl Default for Ciphertext {
-    fn default() -> Self {
-        Self([0u8; CIPHERTEXTBYTES])
-    }
-}
+impl std::error::Error for RecvError {}
 
 #[derive(Debug, Clone, Copy, Codec, PartialEq, Eq)]
 struct MessageId {
@@ -246,14 +236,21 @@ struct MessageId {
 pub struct MessageHeader {
     id: MessageId,
     prev_sub_count: u32,
-    cp: Option<Ciphertext>,
+    kyber: Option<Kyber>,
     #[codec(with = codec::unsafe_as_raw_bytes)]
     x25519: x25519_dalek::PublicKey,
 }
 
+#[derive(Debug, Clone, Copy, Codec)]
+pub struct Kyber {
+    #[codec(with = codec::unsafe_as_raw_bytes)]
+    public: kyber::PublicKey,
+    cp: Ciphertext,
+}
+
 impl MessageHeader {
     pub fn is_major(&self) -> bool {
-        self.cp.is_some()
+        self.kyber.is_some()
     }
 }
 
@@ -311,21 +308,48 @@ fn xor(a: SharedSecret, b: SharedSecret) -> SharedSecret {
     array::from_fn(|i| a[i] ^ b[i])
 }
 
+fn random_array<const N: usize>(rng: &mut impl CryptoRngCore) -> [u8; N] {
+    let mut array = [0u8; N];
+    rng.fill_bytes(&mut array);
+    array
+}
+
 #[cfg(test)]
 mod test {
-    use {super::*, rand_core::OsRng, x25519_dalek::StaticSecret};
+    use {super::*, rand_core::OsRng};
 
     #[test]
     fn differned_deliver_orders() {
         let rng = OsRng;
 
         let shared_secret = StaticSecret::random_from_rng(rng).to_bytes();
-        let (mut alice, init) = DoubleRatchet::sender(shared_secret, rng);
-        let mut bob = DoubleRatchet::recipient(shared_secret, init, rng);
+        let (mut alice, init, aid) = DoubleRatchet::sender(shared_secret, rng);
+        let (mut bob, bid) = DoubleRatchet::recipient(shared_secret, init, rng);
+        assert_eq!(aid, bid);
 
-        let (msg, secret) = alice.send(bob.public_key());
-        let secret2 = bob.recv(msg, alice.public_key(), rng).unwrap().key;
+        assert_eq!(alice.sender_hash(), bob.receiver_hash());
+        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+
+        let (msg, secret) = alice.send();
+        let secret2 = bob.recv(msg, rng).unwrap();
         assert_eq!(secret, secret2);
+
+        assert_eq!(alice.sender_hash(), bob.receiver_hash());
+        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+
+        let (msg, secret) = bob.send();
+        let secret2 = alice.recv(msg, rng).unwrap();
+        assert_eq!(secret, secret2);
+
+        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+
+        let (msg, secret) = alice.send();
+        let secret2 = bob.recv(msg, rng).unwrap();
+        assert_eq!(secret, secret2);
+
+        assert_eq!(alice.sender_hash(), bob.receiver_hash());
+        assert_eq!(alice.receiver_hash(), bob.sender_hash());
     }
 
     #[test]
@@ -333,28 +357,28 @@ mod test {
         let rng = OsRng;
 
         let shared_secret = StaticSecret::random_from_rng(rng).to_bytes();
-        let (mut alice, init) = DoubleRatchet::sender(shared_secret, rng);
-        let mut bob = DoubleRatchet::recipient(shared_secret, init, rng);
+        let (mut alice, init, _) = DoubleRatchet::sender(shared_secret, rng);
+        let (mut bob, _) = DoubleRatchet::recipient(shared_secret, init, rng);
 
         let mut messages = Vec::new();
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(bob.send(alice.public_key()));
+                messages.push(bob.send());
             }
 
             for (msg, secret) in messages.drain(..) {
-                let secret2 = alice.recv(msg, bob.public_key(), rng).unwrap().key;
+                let secret2 = alice.recv(msg, rng).unwrap();
                 assert_eq!(secret, secret2);
             }
         }
 
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(alice.send(bob.public_key()));
+                messages.push(alice.send());
             }
 
             for (msg, secret) in messages.drain(..) {
-                let secret2 = bob.recv(msg, alice.public_key(), rng).unwrap().key;
+                let secret2 = bob.recv(msg, rng).unwrap();
                 assert_eq!(secret, secret2);
             }
 
@@ -363,7 +387,7 @@ mod test {
 
         for i in 1..10 {
             for _ in 0..i {
-                messages.push(alice.send(bob.public_key()));
+                messages.push(alice.send());
             }
 
             for (i, (msg, secret)) in messages.drain(..).rev().enumerate() {
@@ -371,7 +395,7 @@ mod test {
                     break;
                 }
 
-                let secret2 = bob.recv(msg, alice.public_key(), rng).unwrap().key;
+                let secret2 = bob.recv(msg, rng).unwrap();
                 assert_eq!(secret, secret2);
             }
 

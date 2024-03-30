@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 
 use {
-    crate::{MailVariants, RawChatMessage, RequestContext, SubscriptionMessage},
+    crate::{requests::MailVariants, RawChatMessage, RequestContext, SubscriptionMessage},
     anyhow::Context as _,
     chat_spec::{ChatName, Identity, Nonce, UserName},
     codec::{Codec, Reminder},
@@ -27,12 +27,17 @@ pub struct Context {
 }
 
 impl RequestContext for Context {
-    fn with_vault<R>(
+    fn try_with_vault<R>(
         &self,
         action: impl FnOnce(&mut crate::Vault) -> crate::Result<R>,
     ) -> crate::Result<R> {
         let mut vault = self.vault.borrow_mut();
         action(&mut vault)
+    }
+
+    fn with_vault<R>(&self, action: impl FnOnce(&mut crate::Vault) -> R) -> crate::Result<R> {
+        let mut vault = self.vault.borrow_mut();
+        Ok(action(&mut vault))
     }
 
     fn with_keys<R>(&self, action: impl FnOnce(&crate::UserKeys) -> R) -> crate::Result<R> {
@@ -91,41 +96,27 @@ impl Api {
 
     /// @throw
     #[wasm_bindgen]
-    pub async fn create_hardened_chat(&mut self, chat_name: &str) -> Result<(), JsValue> {
-        let chat = parse_chat_name(chat_name)?;
-        self.reqs.create_hardened_chat(chat, self.ctx.as_ref()).await.map_err(err_to_js)
-    }
-
-    /// @throw
-    #[wasm_bindgen]
-    pub async fn send_hardened_chat_invite(
+    pub async fn send_friend_request(
         &mut self,
-        user_name_to_invite: &str,
-        hardened_chat_name: &str,
+        user_name_to_send_request_to: &str,
     ) -> Result<(), JsValue> {
-        let to = parse_chat_name(user_name_to_invite)?;
-        let chat = parse_chat_name(hardened_chat_name)?;
-        self.reqs
-            .clone()
-            .send_hardened_chat_invite(to, chat, self.ctx.as_ref())
-            .await
-            .map_err(err_to_js)
+        let to = parse_chat_name(user_name_to_send_request_to)?;
+        self.reqs.clone().send_friend_request(to, self.ctx.as_ref()).await.map_err(err_to_js)
     }
 
     /// @throw
     #[wasm_bindgen]
-    pub async fn send_hardened_message(
+    pub async fn send_friend_message(
         &mut self,
-        hardened_chat_name: &str,
+        friend: &str,
         message: &str,
-    ) -> Result<Usernames, JsValue> {
-        let chat = parse_chat_name(hardened_chat_name)?;
+    ) -> Result<(), JsValue> {
+        let name = parse_chat_name(friend)?;
         self.reqs
             .clone()
-            .send_hardened_message(chat, message.as_bytes(), self.ctx.as_ref())
+            .send_frined_message(name, message.to_string(), self.ctx.as_ref())
             .await
             .map_err(err_to_js)
-            .map(|list| Usernames { list: list.into_iter().map(|s| s.to_string()).collect() })
     }
 }
 
@@ -151,7 +142,7 @@ impl ChatSubscription {
             .await
             .map_err(err_to_js)?;
         api.ctx
-            .with_vault(|vault| {
+            .try_with_vault(|vault| {
                 vault
                     .chats
                     .get_mut(&chat)
@@ -334,7 +325,7 @@ impl ProfileSubscription {
 
     /// @throw
     #[wasm_bindgen]
-    pub async fn next(&mut self) -> Result<HardenedChatMessage, JsValue> {
+    pub async fn next(&mut self) -> Result<FriendMessage, JsValue> {
         let mut messages = Vec::new();
         let mut changes = Vec::new();
         while let Some(bytes) = self.stream.next().await {
@@ -354,13 +345,10 @@ impl ProfileSubscription {
                     .map_err(err_to_js)?;
             }
 
-            if let Some((username, message, chatname)) = messages.pop() {
-                return Ok(HardenedChatMessage {
-                    sender: username.to_string(),
-                    content: message.to_string(),
-                    owner: self.context.keys.name.to_string(),
-                    chat_name: chatname.to_string(),
-                });
+            if let Some((username, crate::FriendMessage::DirectMessage { content })) =
+                messages.pop()
+            {
+                return Ok(FriendMessage { sender: username.to_string(), content });
             }
         }
 
@@ -375,11 +363,9 @@ impl ProfileSubscription {
 }
 
 #[wasm_bindgen(getter_with_clone)]
-struct HardenedChatMessage {
+struct FriendMessage {
     pub sender: String,
     pub content: String,
-    pub owner: String,
-    pub chat_name: String,
 }
 
 #[wasm_bindgen]

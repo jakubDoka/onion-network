@@ -10,6 +10,7 @@ edition.workspace = true
 
 [dependencies]
 arrayvec = "0.7.4"
+blake3 = "1.5.1"
 codec = { workspace = true }
 hkdf = "0.12.4"
 kyber.workspace = true

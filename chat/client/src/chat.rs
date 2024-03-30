@@ -13,7 +13,7 @@ use {
         *,
     },
     leptos_router::Redirect,
-    libp2p::futures::{FutureExt, StreamExt},
+    libp2p::futures::StreamExt,
     std::{
         future::Future,
         sync::atomic::{AtomicBool, Ordering},
@@ -52,7 +52,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     let current_chat = create_rw_signal(selected);
     let (current_member, set_current_member) = create_signal(Member::best());
     let (show_chat, set_show_chat) = create_signal(false);
-    let (is_hardened, set_is_hardened) = create_signal(false);
+    let (is_friend, set_is_hardened) = create_signal(false);
     let messages = create_node_ref::<leptos::html::Div>();
     let (cursor, set_cursor) = create_signal(Cursor::Normal(chat_spec::Cursor::INIT));
     let (red_all_messages, set_red_all_messages) = create_signal(false);
@@ -101,7 +101,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             return Ok(());
         }
 
-        if is_hardened.get_untracked() && matches!(cursor.get_untracked(), Cursor::Normal(_)) {
+        if is_friend.get_untracked() && matches!(cursor.get_untracked(), Cursor::Normal(_)) {
             let cursor =
                 db::MessageCursor::new(chat, my_name).await.context("opening message cursor")?;
             set_cursor(Cursor::Hardened(cursor));
@@ -193,7 +193,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             return None;
         };
 
-        if is_hardened.get_untracked() {
+        if is_friend.get_untracked() {
             return None;
         }
         let secret = state.chat_secret(chat)?;
@@ -217,14 +217,13 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     });
 
     create_effect(move |_| {
-        state.hardened_messages.track();
-        let Some(Some((chat, message))) =
-            state.hardened_messages.try_update_untracked(|m| m.take())
+        state.friend_messages.track();
+        let Some(Some((name, message))) = state.friend_messages.try_update_untracked(|m| m.take())
         else {
             return;
         };
 
-        if current_chat.get_untracked() != Some(chat) {
+        if current_chat.get_untracked() != Some(name) {
             log::debug!("received message for chat we are not currently in");
             return;
         };
@@ -264,7 +263,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             Ok(())
         });
         let selected = move || current_chat.get() == Some(chat);
-        let shortcut_prefix = if hardened { "sh" } else { "sn" };
+        let shortcut_prefix = if hardened { "sf" } else { "sn" };
         view! {
             <div class="sb tac bp toe" class:hc=selected
                 shortcut=format!("{shortcut_prefix}{chat}")
@@ -298,46 +297,26 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         },
     );
 
-    let (create_hardened_chat_button, create_hardened_chat_poppup) = popup(
+    let (friend_request_button, friend_request_poppup) = popup(
         PoppupStyle {
-            placeholder: "hardened chat name...",
+            placeholder: "username...",
             button_style: "hov sf pc lsm",
             button: "+",
-            shortcut: "ch",
-            confirm: "create",
+            shortcut: "fr",
+            confirm: "send",
             maxlength: 32,
         },
         move || true,
-        move |chat| async move {
-            let Ok(chat) = ChatName::try_from(chat.as_str()) else {
-                anyhow::bail!("invalid hardened chat name");
-            };
+        move |name| async move {
+            let name = UserName::try_from(name.as_str()).ok().context("invalid usenrame")?;
 
-            if state.vault.with_untracked(|v| v.hardened_chats.contains_key(&chat)) {
-                anyhow::bail!("hardened chat already exists");
+            if state.vault.with_untracked(|v| v.friends.contains_key(&name)) {
+                anyhow::bail!("friend or pending friend request already exists");
             }
 
-            requests().create_hardened_chat(chat, state).await.context("creating hardened chat")?;
-
-            Ok(())
+            requests().send_friend_request(name, state).await.context("sending friend request")
         },
     );
-
-    let add_normal_user = move |name: String| async move {
-        let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
-        let invitee = chat_client_node::fetch_profile(my_name, name).await?;
-        let chat = current_chat.get_untracked().context("no chat selected")?;
-        requests().invite_member(chat, invitee.sign, state, Member::worst()).await?;
-        log::info!("invited user: {:?}", name);
-        Ok(())
-    };
-
-    let add_hardened_user = move |name: String| async move {
-        let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
-        let chat = current_chat.get_untracked().context("no chat selected")?;
-        requests().send_hardened_chat_invite(name, chat, state).await?;
-        Ok(())
-    };
 
     let (invite_user_button, invite_user_poppup) = popup(
         PoppupStyle {
@@ -349,12 +328,17 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             maxlength: 32,
         },
         move || current_member.get().permissions.contains(chat_spec::Permissions::INVITE),
-        move |name| {
-            if is_hardened.get_untracked() {
-                add_hardened_user(name).left_future()
-            } else {
-                add_normal_user(name).right_future()
+        move |name: String| async move {
+            if is_friend.get_untracked() {
+                anyhow::bail!("TODO: hide this button");
             }
+
+            let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
+            let invitee = chat_client_node::fetch_profile(my_name, name).await?;
+            let chat = current_chat.get_untracked().context("no chat selected")?;
+            requests().invite_member(chat, invitee.sign, state, Member::worst()).await?;
+            log::info!("invited user: {:?}", name);
+            Ok(())
         },
     );
 
@@ -381,24 +365,14 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         });
     };
 
-    let send_hardened_message = move |chat: ChatName, content: String| {
+    let send_friend_message = move |chat: UserName, content: String| {
         handled_spawn_local("sending hardened message", async move {
-            let undelivered =
-                requests().send_hardened_message(chat, content.as_bytes(), state).await?;
+            requests().send_frined_message(chat, content.clone(), state).await?;
 
-            for name in undelivered {
-                log::info!("message not delivered to: {:?}", name);
-            }
+            append_message(my_name, content.clone());
+            let message = db::Message { chat, sender: my_name, owner: chat, content };
+            db::save_messages(vec![message]).await.context("saving our message locally")?;
 
-            db::save_messages(vec![db::Message {
-                chat,
-                sender: my_name,
-                owner: my_name,
-                content: content.clone(),
-            }])
-            .await
-            .context("saving our message locally")?;
-            append_message(my_name, content);
             clear_input();
             Ok(())
         });
@@ -416,8 +390,8 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         let content = message_input.get_untracked().unwrap().value();
         anyhow::ensure!(!content.trim().is_empty(), "message is empty");
 
-        if is_hardened.get_untracked() {
-            send_hardened_message(chat, content)
+        if is_friend.get_untracked() {
+            send_friend_message(chat, content)
         } else {
             send_normal_message(chat, content)
         }
@@ -441,13 +415,11 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     let normal_chats_view = move || {
         state.vault.with(|v| v.chats.keys().map(|&chat| side_chat(chat, false)).collect_view())
     };
-    let hardened_chats_view = move || {
-        state
-            .vault
-            .with(|v| v.hardened_chats.keys().map(|&chat| side_chat(chat, true)).collect_view())
+    let friends_view = move || {
+        state.vault.with(|v| v.friends.keys().map(|&name| side_chat(name, true)).collect_view())
     };
     let normal_chats_are_empty = move || state.vault.with(|v| v.chats.is_empty());
-    let hardened_chats_are_empty = move || state.vault.with(|v| v.hardened_chats.is_empty());
+    let hardened_chats_are_empty = move || state.vault.with(|v| v.friends.is_empty());
     let chat_selected = move || current_chat.with(Option::is_some);
     let get_chat = move || current_chat.get().unwrap_or_default().to_string();
     let can_send = move || current_member.get().permissions.contains(chat_spec::Permissions::SEND);
@@ -466,18 +438,18 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                     {normal_chats_view}
                     <div class="tac bm" hidden=crate::not(normal_chats_are_empty)>"no chats yet"</div>
                     <div class="bp lsp sc sb tac">
-                        "hardened chats"
-                        {create_hardened_chat_button}
+                        "friends"
+                        {friend_request_button}
                     </div>
-                    {hardened_chats_view}
-                    <div class="tac bm" hidden=crate::not(hardened_chats_are_empty)>"no chats yet"</div>
+                    {friends_view}
+                    <div class="tac bm" hidden=crate::not(hardened_chats_are_empty)>"no friends yet"</div>
                 </div>
             </div>
             <div class="sc fg1 flx pb fdc" hidden=crate::not(chat_selected) class=("off-screen", crate::not(show_chat))>
                 <div class="fg0 flx bm">
                     <button class="hov sf pc lsm phone-only" on:click=hide_chat>"<"</button>
                     <div class="phone-only">{get_chat}</div>
-                    {invite_user_button}
+                    <div hidden=is_friend>{invite_user_button}</div>
                     {member_list_button}
                 </div>
                 <div class="fg1 flx fdc sc pr oys fy" on:scroll=on_scroll node_ref=message_scroll>
@@ -492,7 +464,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             </div>
         </main>
         {create_normal_chat_poppup}
-        {create_hardened_chat_poppup}
+        {friend_request_poppup}
         {invite_user_poppup}
         {member_list_popup}
     }.into_view()

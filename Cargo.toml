@@ -7,7 +7,7 @@ members = [
 	"crypto/falcon/falcon",
 	"crypto/*",
 	"chat/*",
-	"chain/*",
+	"chain/*", "pocs/kyber_from_mnemonic",
 ]
 
 exclude = [

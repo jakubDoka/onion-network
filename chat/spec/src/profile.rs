@@ -70,6 +70,7 @@ impl Vault {
 
         if proof.context != *self.merkle_tree.root() {
             self.values.insert(key, v);
+            self.recompute();
             return false;
         }
 
@@ -95,7 +96,6 @@ impl Vault {
 
         let prev = self.values.insert(key, value);
 
-        // TODO: we might be able to avoid full recompute and update smartly
         self.recompute();
 
         if proof.context != *self.merkle_tree.root() {
@@ -105,6 +105,7 @@ impl Vault {
                 self.values.remove(&key);
             }
 
+            self.recompute();
             return false;
         }
 

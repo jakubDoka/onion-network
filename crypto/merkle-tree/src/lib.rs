@@ -145,6 +145,13 @@ impl<T: MerkleHash> MerkleTree<T> {
         self.nodes.clear();
         self.nodes.push(root);
     }
+
+    pub fn index_of(&self, key: &T) -> Option<usize>
+    where
+        T: PartialEq,
+    {
+        self.nodes.iter().step_by(2).position(|node| node == key)
+    }
 }
 
 #[cfg(test)]

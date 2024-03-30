@@ -2,11 +2,8 @@ use {
     crate::requests::Result,
     chain_api::{Profile, TransactionHandler},
     chat_spec::*,
-    std::{future::Future, pin, str::FromStr, task::Poll, time::Duration},
-    web_sys::{
-        wasm_bindgen::{self, closure::Closure, JsCast, JsValue},
-        window,
-    },
+    std::str::FromStr,
+    web_sys::wasm_bindgen::{self, JsValue},
 };
 
 pub async fn fetch_profile(my_name: UserName, name: UserName) -> Result<Profile, anyhow::Error> {
@@ -125,39 +122,4 @@ impl TransactionHandler for WebSigner {
 
         chain_api::wait_for_in_block(progress, true).await.map(drop)
     }
-}
-
-pub async fn timeout<F: Future>(f: F, duration: Duration) -> Result<F::Output, ChatError> {
-    let mut fut = pin::pin!(f);
-    let mut callback = None::<(Closure<dyn FnMut()>, i32)>;
-    let until = instant::Instant::now() + duration;
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(v) = fut.as_mut().poll(cx) {
-            if let Some((_cl, handle)) = callback.take() {
-                window().unwrap().clear_timeout_with_handle(handle);
-            }
-
-            return Poll::Ready(Ok(v));
-        }
-
-        if until < instant::Instant::now() {
-            return Poll::Ready(Err(ChatError::Timeout));
-        }
-
-        if callback.is_none() {
-            let waker = cx.waker().clone();
-            let handler = Closure::once(move || waker.wake());
-            let handle = window()
-                .unwrap()
-                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                    handler.as_ref().unchecked_ref(),
-                    duration.as_millis() as i32,
-                )
-                .unwrap();
-            callback = Some((handler, handle));
-        }
-
-        Poll::Pending
-    })
-    .await
 }

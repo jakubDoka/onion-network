@@ -10,14 +10,18 @@ use {
     libp2p::futures::channel::{mpsc, oneshot},
     onion::SharedSecret,
     rand::{rngs::OsRng, CryptoRng, RngCore},
-    std::marker::PhantomData,
+    std::{future::Future, marker::PhantomData, pin, task::Poll, time::Duration},
+    web_sys::{
+        wasm_bindgen::{closure::Closure, JsCast},
+        window,
+    },
 };
 pub use {
+    chain::*,
     node::*,
     requests::*,
     vault::{Vault, *},
 };
-
 pub type SubscriptionMessage = Vec<u8>;
 pub type RawResponse = Vec<u8>;
 pub type MessageContent = String;
@@ -151,4 +155,39 @@ impl<T> Encrypted<T> {
         let data = decrypt(&mut self.0, secret)?;
         T::decode(&mut &data[..])
     }
+}
+
+pub async fn timeout<F: Future>(f: F, duration: Duration) -> Result<F::Output, ChatError> {
+    let mut fut = pin::pin!(f);
+    let mut callback = None::<(Closure<dyn FnMut()>, i32)>;
+    let until = instant::Instant::now() + duration;
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(v) = fut.as_mut().poll(cx) {
+            if let Some((_cl, handle)) = callback.take() {
+                window().unwrap().clear_timeout_with_handle(handle);
+            }
+
+            return Poll::Ready(Ok(v));
+        }
+
+        if until < instant::Instant::now() {
+            return Poll::Ready(Err(ChatError::Timeout));
+        }
+
+        if callback.is_none() {
+            let waker = cx.waker().clone();
+            let handler = Closure::once(move || waker.wake());
+            let handle = window()
+                .unwrap()
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    handler.as_ref().unchecked_ref(),
+                    duration.as_millis() as i32,
+                )
+                .unwrap();
+            callback = Some((handler, handle));
+        }
+
+        Poll::Pending
+    })
+    .await
 }

@@ -1,7 +1,8 @@
 use {
     crate::{
-        chain_node, min_nodes, timeout, RawRequest, RawResponse, RequestInit, RequestStream,
-        Requests, SubscriptionInit, SubscriptionMessage, UserKeys, Vault,
+        chain::{chain_node, min_nodes},
+        timeout, RawRequest, RawResponse, RequestInit, RequestStream, Requests, SubscriptionInit,
+        SubscriptionMessage, UserKeys, Vault,
     },
     anyhow::Context,
     chat_spec::*,

@@ -1,8 +1,8 @@
 use {
     crate::{
-        fetch_profile, vault_chat_404, ChatMeta, Encrypted, FriendMeta, RawChatMessage, RawRequest,
-        RequestInit, RequestStream, SubscriptionInit, SubscriptionMessage, UserKeys, Vault,
-        VaultComponentId,
+        chain::fetch_profile, vault_chat_404, ChatMeta, Encrypted, FriendMeta, RawChatMessage,
+        RawRequest, RequestInit, RequestStream, SubscriptionInit, SubscriptionMessage, UserKeys,
+        Vault, VaultComponentId,
     },
     anyhow::Context,
     chat_spec::*,

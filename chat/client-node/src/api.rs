@@ -338,12 +338,11 @@ impl ProfileSubscription {
                 .await
                 .map_err(err_to_js)?;
 
-            for vid in changes.drain(..) {
-                self.reqs
-                    .save_vault_component(vid, self.context.as_ref())
-                    .await
-                    .map_err(err_to_js)?;
-            }
+            self.reqs
+                .clone()
+                .save_vault_components(changes.drain(..), self.context.as_ref())
+                .await
+                .map_err(err_to_js)?;
 
             if let Some((username, crate::FriendMessage::DirectMessage { content })) =
                 messages.pop()

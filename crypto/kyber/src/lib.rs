@@ -1,6 +1,7 @@
 #![no_std]
 #![feature(array_chunks)]
 #![feature(iter_array_chunks)]
+#![feature(portable_simd)]
 
 mod barrett;
 mod cbd;

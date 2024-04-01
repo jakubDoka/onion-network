@@ -105,7 +105,9 @@ impl Requests {
     ) -> Result<()> {
         let my_id = ctx.with_keys(UserKeys::identity_hash)?;
         ctx.try_with_vault(|v| Ok(v.chats.insert(name, ChatMeta::new())))?;
-        self.save_vault_component(VaultComponentId::Chats, &ctx).await.context("saving vault")?;
+        self.save_vault_components([VaultComponentId::Chats], &ctx)
+            .await
+            .context("saving vault")?;
         self.create_chat(name, my_id).await
     }
 
@@ -144,8 +146,8 @@ impl Requests {
         let friend = FriendMeta { dr, identity, id };
         ctx.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;
         ctx.with_vault(|v| v.friends.insert(name, friend))?;
-        self.save_vault_component(VaultComponentId::Friend(name), &ctx).await?;
-        self.save_vault_component(VaultComponentId::FriendNames, &ctx).await?;
+        let changes = [VaultComponentId::Friend(name), VaultComponentId::FriendNames];
+        self.save_vault_components(changes, &ctx).await?;
 
         Ok(())
     }
@@ -248,10 +250,9 @@ impl Requests {
     pub async fn insert_to_vault(
         &mut self,
         proof: Proof<crypto::Hash>,
-        key: crypto::Hash,
-        data: Vec<u8>,
+        changes: Vec<(crypto::Hash, Vec<u8>)>,
     ) -> Result<()> {
-        self.dispatch(rpcs::INSERT_TO_VAULT, proof.topic(), (proof, key, data)).await
+        self.dispatch(rpcs::INSERT_TO_VAULT, proof.topic(), (proof, changes)).await
     }
 
     pub async fn remove_from_vault(
@@ -340,20 +341,23 @@ impl Requests {
         self.dispatch(rpcs::SEND_MESSAGE, Topic::Chat(name), proof).await
     }
 
-    pub async fn save_vault_component(
+    pub async fn save_vault_components(
         &mut self,
-        id: VaultComponentId,
+        id: impl IntoIterator<Item = VaultComponentId>,
         ctx: &impl RequestContext,
     ) -> Result<()> {
         let key = ctx.with_keys(|k| k.vault)?;
-        let Some((hash, data)) = ctx.try_with_vault(|v| Ok(v.shapshot(id, key)))? else {
+        let chnages = ctx.with_vault(|v| {
+            id.into_iter().filter_map(|id| v.shapshot(id, key)).collect::<Vec<_>>()
+        })?;
+        if chnages.is_empty() {
             return Ok(());
-        };
+        }
         let total_hash = ctx.try_with_vault(|v| Ok(v.merkle_hash()))?;
         let proof = ctx.with_keys(|k| {
             ctx.with_vault_version(|nonce| Proof::new(&k.sign, nonce, total_hash, OsRng))
         })??;
-        self.insert_to_vault(proof, hash, data).await
+        self.insert_to_vault(proof, chnages).await
     }
 
     pub(crate) async fn dispatch_direct<'a, R: Codec<'a>>(

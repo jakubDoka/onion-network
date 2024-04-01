@@ -147,13 +147,10 @@ fn App() -> impl IntoView {
                         handle_mail(mail, &mut new_messages, &mut vault_updates, state).await,
                     );
                 }
-                db::save_messages(new_messages).await?;
+                db::save_messages(&new_messages).await?;
                 vault_updates.sort_unstable();
                 vault_updates.dedup();
-                for update in vault_updates {
-                    dispatch_clone.save_vault_component(update, &state).await?;
-                }
-                Ok(())
+                dispatch_clone.save_vault_components(vault_updates, &state).await
             });
 
             let mut dispatch_clone = dispatch.clone();
@@ -161,17 +158,16 @@ fn App() -> impl IntoView {
                 let identity = state.with_keys(UserKeys::identity_hash)?;
                 let mut account =
                     dispatch_clone.subscribe(identity).await.context("subscribing to profile")?;
+                let mut vault_updates = Vec::new();
+                let mut new_messages = Vec::new();
                 while let Some(mail) = account.next().await {
-                    let mut new_messages = Vec::new();
-                    let mut vault_updates = Vec::new();
-                    handle_error(
-                        handle_mail(&mail, &mut new_messages, &mut vault_updates, state).await,
-                    );
-                    handle_error(db::save_messages(new_messages).await);
-
-                    for update in vault_updates {
-                        dispatch_clone.save_vault_component(update, &state).await?;
-                    }
+                    let task = async {
+                        handle_mail(&mail, &mut new_messages, &mut vault_updates, state).await?;
+                        db::save_messages(&new_messages).await?;
+                        dispatch_clone.save_vault_components(vault_updates.drain(..), &state).await
+                    };
+                    handle_error(task.await);
+                    new_messages.clear();
                 }
 
                 anyhow::Result::Ok(())

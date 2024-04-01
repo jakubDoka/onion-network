@@ -49,17 +49,18 @@ pub async fn create(
     }
 }
 
-// TODO: optimize this to do updates in bulk
+// TODO: add size checks
+
 pub async fn insert_to_vault(
     cx: crate::Context,
     identity: Identity,
-    (proof, key, value): (Proof<crypto::Hash>, crypto::Hash, Vec<u8>),
+    (proof, changes): (Proof<crypto::Hash>, Vec<(crypto::Hash, Vec<u8>)>),
 ) -> Result<()> {
     cx.profiles
         .get_mut(&identity)
         .ok_or(ChatError::NotFound)?
         .vault
-        .try_insert(key, value, proof)
+        .try_insert_bulk(changes, proof)
         .then_some(())
         .ok_or(ChatError::InvalidProof)
 }

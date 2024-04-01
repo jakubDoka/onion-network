@@ -30,7 +30,7 @@ mod ffi {
     }
 }
 
-pub async fn save_messages(messages: Vec<Message>) -> anyhow::Result<()> {
+pub async fn save_messages(messages: &[Message]) -> anyhow::Result<()> {
     if messages.is_empty() {
         return Ok(());
     }

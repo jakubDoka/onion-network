@@ -1,5 +1,5 @@
 use {
-    crate::{Nonce, Proof},
+    crate::{Identity, Nonce, Proof},
     arrayvec::ArrayString,
     chain_api::{RawUserName, USER_NAME_CAP},
     codec::Codec,
@@ -80,11 +80,10 @@ impl Vault {
         true
     }
 
-    pub fn try_insert(
+    pub fn try_insert_bulk(
         &mut self,
-        key: crypto::Hash,
-        value: Vec<u8>,
-        proof: Proof<crypto::Hash>,
+        changes: Vec<(Identity, Vec<u8>)>,
+        proof: Proof<Identity>,
     ) -> bool {
         if !proof.verify() {
             return false;
@@ -94,18 +93,23 @@ impl Vault {
             return false;
         }
 
-        let prev = self.values.insert(key, value);
+        let prevs = changes
+            .iter()
+            .map(|(k, v)| (k, self.values.insert(*k, v.clone())))
+            .collect::<BTreeMap<_, _>>();
 
         self.recompute();
 
         if proof.context != *self.merkle_tree.root() {
-            if let Some(prev) = prev {
-                self.values.insert(key, prev);
-            } else {
-                self.values.remove(&key);
+            for (k, v) in prevs {
+                if let Some(v) = v {
+                    self.values.insert(*k, v);
+                } else {
+                    self.values.remove(k);
+                }
             }
-
             self.recompute();
+
             return false;
         }
 
@@ -113,6 +117,15 @@ impl Vault {
         self.sig = proof.signature;
 
         true
+    }
+
+    pub fn try_insert(
+        &mut self,
+        key: crypto::Hash,
+        value: Vec<u8>,
+        proof: Proof<crypto::Hash>,
+    ) -> bool {
+        self.try_insert_bulk(vec![(key, value)], proof)
     }
 
     pub fn get_ecrypted<T: for<'a> Codec<'a>>(

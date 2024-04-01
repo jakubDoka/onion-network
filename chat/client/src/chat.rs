@@ -331,10 +331,6 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         },
         move || current_member.get().permissions.contains(chat_spec::Permissions::INVITE),
         move |name: String| async move {
-            if is_friend.get_untracked() {
-                anyhow::bail!("TODO: hide this button");
-            }
-
             let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
             let invitee = chat_client_node::fetch_profile(my_name, name).await?;
             let chat = current_chat.get_untracked().context("no chat selected")?;
@@ -378,7 +374,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 owner: my_name,
                 content,
             };
-            db::save_messages(vec![message]).await.context("saving our message locally")?;
+            db::save_messages(&[message]).await.context("saving our message locally")?;
 
             clear_input();
             Ok(())

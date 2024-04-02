@@ -7,7 +7,9 @@ members = [
 	"crypto/falcon/falcon",
 	"crypto/*",
 	"chat/*",
-	"chain/*", "pocs/kyber_from_mnemonic",
+	"chain/*",
+	"pocs/kyber_from_mnemonic",
+	"storage/*",
 ]
 
 exclude = [
@@ -54,6 +56,11 @@ config = { path = "utils/config" }
 
 chain-api = { path = "chain/api", default-features = false }
 chain-types = { path = "chain/types", default-features = false }
+
+storage-node = { path = "storage/node" }
+storage-satelite = { path = "storage/satelite" }
+storage-spec = { path = "storage/spec" }
+berkleamp-welch = { path = "storage/berkleamp-welch" }
 
 [profile.native-optimized]
 inherits = "release"

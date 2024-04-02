@@ -4,7 +4,7 @@ license = { workspace = true }
 readme = { workspace = true }
 categories = { workspace = true }
 keywords = { workspace = true }
-name = "satelite"
+name = "storage-satelite"
 version = "0.1.0"
 edition = { workspace = true }
 description = "node storing the data mapping on the network"
@@ -15,7 +15,7 @@ description = "node storing the data mapping on the network"
 anyhow = { workspace = true }
 bitflags = "2.4.1"
 env_logger = "0.11.0"
-libp2p = { workspace = true, features = ["quic", "noise", "macros", "tokio", "yamux", "websocket", "dns"] }
+libp2p = { workspace = true, features = ["tcp", "noise", "macros", "tokio", "yamux"] }
 log = { workspace = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 smallvec = "1.11.1"

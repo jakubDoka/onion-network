@@ -4,7 +4,7 @@ license = { workspace = true }
 readme = { workspace = true }
 categories = { workspace = true }
 keywords = { workspace = true }
-name = "storage"
+name = "storage-node"
 version = "0.1.0"
 edition = { workspace = true }
 description = "node that stores data requested by satelites"
@@ -12,7 +12,25 @@ description = "node that stores data requested by satelites"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = { workspace = true }
+libp2p = { workspace = true, features = ["tcp", "noise", "macros", "tokio", "yamux"] }
+log = { workspace = true }
+bitflags = "2.4.1"
+env_logger = "0.11.0"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+smallvec = "1.11.1"
+thiserror = "1.0.50"
+tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
+
+streaming = { workspace = true }
+rpc = { workspace = true }
+dht = { workspace = true }
+crypto = { workspace = true }
+chain-api = { workspace = true }
 storage-spec = { workspace = true }
+topology-wrapper = { workspace = true }
+component-utils = { workspace = true }
+config = { workspace = true }
 
 [lints]
 workspace = true

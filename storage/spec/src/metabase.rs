@@ -7,7 +7,7 @@ pub const BLOCK_CHUNK_SIZE: usize = 4;
 macro_rules! decl_db {
     (
         $cx_name:ident, $db_name:ident;
-        $($field:ident: $id:ident, $cx:ident, $db:ident, $elem:ty, $id_repr:ty, $element:ty;)*
+        $($field:ident: ($id:ident, $cx:ident, $db:ident, $elem:ty, $id_repr:ty, $element:ty);)*
     ) => {
         $(
             pub type $id = $id_repr;
@@ -69,10 +69,10 @@ macro_rules! decl_db {
 
 decl_db! {
     DbContext, Db;
-    stores: StoreId, StoreCx, StoreDb, u16, u16, Store;
-    blocks: BlockId, BlockCx, BlockDb, u32, u32, Block;
-    files: FileId, FileCx, FileDb, u64, u64, FileMeta;
-    block_lists: BlockListId, BlockListCx, BlockListDb, u32, u32, BlockChunk;
+    stores: (StoreId, StoreCx, StoreDb, u16, u16, Store);
+    blocks: (BlockId, BlockCx, BlockDb, u32, u32, Block);
+    files: (FileId, FileCx, FileDb, u64, u64, FileMeta);
+    block_lists: (BlockListId, BlockListCx, BlockListDb, u32, u32, BlockChunk);
 }
 
 pub type StoreIdentity = [u8; 32];

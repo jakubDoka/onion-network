@@ -1,9 +1,10 @@
+#![feature(never_type)]
 use {
     self::storage::Storage,
     anyhow::Context,
     component_utils::futures::StreamExt,
     libp2p::swarm::{NetworkBehaviour, SwarmEvent},
-    std::net::Ipv4Addr,
+    std::{future::Future, net::Ipv4Addr},
 };
 
 mod storage;
@@ -20,8 +21,8 @@ config::env_config! {
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     let db = Storage::new();
-    let mut satelite = Satelite::new(config, db)?;
-    satelite.run().await
+    let satelite = Satelite::new(config, db)?;
+    satelite.await?
 }
 
 pub struct Satelite {
@@ -38,7 +39,11 @@ impl Satelite {
 
         let swarm = libp2p::SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
-            .with_quic()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )?
             .with_behaviour(|_| Behaviour::default())?
             .with_swarm_config(|c| {
                 c.with_idle_connection_timeout(std::time::Duration::from_secs(60))
@@ -48,15 +53,22 @@ impl Satelite {
         Ok(Self { swarm, _db: store })
     }
 
-    async fn run(&mut self) -> ! {
-        loop {
-            tokio::select! {
-                e = self.swarm.select_next_some() => self.swarm_event(e),
-            }
-        }
-    }
-
     fn swarm_event(&mut self, _event: SwarmEvent<BehaviourEvent>) {}
+}
+
+impl Future for Satelite {
+    type Output = anyhow::Result<!>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        while let std::task::Poll::Ready(Some(event)) = self.swarm.poll_next_unpin(cx) {
+            self.swarm_event(event);
+        }
+
+        std::task::Poll::Pending
+    }
 }
 
 #[derive(NetworkBehaviour, Default)]

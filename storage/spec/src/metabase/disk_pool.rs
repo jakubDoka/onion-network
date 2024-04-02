@@ -1,6 +1,6 @@
 use {
     crate::sorted_compact_vec::{ConstsValue, SortedCompactVec, SortedElement, LANES},
-    Codec,
+    codec::Codec,
     std::{
         io, iter,
         ops::{Deref, DerefMut, Range},

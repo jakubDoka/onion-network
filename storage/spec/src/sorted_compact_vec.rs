@@ -1,5 +1,5 @@
 use {
-    Codec,
+    codec::Codec,
     std::{
         ops::Range,
         ptr::Unique,
@@ -205,7 +205,7 @@ struct SimdStorage<T: SimdElement> {
 }
 
 impl<'a, T: SimdElement + Codec<'a>> Codec<'a> for SimdStorage<T> {
-    fn encode(&self, buffer: &mut impl component_utils::Buffer) -> Option<()> {
+    fn encode(&self, buffer: &mut impl codec::Buffer) -> Option<()> {
         let (left, right) = self.slices();
         self.len.encode(buffer)?;
         for e in left.iter().chain(right.iter()) {

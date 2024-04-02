@@ -19,6 +19,7 @@ crypto = { workspace = true }
 futures = { workspace = true }
 berkleamp-welch = { workspace = true }
 component-utils = { workspace = true }
+codec.workspace = true
 
 [dev-dependencies]
 getrandom = "0.2.12"

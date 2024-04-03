@@ -1,4 +1,5 @@
 #![feature(iter_advance_by)]
+#![feature(trait_alias)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(array_windows)]
 #![feature(iter_collect_into)]
@@ -11,8 +12,8 @@
 #![feature(slice_take)]
 
 use {
-    self::handlers::{chat::Chat, MissingTopic},
-    crate::handlers::{Handler, Router},
+    self::api::{chat::Chat, MissingTopic},
+    crate::api::Handler as _,
     anyhow::Context as _,
     chain_api::{NodeData, Stake},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
@@ -45,8 +46,8 @@ use {
     tokio::sync::RwLock,
 };
 
+mod api;
 mod db;
-mod handlers;
 #[cfg(test)]
 mod tests;
 
@@ -130,8 +131,8 @@ struct Server {
     context: Context,
     request_events: mpsc::Receiver<RequestEvent>,
     clients: futures::stream::SelectAll<Stream>,
-    client_router: handlers::Router,
-    server_router: handlers::Router,
+    client_router: handlers::Router<api::RouterContext>,
+    server_router: handlers::Router<api::RouterContext>,
     stake_events: StakeEvents,
     pending_rpcs: HashMap<CallId, RpcRespChannel>,
 }
@@ -345,7 +346,7 @@ impl Server {
             clients: Default::default(),
             stake_events,
             client_router: handlers::router!(
-                chat::{
+                api::chat => {
                     rpcs::CREATE_CHAT => create.repl();
                     rpcs::ADD_MEMBER => add_member.repl().restore();
                     rpcs::KICK_MEMBER => kick_member.repl().restore();
@@ -353,7 +354,7 @@ impl Server {
                     rpcs::FETCH_MESSAGES => fetch_messages.restore();
                     rpcs::FETCH_MEMBERS => fetch_members.restore();
                 };
-                profile::{
+                api::profile => {
                     rpcs::CREATE_PROFILE => create.repl();
                     rpcs::SEND_MAIL => send_mail.repl().restore();
                     rpcs::READ_MAIL => read_mail.repl().restore();
@@ -365,7 +366,7 @@ impl Server {
                 };
             ),
             server_router: handlers::router!(
-                chat::{
+                api::chat => {
                     rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
                     rpcs::KICK_MEMBER => kick_member.restore();
@@ -374,7 +375,7 @@ impl Server {
                     rpcs::SEND_MESSAGE => send_message.restore();
                     rpcs::VOTE_BLOCK => vote.restore().no_resp();
                 };
-                profile::{
+                api::profile => {
                     rpcs::CREATE_PROFILE => create;
                     rpcs::SEND_MAIL => send_mail.restore();
                     rpcs::READ_MAIL => read_mail.restore();
@@ -420,9 +421,8 @@ impl Server {
                     return;
                 };
 
-                let request = Request { prefix, id, topic: Some(topic), body };
-
-                self.server_router.handle(request, handlers::State {
+                self.server_router.handle(api::State {
+                    req: Request { prefix, id, topic: Some(topic), body },
                     swarm: &mut self.swarm,
                     location: OnlineLocation::Remote(peer),
                     context: self.context,
@@ -494,7 +494,8 @@ impl Server {
                 }
             }
         } else {
-            self.client_router.handle(req, handlers::State {
+            self.client_router.handle(api::State {
+                req,
                 swarm: &mut self.swarm,
                 location: OnlineLocation::Local(id),
                 context: self.context,
@@ -594,7 +595,7 @@ impl Server {
                     client.inner.close();
                 };
             }
-            handlers::Response::DontRespond => {}
+            handlers::Response::DontRespond(_) => {}
         }
     }
 
@@ -690,7 +691,7 @@ impl Server {
             handlers::Response::Success(b) | handlers::Response::Failure(b) => {
                 self.swarm.behaviour_mut().rpc.respond(peer, id, b)
             }
-            handlers::Response::DontRespond => {}
+            handlers::Response::DontRespond(_) => {}
         };
     }
 }
@@ -719,14 +720,14 @@ impl Future for Server {
                 did_something = true;
             }
 
-            while let Poll::Ready((res, OnlineLocation::Local(peer), id)) =
+            while let Poll::Ready((res, (OnlineLocation::Local(peer), id))) =
                 self.client_router.poll(cx)
             {
                 self.handle_client_router_response(peer, id, res);
                 did_something = true;
             }
 
-            while let Poll::Ready((res, OnlineLocation::Remote(peer), id)) =
+            while let Poll::Ready((res, (OnlineLocation::Remote(peer), id))) =
                 self.server_router.poll(cx)
             {
                 self.handle_server_router_response(peer, id, res);
@@ -753,7 +754,7 @@ impl Future for Server {
 }
 
 #[derive(NetworkBehaviour)]
-struct Behaviour {
+pub struct Behaviour {
     onion: topology_wrapper::Behaviour<onion::Behaviour>,
     dht: dht::Behaviour,
     rpc: topology_wrapper::Behaviour<rpc::Behaviour>,

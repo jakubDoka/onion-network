@@ -13,11 +13,12 @@ use {
         profile::Profile,
     },
     anyhow::Context,
+    chain_api::Nonce,
     chat_client_node::{
         encode_direct_chat_name, BootPhase, FriendMessage, MailVariants, Node, RequestContext,
         Requests, UserKeys, Vault, VaultComponentId,
     },
-    chat_spec::{ChatName, Nonce, UserName},
+    chat_spec::{ChatName, UserName},
     codec::{Codec, Reminder},
     leptos::*,
     leptos_router::{Route, Router, Routes, A},

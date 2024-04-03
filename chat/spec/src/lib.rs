@@ -9,9 +9,9 @@
 #![feature(slice_from_ptr_range)]
 
 use {
-    arrayvec::{ArrayString, ArrayVec},
+    arrayvec::ArrayVec,
     codec::{Codec, Reminder},
-    rand_core::CryptoRngCore,
+    crypto::proof::{Nonce, Proof, ProofContext},
     std::num::NonZeroUsize,
 };
 
@@ -147,6 +147,16 @@ impl Topic {
     }
 }
 
+pub trait ComputeTopic {
+    fn topic(&self) -> Topic;
+}
+
+impl<T> ComputeTopic for Proof<T> {
+    fn topic(&self) -> Topic {
+        crypto::hash::new(self.pk).into()
+    }
+}
+
 impl From<ChatName> for Topic {
     fn from(c: ChatName) -> Self {
         Self::Chat(c)
@@ -173,81 +183,6 @@ pub struct Request<'a> {
     pub id: CallId,
     pub topic: Option<Topic>,
     pub body: Reminder<'a>,
-}
-
-pub type Nonce = u64;
-
-#[derive(Clone, Copy, Debug, Codec)]
-pub struct Proof<T> {
-    pub pk: crypto::sign::PublicKey,
-    pub nonce: Nonce,
-    pub signature: crypto::sign::Signature,
-    pub context: T,
-}
-
-const PAYLOAD_SIZE: usize = core::mem::size_of::<Nonce>() + crypto::hash::SIZE;
-
-impl<T: ProofContext> Proof<T> {
-    pub fn new(
-        kp: &crypto::sign::Keypair,
-        nonce: &mut Nonce,
-        context: T,
-        rng: impl CryptoRngCore,
-    ) -> Self {
-        let signature = kp.sign(&Self::pack_payload(*nonce, &context), rng);
-        *nonce += 1;
-        Self { pk: kp.public_key(), nonce: *nonce - 1, signature, context }
-    }
-
-    fn pack_payload(nonce: Nonce, context: &T) -> [u8; PAYLOAD_SIZE] {
-        let mut buf = [0; PAYLOAD_SIZE];
-        buf[..crypto::hash::SIZE].copy_from_slice(&crypto::hash::new(context.as_bytes()));
-        buf[crypto::hash::SIZE..].copy_from_slice(&nonce.to_be_bytes());
-        buf
-    }
-
-    pub fn verify(&self) -> bool {
-        let bytes = Self::pack_payload(self.nonce, &self.context);
-        self.pk.verify(&bytes, &self.signature).is_ok()
-    }
-
-    pub fn topic(&self) -> Topic {
-        crypto::hash::new(self.pk).into()
-    }
-}
-
-pub trait ProofContext {
-    fn as_bytes(&self) -> &[u8];
-}
-
-impl<const SIZE: usize> ProofContext for [u8; SIZE] {
-    fn as_bytes(&self) -> &[u8] {
-        self
-    }
-}
-
-impl ProofContext for &[u8] {
-    fn as_bytes(&self) -> &[u8] {
-        self
-    }
-}
-
-impl ProofContext for str {
-    fn as_bytes(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-impl<const SIZE: usize> ProofContext for ArrayString<SIZE> {
-    fn as_bytes(&self) -> &[u8] {
-        self.as_str().as_bytes()
-    }
-}
-
-impl ProofContext for Reminder<'_> {
-    fn as_bytes(&self) -> &[u8] {
-        self.0
-    }
 }
 
 #[derive(Clone, Copy, Codec, Debug)]

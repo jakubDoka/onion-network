@@ -13,6 +13,7 @@ pub use {hash::Hash, rand_core};
 
 pub mod enc;
 pub mod hash;
+pub mod proof;
 pub mod sign;
 
 const NONCE_SIZE: usize = <<Aes256Gcm as AeadCore>::NonceSize as Unsigned>::USIZE;

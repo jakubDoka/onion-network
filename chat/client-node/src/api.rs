@@ -4,8 +4,9 @@
 use {
     crate::{requests::MailVariants, RawChatMessage, RequestContext, SubscriptionMessage},
     anyhow::Context as _,
-    chat_spec::{ChatName, Identity, Nonce, UserName},
+    chat_spec::{ChatName, Identity, UserName},
     codec::{Codec, Reminder},
+    crypto::proof::Nonce,
     libp2p::futures::{channel::mpsc, StreamExt},
     std::{
         cell::{Cell, RefCell},

@@ -1,9 +1,8 @@
 use {
     crate::OnlineLocation,
-    chat_spec::{
-        advance_nonce, rpcs, ChatError, FetchProfileResp, Identity, Mail, Profile, Proof, Vault,
-    },
+    chat_spec::{advance_nonce, rpcs, ChatError, FetchProfileResp, Identity, Mail, Profile, Vault},
     codec::{Codec, Reminder, ReminderOwned},
+    crypto::proof::Proof,
     dashmap::mapref::entry::Entry,
     libp2p::futures::StreamExt,
     std::collections::BTreeMap,
@@ -93,13 +92,16 @@ pub async fn read_mail(
     location: OnlineLocation,
     proof: Proof<Mail>,
 ) -> Result<ReminderOwned> {
-    crate::ensure!(proof.verify(), ChatError::InvalidProof);
+    handlers::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let identity = crypto::hash::new(proof.pk);
     let profile = cx.profiles.get_mut(&identity);
 
-    crate::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
-    crate::ensure!(advance_nonce(&mut profile.mail_action, proof.nonce), ChatError::InvalidAction);
+    handlers::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
+    handlers::ensure!(
+        advance_nonce(&mut profile.mail_action, proof.nonce),
+        ChatError::InvalidAction
+    );
 
     cx.online.insert(identity, location);
 
@@ -136,7 +138,7 @@ pub async fn send_mail(
 ) -> Result<()> {
     let push_mail = || {
         let mut profile = cx.profiles.get_mut(&for_who).ok_or(ChatError::NotFound)?;
-        crate::ensure!(profile.mail.len() + mail.len() < MAIL_BOX_CAP, ChatError::MailboxFull);
+        handlers::ensure!(profile.mail.len() + mail.len() < MAIL_BOX_CAP, ChatError::MailboxFull);
         profile.push_mail(mail);
         Ok(())
     };
@@ -147,8 +149,8 @@ pub async fn send_mail(
 
     match online_in {
         OnlineLocation::Local(p) => {
-            crate::ensure!(OnlineLocation::Local(p) != origin, ChatError::SendingToSelf);
-            crate::ensure!(!cx.push_profile_event(for_who, mail).await, ChatError::SentDirectly);
+            handlers::ensure!(OnlineLocation::Local(p) != origin, ChatError::SendingToSelf);
+            handlers::ensure!(!cx.push_profile_event(for_who, mail).await, ChatError::SentDirectly);
         }
         OnlineLocation::Remote(peer) => 'b: {
             if matches!(origin, OnlineLocation::Remote(_)) {

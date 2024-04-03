@@ -2,7 +2,7 @@ use {
     crate::encrypt,
     chat_spec::*,
     codec::Codec,
-    crypto::decrypt,
+    crypto::{decrypt, proof::Nonce},
     double_ratchet::DoubleRatchet,
     onion::SharedSecret,
     rand::rngs::OsRng,

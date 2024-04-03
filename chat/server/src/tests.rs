@@ -1,6 +1,7 @@
 use {
     super::*,
     chat_spec::*,
+    crypto::proof::{Proof, ProofContext},
     libp2p::futures::{stream::FuturesUnordered, FutureExt},
     std::{fmt::Debug, usize},
 };

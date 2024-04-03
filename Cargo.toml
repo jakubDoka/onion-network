@@ -36,6 +36,7 @@ log = "0.4.20"
 futures = "0.3.30"
 anyhow = "1.0.80"
 thiserror = "1.0.58"
+arrayvec = "0.7.4"
 
 dht = { path = "protocols/dht" }
 onion = { path = "protocols/onion" }
@@ -45,7 +46,7 @@ topology-wrapper = { path = "protocols/topology-wrapper" }
 
 chat-client-node = { path = "chat/client-node", default-features = false }
 chat-spec = { path = "chat/spec" }
-crypto = { path = "crypto/crypto" }
+crypto = { path = "crypto/crypto", features = ["codec", "arrayvec"] }
 falcon = { path = "crypto/falcon/falcon" }
 kyber = { path = "crypto/kyber" }
 
@@ -53,6 +54,7 @@ codec-derive = { path = "utils/codec-derive" }
 codec = { path = "utils/codec" }
 component-utils = { path = "utils/component-utils" }
 config = { path = "utils/config" }
+handlers = { path = "utils/handlers" }
 
 chain-api = { path = "chain/api", default-features = false }
 chain-types = { path = "chain/types", default-features = false }

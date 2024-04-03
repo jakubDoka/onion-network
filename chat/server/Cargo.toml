@@ -19,6 +19,7 @@ log = { workspace = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
 dashmap = "5.5.3"
+arrayvec = "0.7.4"
 
 topology-wrapper = { workspace = true }
 chain-api = { workspace = true, features = ["native"] }
@@ -29,7 +30,7 @@ crypto = { workspace = true }
 dht = { workspace = true }
 onion = { workspace = true }
 codec.workspace = true
-arrayvec = "0.7.4"
+handlers.workspace = true
 
 [lints]
 workspace = true

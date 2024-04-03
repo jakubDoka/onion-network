@@ -1,9 +1,9 @@
 use {
-    crate::{Identity, Nonce, Proof},
+    crate::{Identity, Nonce},
     arrayvec::ArrayString,
     chain_api::{RawUserName, USER_NAME_CAP},
     codec::Codec,
-    crypto::{enc, hash, sign, SharedSecret},
+    crypto::{enc, hash, proof::Proof, sign, SharedSecret},
     merkle_tree::MerkleTree,
     std::{collections::BTreeMap, iter},
 };

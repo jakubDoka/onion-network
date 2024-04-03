@@ -3,9 +3,10 @@ use {
     chain_api::Nonce,
     chat_spec::{
         retain_messages, rpcs, unpack_messages_ref, BlockNumber, ChatError, ChatEvent, ChatName,
-        Cursor, Identity, Member, Message, Permissions, Proof, ReplVec, REPLICATION_FACTOR,
+        Cursor, Identity, Member, Message, Permissions, ReplVec, REPLICATION_FACTOR,
     },
     codec::{Codec, Reminder},
+    crypto::proof::Proof,
     dht::{try_peer_id_to_ed, U256},
     libp2p::{futures::StreamExt, PeerId},
     std::{
@@ -44,14 +45,14 @@ pub async fn create(
     identity: Identity,
 ) -> Result<()> {
     if let Some(missing_topic) = missing_topic {
-        crate::ensure!(
+        handlers::ensure!(
             let MissingTopic::Chat { mut lock, .. } = missing_topic,
             ChatError::AlreadyExists
         );
 
         *lock = Chat::new(identity, name);
     } else {
-        crate::ensure!(
+        handlers::ensure!(
             let dashmap::mapref::entry::Entry::Vacant(v) = cx.chats.entry(name),
             ChatError::AlreadyExists
         );
@@ -69,7 +70,7 @@ pub async fn add_member(
     let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
     let mut chat = chat.write().await;
 
-    crate::ensure!(proof.verify(), ChatError::InvalidProof);
+    handlers::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let sender_id = crypto::hash::new(proof.pk);
     let is_update = chat.members.contains_key(&identity);
@@ -114,7 +115,7 @@ pub async fn kick_member(
     {
         let mut chat = chat.write().await;
 
-        crate::ensure!(proof.verify(), ChatError::InvalidProof);
+        handlers::ensure!(proof.verify(), ChatError::InvalidProof);
 
         let sender_id = crypto::hash::new(proof.pk);
         let sender = chat.members.get_mut(&sender_id).ok_or(ChatError::NotMember)?;
@@ -125,11 +126,14 @@ pub async fn kick_member(
         }
         let rank = sender.rank;
 
-        crate::ensure!(
+        handlers::ensure!(
             let btree_map::Entry::Occupied(entry) = chat.members.entry(identity),
             ChatError::NotFound
         );
-        crate::ensure!(identity == sender_id || entry.get().rank > rank, ChatError::NoPermission);
+        handlers::ensure!(
+            identity == sender_id || entry.get().rank > rank,
+            ChatError::NoPermission
+        );
 
         entry.remove();
     }
@@ -164,8 +168,8 @@ pub async fn send_message(
     proof: Proof<Reminder<'_>>,
 ) -> Result<()> {
     let msg = proof.context.0;
-    crate::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatError::MessageTooLarge);
-    crate::ensure!(proof.verify(), ChatError::InvalidProof);
+    handlers::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatError::MessageTooLarge);
+    handlers::ensure!(proof.verify(), ChatError::InvalidProof);
 
     let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
     let identity = crypto::hash::new(proof.pk);

@@ -7,7 +7,10 @@ use {
     anyhow::Context,
     chat_spec::*,
     codec::{Codec, Reminder},
-    crypto::enc::{ChoosenCiphertext, Ciphertext},
+    crypto::{
+        enc::{ChoosenCiphertext, Ciphertext},
+        proof::{Nonce, Proof},
+    },
     double_ratchet::{DoubleRatchet, MessageHeader},
     libp2p::futures::{
         channel::{mpsc, oneshot},

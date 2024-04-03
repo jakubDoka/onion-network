@@ -8,7 +8,11 @@ use {
     chat_spec::*,
     codec::{Codec, Reminder},
     component_utils::FindAndRemove,
-    crypto::{enc, sign},
+    crypto::{
+        enc,
+        proof::{Nonce, Proof},
+        sign,
+    },
     dht::Route,
     libp2p::{
         core::upgrade::Version,

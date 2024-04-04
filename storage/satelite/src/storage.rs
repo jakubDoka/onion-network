@@ -2,8 +2,8 @@ use {
     anyhow::Context,
     codec::Codec,
     lmdb_zero::{
-        open, put, traits::LmdbRaw, DatabaseOptions, LmdbResultExt, ReadTransaction,
-        WriteTransaction,
+        open, put, traits::LmdbRaw, Cursor, CursorIter, DatabaseOptions, LmdbResultExt, MaybeOwned,
+        ReadTransaction, WriteTransaction,
     },
     rand_core::OsRng,
     std::{
@@ -61,7 +61,7 @@ impl NodeProfiles {
         true
     }
 
-    pub fn request_gc(&mut self, identity: NodeIdentity, nonce: u64) -> Option<()> {
+    pub fn request_gc(&mut self, identity: NodeIdentity, nonce: u64) -> Option<NodeId> {
         let current_time =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
@@ -75,7 +75,7 @@ impl NodeProfiles {
         profile.last_requested_gc = current_time;
         profile.nonce += 1;
 
-        Some(())
+        Some(id)
     }
 
     pub fn allocate_file(&mut self, size: u64) -> Option<(Address, Holders)> {
@@ -115,7 +115,7 @@ impl NodeProfiles {
 }
 
 pub struct LmdbMap<K, V> {
-    files: lmdb_zero::Database<'static>,
+    db: lmdb_zero::Database<'static>,
     phantom: std::marker::PhantomData<(K, V)>,
 }
 
@@ -129,16 +129,16 @@ impl<K: Copy, V: Copy> LmdbMap<K, V> {
             )?
         };
         Ok(Self {
-            files: lmdb_zero::Database::open(env, None, &DatabaseOptions::defaults())?,
+            db: lmdb_zero::Database::open(env, None, &DatabaseOptions::defaults())?,
             phantom: Default::default(),
         })
     }
 
     pub fn save(&self, k: K, v: V) -> anyhow::Result<bool> {
-        let wr = WriteTransaction::new(self.files.env()).context("creating transaction")?;
+        let wr = WriteTransaction::new(self.db.env()).context("creating transaction")?;
         let res = wr
             .access()
-            .put(&self.files, AsBytes::of_ref(&k), AsBytes::of_ref(&v), put::NOOVERWRITE)
+            .put(&self.db, AsBytes::of_ref(&k), AsBytes::of_ref(&v), put::NOOVERWRITE)
             .map(|()| true)
             .ignore_exists(false)
             .context("putting value")?;
@@ -147,10 +147,10 @@ impl<K: Copy, V: Copy> LmdbMap<K, V> {
     }
 
     pub fn load(&self, address: Address) -> anyhow::Result<Option<FileMeta>> {
-        let rd = ReadTransaction::new(self.files.env()).context("creating transaction")?;
+        let rd = ReadTransaction::new(self.db.env()).context("creating transaction")?;
         let res = rd
             .access()
-            .get(&self.files, AsBytes::of_ref(&address))
+            .get(&self.db, AsBytes::of_ref(&address))
             .to_opt()
             .context("getting value")?
             .map(|v: &AsBytes<_>| v.0);
@@ -158,28 +158,48 @@ impl<K: Copy, V: Copy> LmdbMap<K, V> {
     }
 
     pub fn delete(&self, address: K, guard: impl FnOnce(V) -> bool) -> anyhow::Result<bool> {
-        let wr = WriteTransaction::new(self.files.env()).context("creating transaction")?;
+        let wr = WriteTransaction::new(self.db.env()).context("creating transaction")?;
         if !wr
             .access()
-            .get::<_, AsBytes<V>>(&self.files, AsBytes::of_ref(&address))
+            .get::<_, AsBytes<V>>(&self.db, AsBytes::of_ref(&address))
             .to_opt()
             .context("checking owner")?
             .is_some_and(|v| guard(v.0))
         {
             return Ok(false);
         };
-        wr.access().del_key(&self.files, AsBytes::of_ref(&address)).context("deleting value")?;
+        wr.access().del_key(&self.db, AsBytes::of_ref(&address)).context("deleting value")?;
         wr.commit().context("commiting transaction")?;
         Ok(true)
     }
 }
 
+impl LmdbMap<Address, FileMeta> {
+    pub fn get_blocks_for(&self, node: NodeId) -> anyhow::Result<Vec<(BlockId, u32)>> {
+        let rd = ReadTransaction::new(self.db.env()).context("creating transaction")?;
+        let cursor = rd.cursor(&self.db).context("creating cursor")?;
+
+        let res = CursorIter::new(
+            MaybeOwned::Owned(cursor),
+            &rd.access(),
+            Cursor::first::<AsBytes<Address>, AsBytes<FileMeta>>,
+            Cursor::next,
+        )?
+        .filter_map(Result::ok)
+        .filter(|(_, v)| { v.0.holders }.contains(&node))
+        .map(|(k, _)| (k.0.starting_block, k.0.size.div_ceil(BLOCK_FRAGMENT_SIZE as _) as _))
+        .collect();
+
+        Ok(res)
+    }
+}
+
 impl LmdbMap<UserIdentity, UserMeta> {
     pub fn advance_nonce(&self, identity: UserIdentity, new: u64) -> anyhow::Result<bool> {
-        let wr = WriteTransaction::new(self.files.env()).context("creating transaction")?;
+        let wr = WriteTransaction::new(self.db.env()).context("creating transaction")?;
         {
             let mut access = wr.access();
-            let mut cursor = wr.cursor(&self.files).context("creating cursor")?;
+            let mut cursor = wr.cursor(&self.db).context("creating cursor")?;
             let meta = cursor
                 .overwrite_in_place::<_, AsBytes<UserMeta>>(
                     &mut access,

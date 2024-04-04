@@ -21,6 +21,9 @@ berkleamp-welch = { workspace = true }
 component-utils = { workspace = true }
 codec.workspace = true
 rpc.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 getrandom = "0.2.12"

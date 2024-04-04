@@ -1,37 +1,12 @@
 use {
     crate::{storage::UserMeta, OurPk},
     anyhow::Context,
-    codec::{AsRawBytes, Codec},
+    codec::AsRawBytes,
     crypto::proof::Proof,
-    storage_spec::{Address, ExpandedHolders, File, FileMeta},
+    storage_spec::{Address, ClientError, ExpandedHolders, File, FileMeta},
 };
 
 type Result<T, E = ClientError> = std::result::Result<T, E>;
-
-#[derive(Codec, thiserror::Error, Debug)]
-pub enum ClientError {
-    #[error("not enough nodes to store the file")]
-    NotEnoughtNodes,
-    #[error("internal error, actual message is logged")]
-    InternalError,
-    #[error("not allowed")]
-    NotAllowed,
-    #[error("already registered")]
-    AlreadyRegistered,
-    #[error("invalid proof")]
-    InvalidProof,
-    #[error("you won the lottery")]
-    YouWonTheLottery,
-    #[error("not found")]
-    NotFound,
-}
-
-impl From<anyhow::Error> for ClientError {
-    fn from(err: anyhow::Error) -> Self {
-        log::error!("{:#?}", err);
-        ClientError::InternalError
-    }
-}
 
 pub async fn register(cx: crate::Context, pk: OurPk, proof: Proof<crypto::Hash>) -> Result<()> {
     handlers::ensure!(
@@ -46,7 +21,12 @@ pub async fn register(cx: crate::Context, pk: OurPk, proof: Proof<crypto::Hash>)
 }
 
 // TODO: Include payment
-pub async fn allocate_file(cx: crate::Context, (size, proof): (u64, Proof<()>)) -> Result<File> {
+pub async fn allocate_file(
+    cx: crate::Context,
+    pk: OurPk,
+    (size, proof): (u64, Proof<crypto::Hash>),
+) -> Result<File> {
+    handlers::ensure!(pk.to_bytes() == proof.context, ClientError::InvalidProof);
     handlers::ensure!(proof.verify(), ClientError::InvalidProof);
     let validated =
         handlers::blocking!(cx.store.users.advance_nonce(proof.identity(), proof.nonce))?;
@@ -85,6 +65,7 @@ pub async fn get_file_holders(
     Ok(cx.store.nodes.read().unwrap().expand_holders(meta.holders))
 }
 
-pub async fn allocate_bandwidth((): ()) -> Result<()> {
+// TODO: Include payment
+pub async fn allocate_bandwidth(cx: crate::Context, (): ()) -> Result<()> {
     todo!()
 }

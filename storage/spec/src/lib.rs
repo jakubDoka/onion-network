@@ -66,6 +66,52 @@ pub type FreeSpace = u32;
 pub type Holders = [NodeId; MAX_PIECES];
 pub type ExpandedHolders = [NodeIdentity; MAX_PIECES];
 
+#[derive(Codec, thiserror::Error, Debug)]
+pub enum ClientError {
+    #[error("not enough nodes to store the file")]
+    NotEnoughtNodes,
+    #[error("internal error, actual message is logged")]
+    InternalError,
+    #[error("not allowed")]
+    NotAllowed,
+    #[error("already registered")]
+    AlreadyRegistered,
+    #[error("invalid proof")]
+    InvalidProof,
+    #[error("you won the lottery, now try again")]
+    YouWonTheLottery,
+    #[error("not found")]
+    NotFound,
+}
+
+impl From<anyhow::Error> for ClientError {
+    fn from(err: anyhow::Error) -> Self {
+        log::error!("{:#?}", err);
+        ClientError::InternalError
+    }
+}
+
+#[derive(Codec, thiserror::Error, Debug)]
+pub enum NodeError {
+    #[error("invalid proof")]
+    InvalidProof,
+    #[error("already registered")]
+    AlreadyRegistered,
+    #[error("not registered")]
+    NotRegistered,
+    #[error("invalid nonce, expected: {0}")]
+    InvalidNonce(u64),
+    #[error("store thrown unexpected error, actual message is logged")]
+    StoreError,
+}
+
+impl From<anyhow::Error> for NodeError {
+    fn from(err: anyhow::Error) -> Self {
+        log::error!("lmdb error: {:?}", err);
+        NodeError::StoreError
+    }
+}
+
 #[repr(packed)]
 #[derive(Clone, Copy)]
 pub struct Address {

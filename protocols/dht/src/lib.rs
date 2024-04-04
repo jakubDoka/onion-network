@@ -8,7 +8,7 @@ use {
         swarm::NetworkBehaviour,
         Multiaddr, PeerId,
     },
-    std::{convert::Infallible, iter},
+    std::convert::Infallible,
 };
 
 pub type Filter = fn(
@@ -112,19 +112,15 @@ impl RoutingTable {
     pub fn bulk_insert(&mut self, routes: impl IntoIterator<Item = Route>) {
         assert!(self.routes.is_empty());
         self.routes.extend(routes);
-        self.routes.sort_by_key(|r| r.id);
     }
 
     pub fn insert(&mut self, route: Route) {
-        match self.routes.binary_search_by_key(&route.id, |r| r.id) {
-            Ok(i) => self.routes[i] = route,
-            Err(i) => self.routes.insert(i, route),
-        }
+        self.routes.push(route);
     }
 
     pub fn remove(&mut self, id: PeerId) -> Option<Route> {
         let id = try_peer_id_to_ed(id)?;
-        let index = self.routes.binary_search_by_key(&id.into(), |r| r.id).ok()?;
+        let index = self.routes.iter().position(|r| r.id == id.into())?;
         Some(self.routes.remove(index))
     }
 
@@ -132,49 +128,19 @@ impl RoutingTable {
     pub fn get(&self, id: PeerId) -> Option<&Multiaddr> {
         let id = try_peer_id_to_ed(id)?;
         let id: U256 = id.into();
-        let index = self.routes.binary_search_by_key(&id, |r| r.id).ok()?;
-        Some(&self.routes[index].addr)
+        Some(&self.routes.iter().find(|r| r.id == id)?.addr)
     }
 
-    pub fn closest(&self, data: &[u8]) -> impl Iterator<Item = &Route> + '_ {
+    pub fn closest(&mut self, data: &[u8]) -> impl Iterator<Item = &Route> + '_ {
         let hash = blake3::hash(data);
         let id = U256::from(hash.as_bytes());
         self.closest_low(id)
     }
 
-    fn closest_low(&self, id: U256) -> impl Iterator<Item = &Route> + '_ {
-        let index = self.routes.binary_search_by_key(&id, |r| r.id).unwrap_or_else(|i| i);
-
-        let mut left = self.routes[..index].iter().rev();
-        let mut right = self.routes[index..].iter();
-        let mut left_peek = left.next().or_else(|| right.next_back());
-        let mut right_peek = right.next().or_else(|| left.next_back());
-
-        iter::from_fn(move || {
-            let (left_route, right_route) = match (left_peek, right_peek) {
-                (Some(left), Some(right)) => (left, right),
-                // we do not peek anymore since this must be the last one
-                (Some(either), None) | (None, Some(either)) => {
-                    left_peek = None;
-                    right_peek = None;
-                    return Some(either);
-                }
-                (None, None) => return None,
-            };
-
-            if shortest_distance(id, left_route.id) < shortest_distance(id, right_route.id) {
-                left_peek = left.next().or_else(|| right.next_back());
-                Some(left_route)
-            } else {
-                right_peek = right.next().or_else(|| left.next_back());
-                Some(right_route)
-            }
-        })
+    fn closest_low(&mut self, id: U256) -> impl Iterator<Item = &Route> + '_ {
+        self.routes.sort_unstable_by_key(|r| r.id ^ id);
+        self.routes.iter()
     }
-}
-
-fn shortest_distance(a: U256, b: U256) -> U256 {
-    a.overflowing_sub(b).0.min(b.overflowing_sub(a).0)
 }
 
 #[must_use]
@@ -222,27 +188,10 @@ mod tests {
     #[test]
     fn closest_correct_len() {
         let count = 10;
-        let table = RoutingTable {
+        let mut table = RoutingTable {
             routes: (0..count).map(|i| Route { id: i.into(), addr: Multiaddr::empty() }).collect(),
         };
 
         assert_eq!(table.closest(&[]).count(), count);
-    }
-
-    #[test]
-    fn wrap_around() {
-        let table = RoutingTable {
-            routes: vec![
-                Route { id: U256::from(2), addr: Multiaddr::empty() },
-                Route { id: U256::MAX / 2, addr: Multiaddr::empty() },
-                Route { id: U256::MAX, addr: Multiaddr::empty() },
-            ],
-        };
-
-        assert_eq!(table.closest_low(1.into()).collect::<Vec<_>>(), vec![
-            &table.routes[0],
-            &table.routes[2],
-            &table.routes[1]
-        ]);
     }
 }

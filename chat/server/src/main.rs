@@ -504,19 +504,20 @@ impl Server {
         }
     }
 
-    fn validate_topic(&self, topic: Option<Topic>) -> Option<Option<MissingTopic>> {
+    fn validate_topic(&mut self, topic: Option<Topic>) -> Option<Option<MissingTopic>> {
         let Some(topic) = topic else {
             return Some(None);
         };
 
+        let us = *self.swarm.local_peer_id();
         if self
             .swarm
-            .behaviour()
+            .behaviour_mut()
             .dht
             .table
             .closest(topic.as_bytes())
             .take(REPLICATION_FACTOR.get() + 1)
-            .all(|r| r.peer_id() != *self.swarm.local_peer_id())
+            .all(|r| r.peer_id() != us)
         {
             return None;
         }

@@ -64,12 +64,14 @@ impl Satelite {
             context: Box::leak(Box::new(OwnedContext { store })),
             router: handlers::router! {
                 client => {
+                    rpcs::REGISTER_CLIENT => register;
                     rpcs::ALLOCATE_FILE => allocate_file;
                     rpcs::DELETE_FILE => delete_file;
                     rpcs::ALLOCAET_BANDWIDTH => allocate_bandwidth;
+                    rpcs::GET_FILE_HOLDERS => get_file_holders;
                 };
                 node => {
-                    rpcs::REGISTER => register;
+                    rpcs::REGISTER_NODE => register;
                     rpcs::GET_GC_META => get_gc_meta;
                 };
             },
@@ -162,5 +164,4 @@ type OurPk = libp2p::identity::ed25519::PublicKey;
 handlers::quick_impl_from_request! { State<'_> => [
     Context => |state| state.context,
     OurPk => |state| state.pk.clone(),
-
 ]}

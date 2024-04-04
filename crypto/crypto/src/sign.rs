@@ -13,6 +13,17 @@ pub struct Signature {
     pre: ed25519_dalek::Signature,
 }
 
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                self as *const Self as *const u8,
+                core::mem::size_of::<Self>(),
+            )
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "codec", derive(codec::Codec))]
 pub struct Keypair {

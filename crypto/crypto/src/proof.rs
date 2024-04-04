@@ -58,6 +58,12 @@ impl ProofContext for &[u8] {
     }
 }
 
+impl ProofContext for () {
+    fn as_bytes(&self) -> &[u8] {
+        &[]
+    }
+}
+
 impl ProofContext for str {
     fn as_bytes(&self) -> &[u8] {
         self.as_bytes()
@@ -75,5 +81,20 @@ impl<const SIZE: usize> ProofContext for arrayvec::ArrayString<SIZE> {
 impl ProofContext for codec::Reminder<'_> {
     fn as_bytes(&self) -> &[u8] {
         self.0
+    }
+}
+
+#[cfg(feature = "codec")]
+impl<T> ProofContext for codec::AsRawBytes<T> {
+    fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(&self.0 as *const _ as *const u8, core::mem::size_of::<T>())
+        }
+    }
+}
+
+impl<T> ProofContext for Proof<T> {
+    fn as_bytes(&self) -> &[u8] {
+        self.signature.as_ref()
     }
 }

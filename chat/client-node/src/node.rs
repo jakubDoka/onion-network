@@ -160,7 +160,7 @@ impl Node {
         );
 
         let members = swarm
-            .behaviour()
+            .behaviour_mut()
             .dht
             .table
             .closest(profile_hash.sign.as_ref())
@@ -231,12 +231,13 @@ impl Node {
         let mut topology = HashMap::<PeerId, HashSet<ChatName>>::new();
         let iter = vault.chats.keys().copied().flat_map(|c| {
             swarm
-                .behaviour()
+                .behaviour_mut()
                 .dht
                 .table
                 .closest(c.as_bytes())
                 .take(REPLICATION_FACTOR.get() + 1)
                 .map(move |peer| (peer.peer_id(), c))
+                .collect::<Vec<_>>()
         });
         for (peer, chat) in iter {
             if peer == profile_stream_peer {
@@ -334,7 +335,7 @@ impl Node {
 
         let peers = self
             .swarm
-            .behaviour()
+            .behaviour_mut()
             .dht
             .table
             .closest(search_key.as_bytes())

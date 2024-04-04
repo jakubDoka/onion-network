@@ -2,6 +2,13 @@
 #![feature(macro_metavar_expr)]
 
 #[macro_export]
+macro_rules! blocking {
+    ($expr:expr) => {
+        tokio::task::spawn_blocking(move || $expr).await.unwrap()
+    };
+}
+
+#[macro_export]
 macro_rules! ensure {
     ($cond:expr, $resp:expr) => {
         if !$cond {

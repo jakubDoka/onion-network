@@ -20,13 +20,13 @@ log = { workspace = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 smallvec = "1.11.1"
 thiserror = "1.0.50"
-tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
+tokio = { version = "1.32.0", features = ["rt-multi-thread", "macros", "time"] }
 
 streaming = { workspace = true }
 rpc = { workspace = true }
 dht = { workspace = true }
 crypto = { workspace = true }
-chain-api = { workspace = true }
+chain-api = { workspace = true, features = ["native"] }
 storage-spec = { workspace = true }
 topology-wrapper = { workspace = true }
 component-utils = { workspace = true }

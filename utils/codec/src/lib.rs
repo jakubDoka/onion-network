@@ -25,6 +25,19 @@ pub mod unsafe_as_raw_bytes {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct AsRawBytes<T>(pub T);
+
+impl<'a, T> Codec<'a> for AsRawBytes<T> {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        unsafe_as_raw_bytes::encode(&self.0, buffer)
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        Some(AsRawBytes(unsafe_as_raw_bytes::decode(buffer)?))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Reminder<'a>(pub &'a [u8]);
 
 impl<'a> AsRef<[u8]> for Reminder<'a> {

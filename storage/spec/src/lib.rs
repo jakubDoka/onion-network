@@ -32,14 +32,16 @@ pub mod rpcs {
         ALLOCATE_BLOCK;
         GET_PIECE_PROOF;
 
-        // node to satelite
-        REGISTER;
+        // node to satellite
+        REGISTER_NODE;
         GET_GC_META;
 
-        // client to satelite
+        // client to satellite
+        REGISTER_CLIENT;
         ALLOCATE_FILE;
         DELETE_FILE;
         ALLOCAET_BANDWIDTH;
+        GET_FILE_HOLDERS;
     }
 }
 
@@ -50,14 +52,41 @@ pub const MAX_PIECES: usize = DATA_PIECES + PARITY_PIECES;
 pub const BLOCK_FRAGMENT_SIZE: usize = 1024 * 1024 * 8;
 pub const BLOCK_SIZE: usize = MAX_PIECES * BLOCK_FRAGMENT_SIZE;
 pub const BLOCK_PIECES: usize = BLOCK_FRAGMENT_SIZE / PIECE_SIZE;
-pub const BLOCK_CHUNK_SIZE: usize = 4;
+pub const DATA_PER_BLOCK: usize = DATA_PIECES * BLOCK_FRAGMENT_SIZE;
 
 pub type ReconstructBundle<'data> = [ReconstructPiece<'data>; DATA_PIECES];
 pub type Piece = [u8; PIECE_SIZE];
 pub type Data = [Piece; DATA_PIECES];
 pub type Parity = [Piece; PARITY_PIECES];
-pub type ObjectId = crypto::Hash;
-pub type NodeIdentity = [u8; 32];
+pub type NodeIdentity = crypto::Hash;
+pub type UserIdentity = crypto::Hash;
+pub type BlockId = crypto::Hash;
+pub type NodeId = u16;
+pub type FreeSpace = u32;
+pub type Holders = [NodeId; MAX_PIECES];
+pub type ExpandedHolders = [NodeIdentity; MAX_PIECES];
+
+#[repr(packed)]
+#[derive(Clone, Copy)]
+pub struct Address {
+    pub starting_block: BlockId,
+    pub block_offset: u16,
+    pub size: u64,
+}
+
+#[derive(Codec, Clone, Copy)]
+pub struct File {
+    #[codec(with = codec::unsafe_as_raw_bytes)]
+    pub address: Address,
+    pub holders: ExpandedHolders,
+}
+
+#[repr(packed)]
+#[derive(Clone, Copy)]
+pub struct FileMeta {
+    pub holders: Holders,
+    pub owner: UserIdentity,
+}
 
 pub struct Encoding {
     inner: berkleamp_welch::Fec,

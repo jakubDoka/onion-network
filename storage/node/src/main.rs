@@ -1,3 +1,4 @@
+#![feature(map_try_insert)]
 #![feature(type_alias_impl_trait)]
 #![feature(result_flattening)]
 #![feature(never_type)]
@@ -33,23 +34,27 @@ use {
 
 mod client;
 mod satelite;
+mod storage;
 
 type Context = &'static OwnedContext;
 
+// TODO: add disk space limit that we can check when saving files
 config::env_config! {
     struct Config {
         port: u16 = "8080",
         external_ip: Ipv4Addr = "127.0.0.1",
         satelites: config::List<config::Hex> = "",
         keys: String = "node.keys",
+        storage_dir: String = "storage",
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
+    let storage = storage::Storage::new(&config.storage_dir)?;
     let (keys, _initial) = NodeKeys::load(&config.keys)?;
-    let satelite = Node::new(config, keys)?;
+    let satelite = Node::new(config, storage, keys)?;
     satelite.await?
 }
 
@@ -64,7 +69,7 @@ struct Node {
 }
 
 impl Node {
-    fn new(config: Config, keys: NodeKeys) -> anyhow::Result<Self> {
+    fn new(config: Config, storage: storage::Storage, keys: NodeKeys) -> anyhow::Result<Self> {
         let identity =
             libp2p::identity::ed25519::Keypair::try_from_bytes(&mut keys.sign.pre_quantum())
                 .context("invalid identity")?;
@@ -94,7 +99,7 @@ impl Node {
 
         Ok(Self {
             swarm,
-            context: Box::leak(Box::new(OwnedContext { request_events: sd, keys })),
+            context: Box::leak(Box::new(OwnedContext { request_events: sd, keys, storage })),
             router: handlers::router! {
                 client => {
                     rpcs::STORE_FILE => store_file;
@@ -257,6 +262,7 @@ handlers::quick_impl_from_request!(State<'_> => [
 ]);
 
 struct OwnedContext {
+    storage: storage::Storage,
     request_events: mpsc::Sender<RequestEvent>,
     keys: NodeKeys,
 }

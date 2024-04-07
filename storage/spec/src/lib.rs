@@ -13,6 +13,7 @@ pub use berkleamp_welch::{DecodeError, RebuildError, ResourcesError, Share as Re
 use {
     arrayvec::ArrayVec,
     codec::{Codec, Reminder},
+    crypto::{proof::Proof, sign::Signature},
     rpc::CallId,
 };
 
@@ -135,6 +136,23 @@ pub struct BandwidthContext {
     pub dest: NodeIdentity,
     pub issuer: UserIdentity,
     pub amount: u64,
+}
+
+#[derive(Codec, Clone, Copy)]
+pub struct CompactBandwidthUse {
+    pub signature: Signature,
+    pub amount: u64,
+}
+
+#[derive(Codec, Clone, Copy)]
+pub struct BandwidthUse {
+    pub proof: Proof<BandwidthContext>,
+    pub amount: u64,
+}
+impl BandwidthUse {
+    pub fn is_exhaused(&self) -> bool {
+        self.amount == self.proof.context.amount
+    }
 }
 
 #[derive(Codec, Clone, Copy)]

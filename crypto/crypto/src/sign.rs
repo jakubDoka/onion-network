@@ -24,6 +24,15 @@ impl AsRef<[u8]> for Signature {
     }
 }
 
+impl Default for Signature {
+    fn default() -> Self {
+        Self {
+            post: [0; falcon::BYTES],
+            pre: ed25519_dalek::Signature::from_bytes(&[0; ed25519_dalek::SIGNATURE_LENGTH]),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "codec", derive(codec::Codec))]
 pub struct Keypair {
@@ -82,6 +91,10 @@ impl PublicKey {
             .map_err(|_| SignatureError::PreQuantum)?;
         self.post.verify(data, &signature.post).then_some(()).ok_or(SignatureError::PostQuantum)?;
         Ok(())
+    }
+
+    pub fn identity(&self) -> crate::Hash {
+        crate::hash::new(self)
     }
 }
 

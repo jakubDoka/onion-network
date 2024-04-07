@@ -33,6 +33,7 @@ component-utils = { workspace = true }
 config = { workspace = true }
 handlers.workspace = true
 codec.workspace = true
+lmdb-zero = "0.4.4"
 
 [lints]
 workspace = true

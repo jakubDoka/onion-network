@@ -10,6 +10,7 @@ use {
     },
 };
 
+// TODO: use lmdb instead
 pub struct Bandwidths {
     bandwidths: HashMap<UserIdentity, Proof<BandwidthUse>>,
     finished_bandwidths: Vec<Proof<BandwidthUse>>,
@@ -74,6 +75,7 @@ impl Bandwidths {
 pub struct Storage {
     pub bandwidts: RwLock<Bandwidths>,
 }
+
 impl Storage {
     pub(crate) fn new(storage_dir: &str) -> anyhow::Result<Self> {
         Ok(Self { bandwidts: Bandwidths::new(storage_dir)?.into() })

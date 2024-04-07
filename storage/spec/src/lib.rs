@@ -51,10 +51,6 @@ pub const PIECE_SIZE: usize = 1024;
 pub const DATA_PIECES: usize = if cfg!(debug_assertions) { 4 } else { 16 };
 pub const PARITY_PIECES: usize = if cfg!(debug_assertions) { 4 } else { 16 };
 pub const MAX_PIECES: usize = DATA_PIECES + PARITY_PIECES;
-pub const BLOCK_FRAGMENT_SIZE: usize = 1024 * 1024 * 8;
-pub const BLOCK_SIZE: usize = MAX_PIECES * BLOCK_FRAGMENT_SIZE;
-pub const BLOCK_PIECES: usize = BLOCK_FRAGMENT_SIZE / PIECE_SIZE;
-pub const DATA_PER_BLOCK: usize = DATA_PIECES * BLOCK_FRAGMENT_SIZE;
 
 pub type ReconstructBundle<'data> = [ReconstructPiece<'data>; DATA_PIECES];
 pub type Piece = [u8; PIECE_SIZE];
@@ -62,7 +58,7 @@ pub type Data = [Piece; DATA_PIECES];
 pub type Parity = [Piece; PARITY_PIECES];
 pub type NodeIdentity = crypto::Hash;
 pub type UserIdentity = crypto::Hash;
-pub type BlockId = crypto::Hash;
+pub type FileId = crypto::Hash;
 pub type NodeId = u16;
 pub type FreeSpace = u64;
 pub type Holders = [NodeId; MAX_PIECES];
@@ -119,7 +115,7 @@ impl From<anyhow::Error> for NodeError {
 #[repr(packed)]
 #[derive(Clone, Copy, Codec)]
 pub struct Address {
-    pub id: BlockId,
+    pub id: FileId,
     pub size: u64,
 }
 

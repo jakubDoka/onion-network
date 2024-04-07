@@ -156,7 +156,7 @@ impl<K: Copy, V: Copy> LmdbMap<K, V> {
 }
 
 impl LmdbMap<Address, FileMeta> {
-    pub fn get_blocks_for(&self, node: NodeId) -> anyhow::Result<Vec<(BlockId, u32)>> {
+    pub fn get_files_for(&self, node: NodeId) -> anyhow::Result<Vec<Address>> {
         // TODO: We need more scalable solution
         let rd = ReadTransaction::new(self.db.env()).context("creating transaction")?;
         let cursor = rd.cursor(&self.db).context("creating cursor")?;
@@ -169,7 +169,7 @@ impl LmdbMap<Address, FileMeta> {
         )?
         .filter_map(Result::ok)
         .filter(|(_, v)| { v.0.holders }.contains(&node))
-        .map(|(k, _)| (k.0.id, k.0.size.div_ceil(BLOCK_FRAGMENT_SIZE as _) as _))
+        .map(|(&AsBytes(k), _)| k)
         .collect();
 
         Ok(res)

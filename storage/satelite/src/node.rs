@@ -1,6 +1,6 @@
 use {
     crypto::proof::Proof,
-    storage_spec::{BlockId, FreeSpace, NodeError, NodeResult as Result},
+    storage_spec::{Address, FreeSpace, NodeError, NodeResult as Result},
 };
 
 // TODO: add curration period
@@ -17,14 +17,11 @@ pub async fn register(
     Ok(())
 }
 
-pub async fn get_gc_meta(
-    cx: crate::Context,
-    proof: Proof<crypto::Hash>,
-) -> Result<Vec<(BlockId, u32)>> {
+pub async fn get_gc_meta(cx: crate::Context, proof: Proof<crypto::Hash>) -> Result<Vec<Address>> {
     handlers::ensure!(cx.keys.sign.identity() == proof.context, NodeError::InvalidProof);
     handlers::ensure!(proof.verify(), NodeError::InvalidProof);
 
     let success = cx.store.nodes.write().unwrap().request_gc(proof.identity(), proof.nonce);
     handlers::ensure!(let Some(node_id) = success, NodeError::NotRegistered);
-    handlers::blocking!(cx.store.files.get_blocks_for(node_id)).map_err(Into::into)
+    handlers::blocking!(cx.store.files.get_files_for(node_id)).map_err(Into::into)
 }

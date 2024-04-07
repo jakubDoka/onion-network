@@ -11,7 +11,7 @@
 use {
     arrayvec::ArrayVec,
     codec::{Codec, Reminder},
-    crypto::proof::{Nonce, Proof, ProofContext},
+    crypto::proof::{Nonce, Proof},
     std::num::NonZeroUsize,
 };
 
@@ -187,9 +187,3 @@ pub struct Request<'a> {
 
 #[derive(Clone, Copy, Codec, Debug)]
 pub struct Mail;
-
-impl ProofContext for Mail {
-    fn as_bytes(&self) -> &[u8] {
-        &[0xff - 1; CHAT_NAME_CAP]
-    }
-}

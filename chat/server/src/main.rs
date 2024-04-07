@@ -15,10 +15,10 @@ use {
     self::api::{chat::Chat, MissingTopic},
     crate::api::Handler as _,
     anyhow::Context as _,
-    chain_api::{NodeData, Stake},
+    chain_api::{NodeKeys, Stake},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
-    crypto::{enc, sign},
+    crypto::sign,
     dashmap::{mapref::entry::Entry, DashMap},
     dht::Route,
     futures::channel::mpsc,
@@ -30,12 +30,10 @@ use {
         Multiaddr, PeerId, Transport,
     },
     onion::{key_share, EncryptedStream, PathId},
-    rand_core::OsRng,
     rpc::CallId,
     std::{
         collections::HashMap,
         convert::Infallible,
-        fs,
         future::Future,
         io,
         net::{IpAddr, Ipv4Addr},
@@ -55,35 +53,13 @@ type Context = &'static OwnedContext;
 type StakeEvents = futures::channel::mpsc::Receiver<chain_api::Result<chain_api::StakeEvent>>;
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 
-#[derive(Clone, Codec)]
-struct NodeKeys {
-    enc: enc::Keypair,
-    sign: sign::Keypair,
-}
-
-impl Default for NodeKeys {
-    fn default() -> Self {
-        Self { enc: enc::Keypair::new(OsRng), sign: sign::Keypair::new(OsRng) }
-    }
-}
-
-impl NodeKeys {
-    pub fn to_stored(&self) -> NodeData {
-        NodeData {
-            sign: crypto::hash::new(self.sign.public_key()),
-            enc: crypto::hash::new(self.enc.public_key()),
-            id: self.sign.public_key().pre,
-        }
-    }
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let node_config = NodeConfig::from_env();
     let chain_config = ChainConfig::from_env();
-    let (keys, is_new) = Server::load_keys(&node_config.key_path)?;
+    let (keys, is_new) = NodeKeys::load(&node_config.key_path)?;
     let (node_list, stake_events) = deal_with_chain(chain_config, &keys, is_new).await?;
 
     Server::new(node_config, keys, node_list, stake_events)?.await;
@@ -386,24 +362,6 @@ impl Server {
             ),
             pending_rpcs: Default::default(),
         })
-    }
-
-    fn load_keys(path: &str) -> io::Result<(NodeKeys, bool)> {
-        let file = match fs::read(path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let nk = NodeKeys::default();
-                fs::write(path, nk.to_bytes())?;
-                return Ok((nk, true));
-            }
-            Err(e) => return Err(e),
-        };
-
-        let Some(nk) = NodeKeys::decode(&mut file.as_slice()) else {
-            return Err(io::Error::other("invalid key file"));
-        };
-
-        Ok((nk, false))
     }
 
     fn handle_event(&mut self, event: SE) {

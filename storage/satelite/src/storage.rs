@@ -20,24 +20,21 @@ pub struct NodeProfiles {
     records: Vec<NodeProfile>,
     identity_to_id: HashMap<NodeIdentity, NodeId>,
     free_space_index: Vec<(FreeSpace, NodeId)>,
-    fills: Vec<(BlockFill, [NodeId; MAX_PIECES], BlockId)>,
 }
 
 impl<'a> Codec<'a> for NodeProfiles {
     fn encode(&self, buffer: &mut impl codec::Buffer) -> Option<()> {
-        self.records.encode(buffer)?;
-        self.fills.encode(buffer)
+        self.records.encode(buffer)
     }
 
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let records = Vec::<NodeProfile>::decode(buffer)?;
-        let fills = Vec::<(BlockFill, [NodeId; MAX_PIECES], BlockId)>::decode(buffer)?;
         let identity_to_id =
             records.iter().enumerate().map(|(i, p)| (p.identity, i as _)).collect();
         let free_space_index =
             records.iter().enumerate().map(|(i, p)| (p.free_blocks, i as _)).collect();
 
-        Some(Self { records, fills, identity_to_id, free_space_index })
+        Some(Self { records, identity_to_id, free_space_index })
     }
 }
 
@@ -79,34 +76,18 @@ impl NodeProfiles {
     }
 
     pub fn allocate_file(&mut self, size: u64) -> Option<(Address, Holders)> {
-        let alloc_size = size.div_ceil(PIECE_SIZE as _) as usize;
-        let fill_res = self
-            .fills
-            .last_mut()
-            .map(|(fill, nodes, id)| fill.alloc(alloc_size).map(|index| (index, *nodes, *id)))
-            .unwrap_or_else(|| Err(BlockFill::split_size(alloc_size)));
-
-        let (count, last_fill) = match fill_res {
-            Ok((block_offset, holders, starting_block)) => {
-                return Some((Address { starting_block, block_offset, size }, holders));
-            }
-            Err(e) => e,
-        };
+        let alloc_size = size.div_ceil(DATA_PIECES as _);
 
         let (_, most_free) = self.free_space_index.split_last_chunk_mut::<MAX_PIECES>()?;
-        most_free.iter().any(|(free, _)| *free < count).then_some(())?;
-
+        most_free.iter().any(|(free, _)| *free < alloc_size).then_some(())?;
         for (free, id) in &mut *most_free {
-            *free -= count;
-            self.records[*id as usize].free_blocks = *free;
+            *free -= alloc_size;
+            self.records[*id as usize].free_blocks -= alloc_size;
         }
 
-        let starting_block = crypto::new_secret(OsRng);
-        let reminder = (0..count).fold(starting_block, |acc, _| crypto::hash::new(acc));
+        let id = crypto::new_secret(OsRng);
         let holders = most_free.map(|(_, id)| id);
-        self.fills.push((last_fill, holders, reminder));
-
-        Some((Address { starting_block, block_offset: 0, size }, holders))
+        Some((Address { id, size }, holders))
     }
 
     pub fn expand_holders(&self, holders: [NodeId; MAX_PIECES]) -> [NodeIdentity; MAX_PIECES] {
@@ -176,6 +157,7 @@ impl<K: Copy, V: Copy> LmdbMap<K, V> {
 
 impl LmdbMap<Address, FileMeta> {
     pub fn get_blocks_for(&self, node: NodeId) -> anyhow::Result<Vec<(BlockId, u32)>> {
+        // TODO: We need more scalable solution
         let rd = ReadTransaction::new(self.db.env()).context("creating transaction")?;
         let cursor = rd.cursor(&self.db).context("creating cursor")?;
 
@@ -187,7 +169,7 @@ impl LmdbMap<Address, FileMeta> {
         )?
         .filter_map(Result::ok)
         .filter(|(_, v)| { v.0.holders }.contains(&node))
-        .map(|(k, _)| (k.0.starting_block, k.0.size.div_ceil(BLOCK_FRAGMENT_SIZE as _) as _))
+        .map(|(k, _)| (k.0.id, k.0.size.div_ceil(BLOCK_FRAGMENT_SIZE as _) as _))
         .collect();
 
         Ok(res)
@@ -246,34 +228,6 @@ pub struct NodeProfile {
     pub nonce: u64,
     pub last_requested_gc: u64, // unix timestamp seconds
     pub free_blocks: FreeSpace,
-}
-
-#[derive(Codec)]
-pub struct BlockFill {
-    free_pieces: u16,
-}
-
-impl Default for BlockFill {
-    fn default() -> Self {
-        Self { free_pieces: BLOCK_PIECES as _ }
-    }
-}
-
-impl BlockFill {
-    pub fn alloc(&mut self, size: usize) -> std::result::Result<u16, (u32, BlockFill)> {
-        self.alloc_current(size).ok_or(Self::split_size(size))
-    }
-
-    fn alloc_current(&mut self, size: usize) -> Option<u16> {
-        let len = size.div_ceil(PIECE_SIZE * DATA_PIECES);
-        self.free_pieces = self.free_pieces.checked_sub(len as _)?;
-        Some(self.free_pieces)
-    }
-
-    fn split_size(size: usize) -> (u32, BlockFill) {
-        let free_pieces = (BLOCK_PIECES - size % DATA_PER_BLOCK / PIECE_SIZE) as _;
-        (size.div_ceil(DATA_PER_BLOCK) as _, BlockFill { free_pieces })
-    }
 }
 
 #[repr(packed)]

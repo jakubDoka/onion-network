@@ -13,6 +13,7 @@ pub use berkleamp_welch::{DecodeError, RebuildError, ResourcesError, Share as Re
 use {
     arrayvec::ArrayVec,
     codec::{Codec, Reminder},
+    rpc::CallId,
 };
 
 pub mod handler;
@@ -25,8 +26,8 @@ pub mod rpcs {
 
     rpcs! {
         // client to node
-        STORE_BLOCK;
-        READ_BLOCK;
+        STORE_FILE;
+        READ_FILE;
 
         // satelite to node
         ALLOCATE_BLOCK;
@@ -62,9 +63,11 @@ pub type NodeIdentity = crypto::Hash;
 pub type UserIdentity = crypto::Hash;
 pub type BlockId = crypto::Hash;
 pub type NodeId = u16;
-pub type FreeSpace = u32;
+pub type FreeSpace = u64;
 pub type Holders = [NodeId; MAX_PIECES];
 pub type ExpandedHolders = [NodeIdentity; MAX_PIECES];
+pub type ClientResult<T, E = ClientError> = Result<T, E>;
+pub type NodeResult<T, E = NodeError> = Result<T, E>;
 
 #[derive(Codec, thiserror::Error, Debug)]
 pub enum ClientError {
@@ -113,22 +116,35 @@ impl From<anyhow::Error> for NodeError {
 }
 
 #[repr(packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Codec)]
 pub struct Address {
-    pub starting_block: BlockId,
-    pub block_offset: u16,
+    pub id: BlockId,
     pub size: u64,
+}
+
+#[repr(packed)]
+#[derive(Clone, Copy, Codec)]
+pub struct StoreContext {
+    pub address: Address,
+    pub dest: NodeIdentity,
+}
+
+#[repr(packed)]
+#[derive(Clone, Copy, Codec)]
+pub struct BandwidthContext {
+    pub dest: NodeIdentity,
+    pub issuer: UserIdentity,
+    pub amount: u64,
 }
 
 #[derive(Codec, Clone, Copy)]
 pub struct File {
-    #[codec(with = codec::unsafe_as_raw_bytes)]
     pub address: Address,
     pub holders: ExpandedHolders,
 }
 
 #[repr(packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Codec)]
 pub struct FileMeta {
     pub holders: Holders,
     pub owner: UserIdentity,
@@ -169,4 +185,9 @@ impl Encoding {
 pub struct Request<'a> {
     pub prefix: u8,
     pub body: Reminder<'a>,
+}
+
+#[derive(Codec)]
+pub enum StreamKind {
+    RequestStream(CallId),
 }

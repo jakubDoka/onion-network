@@ -3,9 +3,14 @@
 use {
     self::storage::Storage,
     anyhow::Context as _,
+    chain_api::NodeKeys,
     codec::Codec,
     component_utils::futures::StreamExt,
-    libp2p::swarm::{NetworkBehaviour, SwarmEvent},
+    libp2p::{
+        multiaddr::Protocol,
+        swarm::{NetworkBehaviour, SwarmEvent},
+        Multiaddr, PeerId,
+    },
     rpc::CallId,
     std::{future::Future, net::Ipv4Addr},
     storage_spec::rpcs,
@@ -15,12 +20,14 @@ mod client;
 mod node;
 mod storage;
 
+type Context = &'static OwnedContext;
+
 config::env_config! {
     struct Config {
         port: u16 = "8080",
         external_ip: Ipv4Addr = "127.0.0.1",
-        identity_ed: config::Hex = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         metabase_root: String = "metabase",
+        key_path: String = "satelite.keys",
     }
 }
 
@@ -28,24 +35,24 @@ config::env_config! {
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     let db = Storage::new(&config.metabase_root)?;
-    let satelite = Satelite::new(config, db)?;
+    let (keys, _initial) = NodeKeys::load(&config.key_path)?;
+    let satelite = Satelite::new(config, db, keys)?;
     satelite.await?
 }
 
 pub struct Satelite {
     swarm: libp2p::Swarm<Behaviour>,
     router: handlers::Router<RouterContext>,
-    pk: OurPk,
     context: Context,
 }
 
 impl Satelite {
-    fn new(config: Config, store: Storage) -> anyhow::Result<Self> {
+    fn new(config: Config, store: Storage, keys: NodeKeys) -> anyhow::Result<Self> {
         let identity: libp2p::identity::ed25519::Keypair =
-            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut config.identity_ed.to_bytes())
+            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut keys.sign.pre_quantum())
                 .context("invalid identity")?;
 
-        let swarm = libp2p::SwarmBuilder::with_existing_identity(identity.clone().into())
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(identity.clone().into())
             .with_tokio()
             .with_tcp(
                 libp2p::tcp::Config::default(),
@@ -58,10 +65,17 @@ impl Satelite {
             })
             .build();
 
+        swarm
+            .listen_on(
+                Multiaddr::empty()
+                    .with(Protocol::Ip4(Ipv4Addr::UNSPECIFIED))
+                    .with(Protocol::Tcp(config.port)),
+            )
+            .context("oprning listener")?;
+
         Ok(Self {
             swarm,
-            pk: identity.public(),
-            context: Box::leak(Box::new(OwnedContext { store })),
+            context: Box::leak(Box::new(OwnedContext { store, keys })),
             router: handlers::router! {
                 client => {
                     rpcs::REGISTER_CLIENT => register;
@@ -85,19 +99,26 @@ impl Satelite {
         };
 
         match beh {
-            BehaviourEvent::Rpc(rpc::Event::Request(peer, id, body)) => {
+            BehaviourEvent::Rpc(rpc::Event::Request(origin, id, body)) => {
                 let Some(req) = storage_spec::Request::decode(&mut body.as_slice()) else {
-                    log::warn!("invalid request from {:?}", peer);
+                    log::warn!("invalid request from {:?}", origin);
                     return;
                 };
 
-                self.router.handle(State { req, id, context: self.context, pk: self.pk.clone() });
+                self.router.handle(State { req, id, origin, context: self.context });
             }
             _ => {}
         }
     }
 
-    fn router_event(&mut self, _event: (handlers::Response, CallId)) {}
+    fn router_event(&mut self, (resp, (call, peer)): (handlers::Response, (CallId, PeerId))) {
+        match resp {
+            handlers::Response::Success(msg) | handlers::Response::Failure(msg) => {
+                self.swarm.behaviour_mut().rpc.respond(peer, call, msg);
+            }
+            handlers::Response::DontRespond(_) => {}
+        }
+    }
 }
 
 impl Future for Satelite {
@@ -129,7 +150,7 @@ pub struct Behaviour {
 enum RouterContext {}
 
 impl handlers::RouterContext for RouterContext {
-    type RequestMeta = CallId;
+    type RequestMeta = (CallId, PeerId);
     type State<'a> = State<'a>;
 
     fn prefix(state: &Self::State<'_>) -> usize {
@@ -137,15 +158,15 @@ impl handlers::RouterContext for RouterContext {
     }
 
     fn meta(state: &Self::State<'_>) -> Self::RequestMeta {
-        state.id
+        (state.id, state.origin)
     }
 }
 
 struct State<'a> {
     req: storage_spec::Request<'a>,
     id: CallId,
+    origin: PeerId,
     context: Context,
-    pk: OurPk,
 }
 
 impl handlers::Context for State<'_> {
@@ -156,12 +177,9 @@ impl handlers::Context for State<'_> {
 
 struct OwnedContext {
     store: Storage,
+    keys: NodeKeys,
 }
-
-type Context = &'static OwnedContext;
-type OurPk = libp2p::identity::ed25519::PublicKey;
 
 handlers::quick_impl_from_request! { State<'_> => [
     Context => |state| state.context,
-    OurPk => |state| state.pk.clone(),
 ]}

@@ -15,8 +15,11 @@ pub fn derive_codec(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     let crate_name = syn::Ident::new("codec", proc_macro2::Span::call_site());
+    let is_packed = input.attrs.iter().any(|a| {
+        a.path().is_ident("repr") && &a.meta.require_list().unwrap().tokens.to_string() == "packed"
+    });
     let [encode, decode] = match input.data {
-        syn::Data::Struct(s) => derive_codec_struct(s, &crate_name),
+        syn::Data::Struct(s) => derive_codec_struct(s, is_packed, &crate_name),
         syn::Data::Enum(e) => derive_codec_enum(e, &crate_name),
         syn::Data::Union(_) => unimplemented!("Unions are not supported"),
     };
@@ -68,7 +71,7 @@ fn derive_codec_enum(e: syn::DataEnum, crate_name: &syn::Ident) -> [proc_macro2:
         match v.fields {
             syn::Fields::Named(n) => {
                 let fields = FieldMeta::from_fields(n.named);
-                let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, crate_name);
+                let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, false, crate_name);
                 (
                     quote! {
                         Self::#name { #(#bindings,)* } => {
@@ -81,7 +84,7 @@ fn derive_codec_enum(e: syn::DataEnum, crate_name: &syn::Ident) -> [proc_macro2:
             }
             syn::Fields::Unnamed(u) => {
                 let fields = FieldMeta::from_fields(u.unnamed);
-                let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, crate_name);
+                let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, false, crate_name);
                 (
                     quote! {
                         Self::#name(#(#bindings,)*) => {
@@ -115,15 +118,21 @@ fn derive_codec_enum(e: syn::DataEnum, crate_name: &syn::Ident) -> [proc_macro2:
 
 fn derive_codec_struct(
     s: syn::DataStruct,
+    is_packed: bool,
     crate_name: &syn::Ident,
 ) -> [proc_macro2::TokenStream; 2] {
+    let slf = match is_packed {
+        true => quote! { *self },
+        false => quote! { self },
+    };
+
     match s.fields {
         syn::Fields::Named(n) => {
             let fields = FieldMeta::from_fields(n.named);
-            let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, crate_name);
+            let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, is_packed, crate_name);
             [
                 quote! {
-                    let Self { #(#bindings,)* } = self;
+                    let Self { #(#bindings,)* } = #slf;
                     #(#encodes;)*
                 },
                 quote! { Some(Self { #(#decodes,)* }) },
@@ -131,10 +140,10 @@ fn derive_codec_struct(
         }
         syn::Fields::Unnamed(u) => {
             let fields = FieldMeta::from_fields(u.unnamed);
-            let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, crate_name);
+            let (bindings, encodes, decodes) = FieldMeta::full_set(&fields, is_packed, crate_name);
             [
                 quote! {
-                    let Self(#(#bindings,)*) = self;
+                    let Self(#(#bindings,)*) = #slf;
                     #(#encodes;)*
                 },
                 quote! { Some(Self(#(#decodes,)*)) },
@@ -157,6 +166,7 @@ impl FieldMeta {
 
     fn full_set<'a>(
         fields: &'a [Self],
+        is_packed: bool,
         crate_name: &'a syn::Ident,
     ) -> (
         impl Iterator<Item = proc_macro2::TokenStream> + 'a,
@@ -165,7 +175,7 @@ impl FieldMeta {
     ) {
         (
             fields.iter().map(Self::binding),
-            fields.iter().map(|f| f.encode_field(crate_name)),
+            fields.iter().map(move |f| f.encode_field(crate_name, is_packed)),
             fields.iter().map(|f| f.decode_field(crate_name)),
         )
     }
@@ -208,7 +218,7 @@ impl FieldMeta {
         }
     }
 
-    fn encode_field(&self, crate_name: &syn::Ident) -> proc_macro2::TokenStream {
+    fn encode_field(&self, crate_name: &syn::Ident, is_packed: bool) -> proc_macro2::TokenStream {
         if self.ignore {
             return quote! {};
         }
@@ -216,6 +226,11 @@ impl FieldMeta {
         let name = match &self.name {
             Err(n) => format_ident!("f{}", n),
             Ok(n) => n.clone(),
+        };
+
+        let name = match is_packed {
+            true => quote! { &#name },
+            false => quote! { #name },
         };
 
         if let Some(with) = &self.with_wrapper {

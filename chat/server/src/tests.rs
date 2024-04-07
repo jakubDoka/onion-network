@@ -1,8 +1,10 @@
 use {
     super::*,
+    chain_api::NodeData,
     chat_spec::*,
-    crypto::proof::{Proof, ProofContext},
+    crypto::proof::Proof,
     libp2p::futures::{stream::FuturesUnordered, FutureExt},
+    rand_core::OsRng,
     std::{fmt::Debug, usize},
 };
 
@@ -406,7 +408,7 @@ impl Account {
         }
     }
 
-    fn proof<T: ProofContext>(&mut self, context: T) -> Proof<T> {
+    fn proof<'a, T: Codec<'a>>(&mut self, context: T) -> Proof<T> {
         Proof::new(&self.sign, &mut self.nonce, context, OsRng)
     }
 

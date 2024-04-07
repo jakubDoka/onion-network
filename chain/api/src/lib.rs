@@ -11,8 +11,10 @@ pub use {
 };
 use {
     chain_types::{polkadot, Hash},
+    codec::Codec,
+    crypto::{enc, rand_core::OsRng, sign},
     futures::{StreamExt, TryFutureExt, TryStreamExt},
-    std::str::FromStr,
+    std::{fs, io, str::FromStr},
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
         tx::TxProgress,
@@ -273,5 +275,45 @@ impl<S: TransactionHandler> Client<S> {
     pub async fn get_nonce(&self) -> Result<u64> {
         let id = self.signer.account_id_async().await?;
         self.inner.get_nonce(&id).await
+    }
+}
+
+#[derive(Clone, Codec)]
+pub struct NodeKeys {
+    pub enc: enc::Keypair,
+    pub sign: sign::Keypair,
+}
+
+impl Default for NodeKeys {
+    fn default() -> Self {
+        Self { enc: enc::Keypair::new(OsRng), sign: sign::Keypair::new(OsRng) }
+    }
+}
+
+impl NodeKeys {
+    pub fn to_stored(&self) -> NodeData {
+        NodeData {
+            sign: crypto::hash::new(self.sign.public_key()),
+            enc: crypto::hash::new(self.enc.public_key()),
+            id: self.sign.public_key().pre,
+        }
+    }
+
+    pub fn load(path: &str) -> io::Result<(Self, bool)> {
+        let file = match fs::read(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let nk = Self::default();
+                fs::write(path, nk.to_bytes())?;
+                return Ok((nk, true));
+            }
+            Err(e) => return Err(e),
+        };
+
+        let Some(nk) = Self::decode(&mut file.as_slice()) else {
+            return Err(io::Error::other("invalid key file"));
+        };
+
+        Ok((nk, false))
     }
 }

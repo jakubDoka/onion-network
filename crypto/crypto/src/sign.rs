@@ -61,6 +61,10 @@ impl Keypair {
     pub fn pre_quantum(&self) -> Pre {
         self.pre
     }
+
+    pub fn identity(&self) -> crate::Hash {
+        crate::hash::new(self.public_key())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

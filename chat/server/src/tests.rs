@@ -3,7 +3,7 @@ use {
     chain_api::NodeData,
     chat_spec::*,
     crypto::proof::Proof,
-    libp2p::futures::{stream::FuturesUnordered, FutureExt},
+    libp2p::futures::{stream::FuturesUnordered, FutureExt, TryStreamExt},
     rand_core::OsRng,
     std::{fmt::Debug, usize},
 };
@@ -14,7 +14,7 @@ type Result<T> = std::result::Result<T, ChatError>;
 async fn repopulate_account() {
     _ = env_logger::builder().is_test(true).try_init();
 
-    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1);
+    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1).await;
     let mut user = Account::new();
     let [mut stream, used] = Stream::new_test();
     nodes.iter_mut().next().unwrap().clients.push(used);
@@ -56,7 +56,7 @@ async fn repopulate_account() {
 
 #[tokio::test]
 async fn direct_messaging() {
-    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1);
+    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1).await;
 
     let mut user = Account::new();
     let mut user2 = Account::new();
@@ -133,7 +133,7 @@ async fn direct_messaging() {
 async fn message_block_finalization() {
     _ = env_logger::builder().is_test(true).try_init();
 
-    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1);
+    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1).await;
 
     let mut user = Account::new();
     let mut user2 = Account::new();
@@ -226,7 +226,7 @@ async fn message_block_finalization() {
 async fn message_flooding() {
     _ = env_logger::builder().is_test(true).format_timestamp(None).try_init();
 
-    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1);
+    let mut nodes = create_nodes(REPLICATION_FACTOR.get() + 1).await;
 
     let mut streams = nodes
         .iter_mut()
@@ -430,7 +430,7 @@ fn next_node_config() -> NodeConfig {
     }
 }
 
-fn create_nodes(count: usize) -> FuturesUnordered<Server> {
+async fn create_nodes(count: usize) -> FuturesUnordered<Server> {
     let node_data =
         (0..count).map(|_| (next_node_config(), NodeKeys::default())).collect::<Vec<_>>();
 
@@ -450,7 +450,10 @@ fn create_nodes(count: usize) -> FuturesUnordered<Server> {
         .into_iter()
         .map(|(config, keys)| {
             let (_, rx) = mpsc::channel(1);
-            Server::new(config, keys, nodes.clone(), rx).unwrap()
+            Server::new(config, keys, nodes.clone(), rx)
         })
-        .collect()
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<FuturesUnordered<_>>()
+        .await
+        .unwrap()
 }

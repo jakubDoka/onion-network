@@ -22,10 +22,10 @@ use {
     dht::Route,
     futures::channel::mpsc,
     libp2p::{
-        core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
+        core::multiaddr,
         futures::{self, channel::oneshot, SinkExt, StreamExt},
         swarm::{NetworkBehaviour, SwarmEvent},
-        Multiaddr, PeerId, Transport,
+        Multiaddr, PeerId,
     },
     onion::{key_share, EncryptedStream, PathId},
     rpc::CallId,
@@ -174,7 +174,9 @@ impl Server {
                 ),
                 report: topology_wrapper::report::new(receiver),
             })?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_swarm_config(|c| {
+                c.with_idle_connection_timeout(Duration::from_secs(idle_timeout))
+            })
             .build();
 
         swarm

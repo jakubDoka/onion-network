@@ -50,7 +50,7 @@ impl<T: FromStr> FromStr for List<T> {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut peers = Vec::new();
-        for peer in s.split(',') {
+        for peer in s.split(',').filter(|s| !s.is_empty()) {
             peers.push(peer.parse::<T>()?);
         }
         Ok(Self(peers))

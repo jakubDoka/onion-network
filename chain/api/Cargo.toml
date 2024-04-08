@@ -24,6 +24,9 @@ chain-types = { workspace = true }
 crypto = { workspace = true }
 codec.workspace = true
 rand_chacha = "0.3.1"
+config.workspace = true
+anyhow.workspace = true
+tokio = "1.37.0"
 
 [features]
 native = ["subxt/default", "subxt-signer/default", "chain-types/native"]

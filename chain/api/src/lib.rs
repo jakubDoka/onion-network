@@ -1,3 +1,21 @@
+use {
+    anyhow::Context,
+    chain_types::{polkadot, Hash},
+    codec::Codec,
+    crypto::{
+        enc,
+        rand_core::{OsRng, SeedableRng},
+        sign,
+    },
+    futures::{SinkExt, StreamExt, TryFutureExt, TryStreamExt},
+    rand_chacha::ChaChaRng,
+    std::{fs, io, net::IpAddr, str::FromStr},
+    subxt::{
+        backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
+        tx::TxProgress,
+        OnlineClient,
+    },
+};
 pub use {
     chain_types::runtime_types::{
         pallet_node_staker::pallet::{
@@ -12,23 +30,6 @@ pub use {
         sr25519::{Keypair, Signature},
     },
 };
-use {
-    chain_types::{polkadot, Hash},
-    codec::Codec,
-    crypto::{
-        enc,
-        rand_core::{OsRng, SeedableRng},
-        sign,
-    },
-    futures::{StreamExt, TryFutureExt, TryStreamExt},
-    rand_chacha::ChaChaRng,
-    std::{fs, io, str::FromStr},
-    subxt::{
-        backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
-        tx::TxProgress,
-        OnlineClient,
-    },
-};
 
 pub const USER_NAME_CAP: usize = 32;
 
@@ -37,6 +38,7 @@ pub type AccountId = <Config as subxt::Config>::AccountId;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type Nonce = u64;
 pub type RawUserName = [u8; USER_NAME_CAP];
+pub type StakeEvents = futures::channel::mpsc::Receiver<Result<StakeEvent>>;
 
 #[must_use]
 pub fn immortal_era() -> String {
@@ -329,5 +331,77 @@ impl NodeKeys {
         };
 
         Ok((nk, false))
+    }
+}
+
+config::env_config! {
+    struct ChainConfig {
+        exposed_address: IpAddr,
+        port: u16,
+        nonce: u64,
+        chain_nodes: config::List<String>,
+        node_account: String,
+    }
+}
+
+impl ChainConfig {
+    pub async fn connect(self, keys: &NodeKeys) -> anyhow::Result<(Vec<Stake>, StakeEvents)> {
+        let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
+        let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
+        let account = if node_account.starts_with("//") {
+            dev_keypair(&node_account)
+        } else {
+            mnemonic_keypair(&node_account)
+        };
+
+        let mut others = chain_nodes.0.into_iter();
+
+        let (node_list, client) = 'a: {
+            for node in others.by_ref() {
+                let Ok(client) = Client::with_signer(&node, account.clone()).await else {
+                    continue;
+                };
+                let Ok(node_list) = client.list_nodes().await else { continue };
+                break 'a (node_list, client);
+            }
+            anyhow::bail!("failed to fetch node list");
+        };
+
+        let mut stream = client.node_contract_event_stream().await;
+        tokio::spawn(async move {
+            loop {
+                if let Ok(mut stream) = stream {
+                    let mut stream = std::pin::pin!(stream);
+                    while let Some(event) = stream.next().await {
+                        _ = chain_events_tx.send(event).await;
+                    }
+                }
+
+                let Some(next) = others.next() else {
+                    log::error!("failed to reconnect to chain");
+                    std::process::exit(1);
+                };
+
+                let Ok(client) = Client::with_signer(&next, account.clone()).await else {
+                    stream = Err(Error::Other("failed to reconnect to chain".into()));
+                    continue;
+                };
+
+                stream = client.node_contract_event_stream().await;
+            }
+        });
+
+        if node_list.iter().all(|s| s.id != keys.sign.public_key().pre) {
+            let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
+            client
+                .join(keys.to_stored(), (exposed_address, port).into(), nonce)
+                .await
+                .context("registeing to chain")?;
+            log::info!("registered on chain");
+        }
+
+        log::info!("entered the network with {} nodes", node_list.len());
+
+        Ok((node_list, stake_events))
     }
 }

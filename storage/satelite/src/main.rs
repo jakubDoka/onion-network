@@ -14,7 +14,7 @@ use {
         Multiaddr, PeerId,
     },
     rpc::CallId,
-    std::{future::Future, net::Ipv4Addr},
+    std::{future::Future, net::Ipv4Addr, ops::DerefMut, task::Poll},
     storage_spec::rpcs,
 };
 
@@ -27,7 +27,6 @@ type Context = &'static OwnedContext;
 config::env_config! {
     struct Config {
         port: u16 = "8080",
-        external_ip: Ipv4Addr = "127.0.0.1",
         metabase_root: String = "metabase",
         mnemonic: Mnemonic,
     }
@@ -144,15 +143,15 @@ impl Future for Satelite {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        while let std::task::Poll::Ready(Some(event)) = self.swarm.poll_next_unpin(cx) {
-            self.swarm_event(event);
-        }
+        use handlers::field as f;
 
-        while let std::task::Poll::Ready(event) = self.router.poll(cx) {
-            self.router_event(event);
-        }
+        while handlers::Selector::new(self.deref_mut(), cx)
+            .stream(f!(mut swarm), Self::swarm_event)
+            .stream(f!(mut router), Self::router_event)
+            .done()
+        {}
 
-        std::task::Poll::Pending
+        Poll::Pending
     }
 }
 

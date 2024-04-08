@@ -15,7 +15,7 @@ use {
     self::api::{chat::Chat, MissingTopic},
     crate::api::Handler as _,
     anyhow::Context as _,
-    chain_api::{Mnemonic, NodeKeys, Stake},
+    chain_api::{ChainConfig, Mnemonic, NodeKeys, Stake, StakeEvents},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::{mapref::entry::Entry, DashMap},
@@ -35,6 +35,7 @@ use {
         future::Future,
         io,
         net::{IpAddr, Ipv4Addr},
+        ops::DerefMut,
         sync::Arc,
         task::Poll,
         time::Duration,
@@ -48,7 +49,6 @@ mod db;
 mod tests;
 
 type Context = &'static OwnedContext;
-type StakeEvents = futures::channel::mpsc::Receiver<chain_api::Result<chain_api::StakeEvent>>;
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 
 #[tokio::main(flavor = "current_thread")]
@@ -56,9 +56,8 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let node_config = NodeConfig::from_env();
-    let chain_config = ChainConfig::from_env();
     let keys = NodeKeys::from_mnemonic(&node_config.mnemonic);
-    let (node_list, stake_events) = deal_with_chain(chain_config, &keys).await?;
+    let (node_list, stake_events) = ChainConfig::from_env().connect(&keys).await?;
 
     Server::new(node_config, keys, node_list, stake_events)?.await;
 
@@ -72,16 +71,6 @@ config::env_config! {
         mnemonic: Mnemonic,
         idle_timeout: u64,
         rpc_timeout: u64,
-    }
-}
-
-config::env_config! {
-    struct ChainConfig {
-        exposed_address: IpAddr,
-        port: u16,
-        nonce: u64,
-        chain_nodes: config::List<String>,
-        node_account: String,
     }
 }
 
@@ -118,69 +107,6 @@ fn unpack_node_addr(addr: chain_api::NodeAddress) -> Multiaddr {
             IpAddr::V6(ip) => multiaddr::Protocol::Ip6(ip),
         })
         .with(multiaddr::Protocol::Tcp(port))
-}
-
-async fn deal_with_chain(
-    config: ChainConfig,
-    keys: &NodeKeys,
-) -> anyhow::Result<(Vec<Stake>, StakeEvents)> {
-    let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = config;
-    let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
-    let account = if node_account.starts_with("//") {
-        chain_api::dev_keypair(&node_account)
-    } else {
-        chain_api::mnemonic_keypair(&node_account)
-    };
-
-    let mut others = chain_nodes.0.into_iter();
-
-    let (node_list, client) = 'a: {
-        for node in others.by_ref() {
-            let Ok(client) = chain_api::Client::with_signer(&node, account.clone()).await else {
-                continue;
-            };
-            let Ok(node_list) = client.list_nodes().await else { continue };
-            break 'a (node_list, client);
-        }
-        anyhow::bail!("failed to fetch node list");
-    };
-
-    let mut stream = client.node_contract_event_stream().await;
-    tokio::spawn(async move {
-        loop {
-            if let Ok(mut stream) = stream {
-                let mut stream = std::pin::pin!(stream);
-                while let Some(event) = stream.next().await {
-                    _ = chain_events_tx.send(event).await;
-                }
-            }
-
-            let Some(next) = others.next() else {
-                log::error!("failed to reconnect to chain");
-                std::process::exit(1);
-            };
-
-            let Ok(client) = chain_api::Client::with_signer(&next, account.clone()).await else {
-                stream = Err(chain_api::Error::Other("failed to reconnect to chain".into()));
-                continue;
-            };
-
-            stream = client.node_contract_event_stream().await;
-        }
-    });
-
-    if node_list.iter().all(|s| s.id != keys.sign.public_key().pre) {
-        let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
-        client
-            .join(keys.to_stored(), (exposed_address, port).into(), nonce)
-            .await
-            .context("registeing to chain")?;
-        log::info!("registered on chain");
-    }
-
-    log::info!("entered the network with {} nodes", node_list.len());
-
-    Ok((node_list, stake_events))
 }
 
 fn filter_incoming(
@@ -392,7 +318,7 @@ impl Server {
         }
     }
 
-    fn handle_client_message(&mut self, id: PathId, req: io::Result<Vec<u8>>) {
+    fn handle_client_message(&mut self, (id, req): (PathId, io::Result<Vec<u8>>)) {
         let req = match req {
             Ok(req) => req,
             Err(e) => {
@@ -507,10 +433,10 @@ impl Server {
 
     fn handle_client_router_response(
         &mut self,
-        client: PathId,
-        id: CallId,
-        res: handlers::Response,
+        (res, (loc, id)): (handlers::Response, (OnlineLocation, CallId)),
     ) {
+        let OnlineLocation::Local(client) = loc else { return };
+
         match res {
             handlers::Response::Success(pl) | handlers::Response::Failure(pl) => {
                 let Some(client) = self.clients.iter_mut().find(|c| c.id == client) else {
@@ -613,7 +539,12 @@ impl Server {
         }
     }
 
-    fn handle_server_router_response(&mut self, peer: PeerId, id: CallId, res: handlers::Response) {
+    fn handle_server_router_response(
+        &mut self,
+        (res, (loc, id)): (handlers::Response, (OnlineLocation, CallId)),
+    ) {
+        let OnlineLocation::Remote(peer) = loc else { return };
+
         match res {
             handlers::Response::Success(b) | handlers::Response::Failure(b) => {
                 self.swarm.behaviour_mut().rpc.respond(peer, id, b)
@@ -630,51 +561,24 @@ impl Future for Server {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
-        let mut did_something = true;
-        while std::mem::take(&mut did_something) {
-            while let Poll::Ready(Some((id, m))) = self.clients.poll_next_unpin(cx) {
-                self.handle_client_message(id, m);
-                did_something = true;
-            }
+        use handlers::field as f;
 
-            while let Poll::Ready(Some(e)) = self.swarm.poll_next_unpin(cx) {
-                self.handle_event(e);
-                did_something = true;
-            }
-
-            while let Poll::Ready(Some(e)) = self.stake_events.poll_next_unpin(cx) {
-                self.handle_stake_event(e);
-                did_something = true;
-            }
-
-            while let Poll::Ready((res, (OnlineLocation::Local(peer), id))) =
-                self.client_router.poll(cx)
-            {
-                self.handle_client_router_response(peer, id, res);
-                did_something = true;
-            }
-
-            while let Poll::Ready((res, (OnlineLocation::Remote(peer), id))) =
-                self.server_router.poll(cx)
-            {
-                self.handle_server_router_response(peer, id, res);
-                did_something = true;
-            }
-
-            while let Poll::Ready(Some(event)) = self.request_events.poll_next_unpin(cx) {
-                match event {
-                    RequestEvent::Profile(identity, event, resp) => {
-                        self.handle_profile_event(identity, event, resp)
-                    }
-                    RequestEvent::Chat(topic, event) => self.handle_chat_event(topic, event),
-                    RequestEvent::Rpc(peer, msg, resp) => self.handle_rpc(peer, msg, resp),
-                    RequestEvent::ReplRpc(topic, msg, resp) => {
-                        self.handle_repl_rpc(topic, msg, resp)
-                    }
+        while handlers::Selector::new(self.deref_mut(), cx)
+            .stream(f!(mut clients), Self::handle_client_message)
+            .stream(f!(mut swarm), Self::handle_event)
+            .stream(f!(mut stake_events), Self::handle_stake_event)
+            .stream(f!(mut client_router), Self::handle_client_router_response)
+            .stream(f!(mut server_router), Self::handle_server_router_response)
+            .stream(f!(mut request_events), |s, event| match event {
+                RequestEvent::Profile(identity, event, resp) => {
+                    s.handle_profile_event(identity, event, resp)
                 }
-                did_something = true;
-            }
-        }
+                RequestEvent::Chat(topic, event) => s.handle_chat_event(topic, event),
+                RequestEvent::Rpc(peer, msg, resp) => s.handle_rpc(peer, msg, resp),
+                RequestEvent::ReplRpc(topic, msg, resp) => s.handle_repl_rpc(topic, msg, resp),
+            })
+            .done()
+        {}
 
         Poll::Pending
     }

@@ -25,6 +25,7 @@ use {
         future::Future,
         io,
         net::Ipv4Addr,
+        ops::DerefMut,
         task::Poll,
         time::Duration,
     },
@@ -40,7 +41,6 @@ type Context = &'static OwnedContext;
 config::env_config! {
     struct Config {
         port: u16,
-        external_ip: Ipv4Addr,
         satelites: config::List<config::Hex>,
         mnemonic: Mnemonic,
         storage_dir: String,
@@ -191,28 +191,15 @@ impl Future for Node {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
-        let mut updated = true;
-        while std::mem::take(&mut updated) {
-            while let Poll::Ready(Some(event)) = self.swarm.poll_next_unpin(cx) {
-                self.swarm_event(event);
-                updated = true;
-            }
+        use handlers::field as f;
 
-            while let Poll::Ready(event) = self.router.poll(cx) {
-                self.router_event(event);
-                updated = true;
-            }
-
-            while let Poll::Ready(Some(event)) = self.request_events.poll_next_unpin(cx) {
-                self.request_event(event);
-                updated = true;
-            }
-
-            while let Poll::Ready(Some(event)) = self.stream_negots.poll_next_unpin(cx) {
-                self.stream_negot(event);
-                updated = true;
-            }
-        }
+        while handlers::Selector::new(self.deref_mut(), cx)
+            .stream(f!(mut swarm), Self::swarm_event)
+            .stream(f!(mut router), Self::router_event)
+            .stream(f!(mut request_events), Self::request_event)
+            .stream(f!(mut stream_negots), Self::stream_negot)
+            .done()
+        {}
 
         Poll::Pending
     }

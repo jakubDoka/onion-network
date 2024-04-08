@@ -1,5 +1,17 @@
 #![feature(impl_trait_in_assoc_type)]
+#![feature(specialization)]
 #![feature(macro_metavar_expr)]
+#![allow(incomplete_features)]
+
+#[macro_export]
+macro_rules! field {
+    (mut $field:ident) => {
+        |s| &mut s.$field
+    };
+    ($field:ident) => {
+        |s| &s.$field
+    };
+}
 
 #[macro_export]
 macro_rules! blocking {
@@ -66,7 +78,7 @@ macro_rules! quick_impl_from_request {
 
 use {
     codec::Codec,
-    futures::{stream::FuturesUnordered, FutureExt, StreamExt},
+    futures::{stream::FuturesUnordered, FutureExt, Stream, StreamExt},
     std::{future::Future, pin::Pin, usize},
 };
 
@@ -266,14 +278,72 @@ where
 
         self.requests.push(route(context));
     }
+}
 
-    pub fn poll(
-        &mut self,
+impl<C> Stream for Router<C>
+where
+    C: RouterContext,
+{
+    type Item = FinalResponse<C::RequestMeta>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<FinalResponse<C::RequestMeta>> {
-        match self.requests.poll_next_unpin(cx) {
-            std::task::Poll::Ready(Some(res)) => std::task::Poll::Ready(res),
-            _ => std::task::Poll::Pending,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.requests.poll_next_unpin(cx)
+    }
+}
+
+pub struct Selector<'a, 'b, C> {
+    progressed: bool,
+    cx: &'a mut std::task::Context<'b>,
+    context: &'a mut C,
+}
+
+impl<'a, 'b, C> Selector<'a, 'b, C> {
+    pub fn new(context: &'a mut C, cx: &'a mut std::task::Context<'b>) -> Self {
+        Self { progressed: false, cx, context }
+    }
+
+    pub fn done(self) -> bool {
+        self.progressed
+    }
+
+    pub fn stream<S, SF, F>(mut self, mut stream: SF, mut f: F) -> Self
+    where
+        SF: FnMut(&mut C) -> &mut S,
+        S: Stream + Unpin + StreamIsEmpty,
+        F: FnMut(&mut C, S::Item),
+    {
+        if stream.is_empty() {
+            return self;
         }
+
+        while let std::task::Poll::Ready(Some(event)) =
+            stream(self.context).poll_next_unpin(self.cx)
+        {
+            f(self.context, event);
+            self.progressed = true;
+        }
+
+        self
+    }
+}
+
+pub trait StreamIsEmpty {
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+impl<F> StreamIsEmpty for FuturesUnordered<F> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T> StreamIsEmpty for T {
+    default fn is_empty(&self) -> bool {
+        false
     }
 }

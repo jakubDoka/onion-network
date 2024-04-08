@@ -6,7 +6,6 @@ use {
     anyhow::Context as _,
     chain_api::{Mnemonic, NodeKeys},
     codec::Codec,
-    component_utils::futures::StreamExt,
     libp2p::{
         core::ConnectedPoint,
         multiaddr::Protocol,

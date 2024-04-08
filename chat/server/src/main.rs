@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let keys = NodeKeys::from_mnemonic(&node_config.mnemonic);
     let (node_list, stake_events) = ChainConfig::from_env().connect(&keys).await?;
 
-    Server::new(node_config, keys, node_list, stake_events)?.await;
+    Server::new(node_config, keys, node_list, stake_events).await?.await;
 
     Ok(())
 }
@@ -127,7 +127,7 @@ fn filter_incoming(
 }
 
 impl Server {
-    fn new(
+    async fn new(
         config: NodeConfig,
         keys: NodeKeys,
         node_list: Vec<Stake>,
@@ -141,58 +141,41 @@ impl Server {
         log::info!("peer id: {}", peer_id);
 
         let (sender, receiver) = topology_wrapper::channel();
-        let behaviour = Behaviour {
-            key_share: topology_wrapper::new(
-                key_share::Behaviour::new(keys.enc.public_key()),
-                sender.clone(),
-            ),
-            onion: topology_wrapper::new(
-                onion::Behaviour::new(
-                    onion::Config::new(keys.enc.into(), peer_id)
-                        .max_streams(10)
-                        .keep_alive_interval(Duration::from_secs(100)),
+
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::new(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )?
+            .with_websocket(libp2p::noise::Config::new, libp2p::yamux::Config::default)
+            .await?
+            .with_behaviour(|_| Behaviour {
+                key_share: topology_wrapper::new(
+                    key_share::Behaviour::new(keys.enc.public_key()),
+                    sender.clone(),
                 ),
-                sender.clone(),
-            ),
-            dht: dht::Behaviour::new(filter_incoming),
-            rpc: topology_wrapper::new(
-                rpc::Behaviour::new(
-                    rpc::Config::new().request_timeout(Duration::from_millis(config.rpc_timeout)),
+                onion: topology_wrapper::new(
+                    onion::Behaviour::new(
+                        onion::Config::new(keys.enc.into(), peer_id)
+                            .max_streams(10)
+                            .keep_alive_interval(Duration::from_secs(100)),
+                    ),
+                    sender.clone(),
                 ),
-                sender.clone(),
-            ),
-            report: topology_wrapper::report::new(receiver),
-        };
-        let transport = libp2p::websocket::WsConfig::new(libp2p::tcp::tokio::Transport::new(
-            libp2p::tcp::Config::default(),
-        ))
-        .upgrade(Version::V1)
-        .authenticate(libp2p::noise::Config::new(&local_key).context("noise initialization")?)
-        .multiplex(libp2p::yamux::Config::default())
-        .or_transport(
-            libp2p::tcp::tokio::Transport::new(libp2p::tcp::Config::default())
-                .upgrade(Version::V1)
-                .authenticate(
-                    libp2p::noise::Config::new(&local_key).context("noise initialization")?,
-                )
-                .multiplex(libp2p::yamux::Config::default()),
-        )
-        .map(move |t, _| match t {
-            futures::future::Either::Left((p, m)) => {
-                (p, StreamMuxerBox::new(topology_wrapper::muxer::new(m, sender)))
-            }
-            futures::future::Either::Right((p, m)) => {
-                (p, StreamMuxerBox::new(topology_wrapper::muxer::new(m, sender)))
-            }
-        })
-        .boxed();
-        let mut swarm = libp2p::swarm::Swarm::new(
-            transport,
-            behaviour,
-            peer_id,
-            libp2p::swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(Duration::from_millis(idle_timeout)),
-        );
+                dht: dht::Behaviour::new(filter_incoming),
+                rpc: topology_wrapper::new(
+                    rpc::Behaviour::new(
+                        rpc::Config::new()
+                            .request_timeout(Duration::from_millis(config.rpc_timeout)),
+                    ),
+                    sender.clone(),
+                ),
+                report: topology_wrapper::report::new(receiver),
+            })?
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .build();
 
         swarm
             .listen_on(

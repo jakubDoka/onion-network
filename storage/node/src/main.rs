@@ -13,7 +13,7 @@ use {
         futures::{
             channel::{mpsc, oneshot},
             stream::FuturesUnordered,
-            FutureExt, SinkExt, StreamExt,
+            FutureExt, SinkExt,
         },
         multiaddr::Protocol,
         swarm::{NetworkBehaviour, SwarmEvent},

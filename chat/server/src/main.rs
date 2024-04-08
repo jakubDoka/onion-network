@@ -115,7 +115,7 @@ fn filter_incoming(
     local_addr: &Multiaddr,
     _: &Multiaddr,
 ) -> Result<(), libp2p::swarm::ConnectionDenied> {
-    if local_addr.iter().any(|p| p == multiaddr::Protocol::Ws("/".into())) {
+    if local_addr.iter().any(|p| matches!(p, multiaddr::Protocol::Ws(_))) {
         return Ok(());
     }
 
@@ -324,39 +324,55 @@ impl Server {
 
         log::info!("received message from client: {:?} {:?}", req.id, req.prefix);
 
-        if req.prefix == rpcs::SUBSCRIBE {
-            let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
-            if let Some(topic) = req.topic
-                && missing_topic.is_none()
-            {
-                log::info!("client subscribed to topic: {:?}", topic);
-                match topic {
-                    Topic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
-                    Topic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
-                }
-                _ = client.inner.write((req.id, Ok::<(), ChatError>(())));
-            } else {
-                _ = client.inner.write((req.id, Err::<(), ChatError>(ChatError::NotFound)));
-            }
-        } else if req.prefix == rpcs::UNSUBSCRIBE {
-            let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
-            if let Some(topic) = req.topic
-                && missing_topic.is_none()
-            {
-                log::info!("client unsubscribed from topic: {:?}", topic);
-                match topic {
-                    Topic::Profile(_) => client.profile_sub = None,
-                    Topic::Chat(chat) => _ = client.subscriptions.remove(&chat),
-                }
-            }
-        } else {
-            self.client_router.handle(api::State {
+        match req.prefix {
+            rpcs::SUBSCRIBE => self.handle_subscribe(id, req, missing_topic),
+            rpcs::UNSUBSCRIBE => self.handle_unsubscribe(id, req, missing_topic),
+            _ => self.client_router.handle(api::State {
                 req,
                 swarm: &mut self.swarm,
                 location: OnlineLocation::Local(id),
                 context: self.context,
                 missing_topic,
-            });
+            }),
+        }
+    }
+
+    fn handle_subscribe(
+        &mut self,
+        id: PathId,
+        req: chat_spec::Request,
+        missing_topic: Option<MissingTopic>,
+    ) {
+        let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
+        if let Some(topic) = req.topic
+            && missing_topic.is_none()
+        {
+            log::info!("client subscribed to topic: {:?}", topic);
+            match topic {
+                Topic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
+                Topic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
+            }
+            _ = client.inner.write((req.id, Ok::<(), ChatError>(())));
+        } else {
+            _ = client.inner.write((req.id, Err::<(), ChatError>(ChatError::NotFound)));
+        }
+    }
+
+    fn handle_unsubscribe(
+        &mut self,
+        id: PathId,
+        req: chat_spec::Request,
+        missing_topic: Option<MissingTopic>,
+    ) {
+        let client = self.clients.iter_mut().find(|c| c.id == id).expect("no you don't");
+        if let Some(topic) = req.topic
+            && missing_topic.is_none()
+        {
+            log::info!("client unsubscribed from topic: {:?}", topic);
+            match topic {
+                Topic::Profile(_) => client.profile_sub = None,
+                Topic::Chat(chat) => _ = client.subscriptions.remove(&chat),
+            }
         }
     }
 
@@ -413,27 +429,6 @@ impl Server {
                 let route = Route::new(identity, unpack_node_addr(addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
-        }
-    }
-
-    fn handle_client_router_response(
-        &mut self,
-        (res, (loc, id)): (handlers::Response, (OnlineLocation, CallId)),
-    ) {
-        let OnlineLocation::Local(client) = loc else { return };
-
-        match res {
-            handlers::Response::Success(pl) | handlers::Response::Failure(pl) => {
-                let Some(client) = self.clients.iter_mut().find(|c| c.id == client) else {
-                    log::warn!("client did not wait for respnse");
-                    return;
-                };
-                if client.inner.write((id, ReminderOwned(pl))).is_none() {
-                    log::warn!("client cant keep up with own requests");
-                    client.inner.close();
-                };
-            }
-            handlers::Response::DontRespond(_) => {}
         }
     }
 
@@ -536,6 +531,27 @@ impl Server {
             }
             handlers::Response::DontRespond(_) => {}
         };
+    }
+
+    fn handle_client_router_response(
+        &mut self,
+        (res, (loc, id)): (handlers::Response, (OnlineLocation, CallId)),
+    ) {
+        let OnlineLocation::Local(client) = loc else { return };
+
+        match res {
+            handlers::Response::Success(pl) | handlers::Response::Failure(pl) => {
+                let Some(client) = self.clients.iter_mut().find(|c| c.id == client) else {
+                    log::warn!("client did not wait for respnse");
+                    return;
+                };
+                if client.inner.write((id, ReminderOwned(pl))).is_none() {
+                    log::warn!("client cant keep up with own requests");
+                    client.inner.close();
+                };
+            }
+            handlers::Response::DontRespond(_) => {}
+        }
     }
 }
 
@@ -662,6 +678,8 @@ enum RequestEvent {
     ReplRpc(Topic, Vec<u8>, Option<mpsc::Sender<(PeerId, rpc::Result<Vec<u8>>)>>),
 }
 
+// TODO: switch to lmdb
+// TODO: remove recovery locks, ommit response instead
 pub struct OwnedContext {
     profiles: DashMap<Identity, Profile>,
     online: DashMap<Identity, OnlineLocation>,
@@ -681,36 +699,15 @@ impl OwnedContext {
 
     async fn push_profile_event(&self, for_who: [u8; 32], mail: &[u8]) -> bool {
         let (sender, recv) = oneshot::channel();
-        _ = self
-            .request_event_sink
-            .clone()
-            .send(RequestEvent::Profile(for_who, mail.to_vec(), sender))
-            .await;
+        let ev = RequestEvent::Profile(for_who, mail.to_vec(), sender);
+        _ = self.request_event_sink.clone().send(ev).await;
         recv.await.is_ok()
     }
 
     async fn repl_rpc_no_resp<'a>(&self, topic: impl Into<Topic>, prefix: u8, msg: impl Codec<'a>) {
         let topic = topic.into();
-        _ = self
-            .request_event_sink
-            .clone()
-            .send(RequestEvent::ReplRpc(topic, rpc(prefix, topic, msg), None))
-            .await;
-    }
-
-    async fn _send_rpc_no_resp<'a>(
-        &self,
-        topic: impl Into<Topic>,
-        dest: PeerId,
-        prefix: u8,
-        msg: impl Codec<'a>,
-    ) {
-        let topic = topic.into();
-        _ = self
-            .request_event_sink
-            .clone()
-            .send(RequestEvent::Rpc(dest, rpc(prefix, topic, msg), None))
-            .await;
+        let ev = RequestEvent::ReplRpc(topic, rpc(prefix, topic, msg), None);
+        _ = self.request_event_sink.clone().send(ev).await;
     }
 
     async fn repl_rpc<'a>(
@@ -721,11 +718,8 @@ impl OwnedContext {
     ) -> impl futures::Stream<Item = (PeerId, rpc::Result<Vec<u8>>)> {
         let topic = topic.into();
         let (sender, recv) = mpsc::channel(REPLICATION_FACTOR.get());
-        _ = self
-            .request_event_sink
-            .clone()
-            .send(RequestEvent::ReplRpc(topic, rpc(prefix, topic, msg), Some(sender)))
-            .await;
+        let ev = RequestEvent::ReplRpc(topic, rpc(prefix, topic, msg), Some(sender));
+        _ = self.request_event_sink.clone().send(ev).await;
         recv
     }
 
@@ -738,11 +732,8 @@ impl OwnedContext {
     ) -> rpc::Result<Vec<u8>> {
         let topic = topic.into();
         let (sender, recv) = oneshot::channel();
-        _ = self
-            .request_event_sink
-            .clone()
-            .send(RequestEvent::Rpc(peer, rpc(send_mail, topic, mail), Some(sender)))
-            .await;
+        let ev = RequestEvent::Rpc(peer, rpc(send_mail, topic, mail), Some(sender));
+        _ = self.request_event_sink.clone().send(ev).await;
         recv.await.unwrap_or(Err(rpc::Error::Timeout.into()))
     }
 }

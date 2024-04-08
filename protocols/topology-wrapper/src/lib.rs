@@ -6,7 +6,7 @@
 pub use impls::{channel, new, Behaviour, EventReceiver, EventSender};
 use {
     codec::{Buffer, Codec, WritableBuffer},
-    libp2p::{multihash::Multihash, PeerId},
+    libp2p::{multihash::Multihash, swarm::NetworkBehaviour, PeerId},
 };
 
 pub enum ExtraEvent {
@@ -24,6 +24,16 @@ pub type PacketMeta = (PeerIdWrapper, usize, String);
 
 pub trait World: 'static {
     fn handle_update(&mut self, peer: PeerId, update: Update);
+}
+
+pub trait BuildWrapped: NetworkBehaviour + Sized {
+    fn include_in_vis(self, ev: EventSender) -> Behaviour<Self>;
+}
+
+impl<T: NetworkBehaviour> BuildWrapped for T {
+    fn include_in_vis(self, ev: EventSender) -> Behaviour<Self> {
+        new(self, ev)
+    }
 }
 
 #[cfg(not(feature = "disabled"))]

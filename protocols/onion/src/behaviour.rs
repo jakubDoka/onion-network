@@ -156,7 +156,7 @@ impl Behaviour {
                         .count();
                     if valid_stream_count + self.pending_connections.len() > self.config.max_streams
                     {
-                        log::info!("too many streams");
+                        log::debug!("too many streams");
                         if self.error_streams.len() > self.config.max_error_streams {
                             log::warn!("too many erroring streams");
                             break 'b;
@@ -339,6 +339,12 @@ component_utils::gen_config! {
     buffer_cap: usize = 1 << 16,
     /// Dial instead of emmiting a connection request.
     dial: bool = true,
+}
+
+impl Config {
+    pub fn build(self) -> Behaviour {
+        Behaviour::new(self)
+    }
 }
 
 #[derive(Debug)]

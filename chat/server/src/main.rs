@@ -41,6 +41,7 @@ use {
         time::Duration,
     },
     tokio::sync::RwLock,
+    topology_wrapper::BuildWrapped,
 };
 
 mod api;
@@ -119,11 +120,11 @@ fn filter_incoming(
         return Ok(());
     }
 
-    if table.get(peer).is_none() {
-        return Err(libp2p::swarm::ConnectionDenied::new("not registered as a node"));
+    if table.get(peer).is_some() {
+        return Ok(());
     }
 
-    Ok(())
+    Err(libp2p::swarm::ConnectionDenied::new("not registered as a node"))
 }
 
 impl Server {
@@ -152,26 +153,18 @@ impl Server {
             .with_websocket(libp2p::noise::Config::new, libp2p::yamux::Config::default)
             .await?
             .with_behaviour(|_| Behaviour {
-                key_share: topology_wrapper::new(
-                    key_share::Behaviour::new(keys.enc.public_key()),
-                    sender.clone(),
-                ),
-                onion: topology_wrapper::new(
-                    onion::Behaviour::new(
-                        onion::Config::new(keys.enc.into(), peer_id)
-                            .max_streams(10)
-                            .keep_alive_interval(Duration::from_secs(100)),
-                    ),
-                    sender.clone(),
-                ),
+                key_share: key_share::Behaviour::new(keys.enc.public_key())
+                    .include_in_vis(sender.clone()),
+                onion: onion::Config::new(keys.enc.into(), peer_id)
+                    .max_streams(10)
+                    .keep_alive_interval(Duration::from_secs(100))
+                    .build()
+                    .include_in_vis(sender.clone()),
                 dht: dht::Behaviour::new(filter_incoming),
-                rpc: topology_wrapper::new(
-                    rpc::Behaviour::new(
-                        rpc::Config::new()
-                            .request_timeout(Duration::from_millis(config.rpc_timeout)),
-                    ),
-                    sender.clone(),
-                ),
+                rpc: rpc::Config::new()
+                    .request_timeout(Duration::from_millis(config.rpc_timeout))
+                    .build()
+                    .include_in_vis(sender.clone()),
                 report: topology_wrapper::report::new(receiver),
             })?
             .with_swarm_config(|c| {
@@ -304,12 +297,8 @@ impl Server {
     }
 
     fn handle_client_message(&mut self, (id, req): (PathId, io::Result<Vec<u8>>)) {
-        let req = match req {
-            Ok(req) => req,
-            Err(e) => {
-                log::warn!("failed to read from client: {}", e);
-                return;
-            }
+        let Ok(req) = req.inspect_err(|e| log::warn!("failed to read from client: {}", e)) else {
+            return;
         };
 
         let Some(req) = chat_spec::Request::decode(&mut req.as_slice()) else {
@@ -322,7 +311,7 @@ impl Server {
             return;
         };
 
-        log::info!("received message from client: {:?} {:?}", req.id, req.prefix);
+        log::debug!("received message from client: {:?} {:?}", req.id, req.prefix);
 
         match req.prefix {
             rpcs::SUBSCRIBE => self.handle_subscribe(id, req, missing_topic),
@@ -347,7 +336,7 @@ impl Server {
         if let Some(topic) = req.topic
             && missing_topic.is_none()
         {
-            log::info!("client subscribed to topic: {:?}", topic);
+            log::debug!("client subscribed to topic: {:?}", topic);
             match topic {
                 Topic::Profile(identity) => client.profile_sub = Some((identity, req.id)),
                 Topic::Chat(chat) => _ = client.subscriptions.insert(chat, req.id),
@@ -368,7 +357,7 @@ impl Server {
         if let Some(topic) = req.topic
             && missing_topic.is_none()
         {
-            log::info!("client unsubscribed from topic: {:?}", topic);
+            log::debug!("client unsubscribed from topic: {:?}", topic);
             match topic {
                 Topic::Profile(_) => client.profile_sub = None,
                 Topic::Chat(chat) => _ = client.subscriptions.remove(&chat),
@@ -409,12 +398,8 @@ impl Server {
     }
 
     fn handle_stake_event(&mut self, event: Result<chain_api::StakeEvent, chain_api::Error>) {
-        let event = match event {
-            Ok(event) => event,
-            Err(e) => {
-                log::warn!("failed to read from chain: {}", e);
-                return;
-            }
+        let Ok(event) = event.inspect_err(|e| log::warn!("failed to read from chain: {e}")) else {
+            return;
         };
 
         match event {

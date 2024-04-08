@@ -382,6 +382,12 @@ component_utils::gen_config! {
     request_timeout: std::time::Duration = std::time::Duration::from_secs(10),
 }
 
+impl Config {
+    pub fn build(self) -> Behaviour {
+        Behaviour::new(self)
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self::new()

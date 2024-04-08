@@ -424,7 +424,7 @@ fn next_node_config() -> NodeConfig {
     NodeConfig {
         port: port * 2 + 5000,
         ws_port: port * 2 + 1 + 5000,
-        key_path: Default::default(),
+        mnemonic: Mnemonic::generate(24).unwrap(),
         idle_timeout: 1000,
         rpc_timeout: 10000,
     }

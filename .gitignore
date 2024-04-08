@@ -1,7 +1,6 @@
 /target
 Cargo.lock
-/node_mnemonics
-/logs
+/tmp
 /whitepaper/*.min.js
 **/dist/
 **/node_modules/

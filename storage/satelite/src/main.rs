@@ -4,7 +4,7 @@
 use {
     self::storage::Storage,
     anyhow::Context as _,
-    chain_api::NodeKeys,
+    chain_api::{Mnemonic, NodeKeys},
     codec::Codec,
     component_utils::futures::StreamExt,
     libp2p::{
@@ -29,7 +29,7 @@ config::env_config! {
         port: u16 = "8080",
         external_ip: Ipv4Addr = "127.0.0.1",
         metabase_root: String = "metabase",
-        key_path: String = "satelite.keys",
+        mnemonic: Mnemonic,
     }
 }
 
@@ -37,7 +37,7 @@ config::env_config! {
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     let db = Storage::new(&config.metabase_root)?;
-    let (keys, _initial) = NodeKeys::load(&config.key_path)?;
+    let keys = NodeKeys::from_mnemonic(&config.mnemonic);
     let satelite = Satelite::new(config, db, keys)?;
     satelite.await?
 }

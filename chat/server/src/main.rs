@@ -15,7 +15,7 @@ use {
     self::api::{chat::Chat, MissingTopic},
     crate::api::Handler as _,
     anyhow::Context as _,
-    chain_api::{NodeKeys, Stake},
+    chain_api::{Mnemonic, NodeKeys, Stake},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::{mapref::entry::Entry, DashMap},
@@ -57,8 +57,8 @@ async fn main() -> anyhow::Result<()> {
 
     let node_config = NodeConfig::from_env();
     let chain_config = ChainConfig::from_env();
-    let (keys, is_new) = NodeKeys::load(&node_config.key_path)?;
-    let (node_list, stake_events) = deal_with_chain(chain_config, &keys, is_new).await?;
+    let keys = NodeKeys::from_mnemonic(&node_config.mnemonic);
+    let (node_list, stake_events) = deal_with_chain(chain_config, &keys).await?;
 
     Server::new(node_config, keys, node_list, stake_events)?.await;
 
@@ -69,7 +69,7 @@ config::env_config! {
     struct NodeConfig {
         port: u16,
         ws_port: u16,
-        key_path: String,
+        mnemonic: Mnemonic,
         idle_timeout: u64,
         rpc_timeout: u64,
     }
@@ -123,7 +123,6 @@ fn unpack_node_addr(addr: chain_api::NodeAddress) -> Multiaddr {
 async fn deal_with_chain(
     config: ChainConfig,
     keys: &NodeKeys,
-    is_new: bool,
 ) -> anyhow::Result<(Vec<Stake>, StakeEvents)> {
     let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = config;
     let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
@@ -170,7 +169,7 @@ async fn deal_with_chain(
         }
     });
 
-    if is_new {
+    if node_list.iter().all(|s| s.id != keys.sign.public_key().pre) {
         let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
         client
             .join(keys.to_stored(), (exposed_address, port).into(), nonce)

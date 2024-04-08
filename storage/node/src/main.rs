@@ -6,7 +6,7 @@
 
 use {
     anyhow::Context as _,
-    chain_api::NodeKeys,
+    chain_api::{Mnemonic, NodeKeys},
     codec::Codec,
     component_utils::PacketReader,
     libp2p::{
@@ -39,12 +39,12 @@ type Context = &'static OwnedContext;
 
 config::env_config! {
     struct Config {
-        port: u16 = "8080",
-        external_ip: Ipv4Addr = "127.0.0.1",
-        satelites: config::List<config::Hex> = "",
-        keys: String = "node.keys",
-        storage_dir: String = "storage",
-        disk_limit_gb: u64 = "100",
+        port: u16,
+        external_ip: Ipv4Addr,
+        satelites: config::List<config::Hex>,
+        mnemonic: Mnemonic,
+        storage_dir: String,
+        disk_limit_gb: u64,
     }
 }
 
@@ -52,7 +52,7 @@ config::env_config! {
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     let storage = storage::Storage::new(&config.storage_dir)?;
-    let (keys, _initial) = NodeKeys::load(&config.keys)?;
+    let keys = NodeKeys::from_mnemonic(&config.mnemonic);
     let satelite = Node::new(config, storage, keys)?;
     satelite.await?
 }

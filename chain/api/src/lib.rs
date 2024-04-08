@@ -7,7 +7,10 @@ pub use {
     },
     serde_json::json,
     subxt::{tx::TxPayload, Error, PolkadotConfig as Config},
-    subxt_signer::sr25519::{Keypair, Signature},
+    subxt_signer::{
+        bip39::Mnemonic,
+        sr25519::{Keypair, Signature},
+    },
 };
 use {
     chain_types::{polkadot, Hash},
@@ -25,7 +28,6 @@ use {
         tx::TxProgress,
         OnlineClient,
     },
-    subxt_signer::bip39::Mnemonic,
 };
 
 pub const USER_NAME_CAP: usize = 32;
@@ -305,7 +307,7 @@ impl NodeKeys {
         }
     }
 
-    pub fn from_mnemonic(mnemonic: Mnemonic) -> Self {
+    pub fn from_mnemonic(mnemonic: &Mnemonic) -> Self {
         let seed = crypto::hash::new(mnemonic.to_seed(""));
         let mut rng = ChaChaRng::from_seed(seed);
         Self { enc: enc::Keypair::new(&mut rng), sign: sign::Keypair::new(rng) }

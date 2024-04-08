@@ -12,8 +12,13 @@ pub use {
 use {
     chain_types::{polkadot, Hash},
     codec::Codec,
-    crypto::{enc, rand_core::OsRng, sign},
+    crypto::{
+        enc,
+        rand_core::{OsRng, SeedableRng},
+        sign,
+    },
     futures::{StreamExt, TryFutureExt, TryStreamExt},
+    rand_chacha::ChaChaRng,
     std::{fs, io, str::FromStr},
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
@@ -278,6 +283,7 @@ impl<S: TransactionHandler> Client<S> {
     }
 }
 
+// TODO: transition to generating keys from mnemonic
 #[derive(Clone, Codec)]
 pub struct NodeKeys {
     pub enc: enc::Keypair,
@@ -297,6 +303,12 @@ impl NodeKeys {
             enc: crypto::hash::new(self.enc.public_key()),
             id: self.sign.public_key().pre,
         }
+    }
+
+    pub fn from_mnemonic(mnemonic: Mnemonic) -> Self {
+        let seed = crypto::hash::new(mnemonic.to_seed(""));
+        let mut rng = ChaChaRng::from_seed(seed);
+        Self { enc: enc::Keypair::new(&mut rng), sign: sign::Keypair::new(rng) }
     }
 
     pub fn load(path: &str) -> io::Result<(Self, bool)> {

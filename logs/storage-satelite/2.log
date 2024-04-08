@@ -1,0 +1,63 @@
+Error: No such file or directory (os error 2)
+
+Stack backtrace:
+   0: anyhow::error::<impl core::convert::From<E> for anyhow::Error>::from
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anyhow-1.0.81/src/error.rs:565:25
+   1: <core::result::Result<T,F> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible,E>>>::from_residual
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/core/src/result.rs:1964:27
+   2: storage_satelite::storage::NodeProfiles::load
+             at ./storage/satelite/src/storage.rs:47:21
+   3: storage_satelite::storage::Storage::new
+             at ./storage/satelite/src/storage.rs:246:20
+   4: storage_satelite::main::{{closure}}
+             at ./storage/satelite/src/main.rs:39:14
+   5: tokio::runtime::park::CachedParkThread::block_on::{{closure}}
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/park.rs:281:63
+   6: tokio::runtime::coop::with_budget
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/coop.rs:107:5
+   7: tokio::runtime::coop::budget
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/coop.rs:73:5
+   8: tokio::runtime::park::CachedParkThread::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/park.rs:281:31
+   9: tokio::runtime::context::blocking::BlockingRegionGuard::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/context/blocking.rs:66:9
+  10: tokio::runtime::scheduler::multi_thread::MultiThread::block_on::{{closure}}
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/scheduler/multi_thread/mod.rs:87:13
+  11: tokio::runtime::context::runtime::enter_runtime
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/context/runtime.rs:65:16
+  12: tokio::runtime::scheduler::multi_thread::MultiThread::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/scheduler/multi_thread/mod.rs:86:9
+  13: tokio::runtime::runtime::Runtime::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/runtime.rs:351:45
+  14: storage_satelite::main
+             at ./storage/satelite/src/main.rs:42:5
+  15: core::ops::function::FnOnce::call_once
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/core/src/ops/function.rs:250:5
+  16: std::sys_common::backtrace::__rust_begin_short_backtrace
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/sys_common/backtrace.rs:155:18
+  17: std::rt::lang_start::{{closure}}
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/rt.rs:161:18
+  18: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/core/src/ops/function.rs:284:13
+  19: std::panicking::try::do_call
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/panicking.rs:552:40
+  20: std::panicking::try
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/panicking.rs:516:19
+  21: std::panic::catch_unwind
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/panic.rs:149:14
+  22: std::rt::lang_start_internal::{{closure}}
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/rt.rs:143:48
+  23: std::panicking::try::do_call
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/panicking.rs:552:40
+  24: std::panicking::try
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/panicking.rs:516:19
+  25: std::panic::catch_unwind
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/panic.rs:149:14
+  26: std::rt::lang_start_internal
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/rt.rs:143:20
+  27: std::rt::lang_start
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/rt.rs:160:17
+  28: main
+  29: <unknown>
+  30: __libc_start_main
+  31: _start

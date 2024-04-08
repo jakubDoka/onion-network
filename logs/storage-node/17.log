@@ -1,0 +1,40 @@
+thread 'main' panicked at /home/mlokis/work/rust/onion-network/utils/config/src/lib.rs:43:25:
+SATELITES is not valid config::List<config::Hex>: invalid length (expected 64): 0
+stack backtrace:
+   0: rust_begin_unwind
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/std/src/panicking.rs:645:5
+   1: core::panicking::panic_fmt
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/core/src/panicking.rs:72:14
+   2: config::get_env::{{closure}}
+             at ./utils/config/src/lib.rs:43:25
+   3: core::result::Result<T,E>::unwrap_or_else
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/core/src/result.rs:1431:23
+   4: config::get_env
+             at ./utils/config/src/lib.rs:35:5
+   5: storage_node::Config::from_env
+             at ./utils/config/src/lib.rs:19:29
+   6: storage_node::main::{{closure}}
+             at ./storage/node/src/main.rs:53:18
+   7: tokio::runtime::park::CachedParkThread::block_on::{{closure}}
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/park.rs:281:63
+   8: tokio::runtime::coop::with_budget
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/coop.rs:107:5
+   9: tokio::runtime::coop::budget
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/coop.rs:73:5
+  10: tokio::runtime::park::CachedParkThread::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/park.rs:281:31
+  11: tokio::runtime::context::blocking::BlockingRegionGuard::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/context/blocking.rs:66:9
+  12: tokio::runtime::scheduler::multi_thread::MultiThread::block_on::{{closure}}
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/scheduler/multi_thread/mod.rs:87:13
+  13: tokio::runtime::context::runtime::enter_runtime
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/context/runtime.rs:65:16
+  14: tokio::runtime::scheduler::multi_thread::MultiThread::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/scheduler/multi_thread/mod.rs:86:9
+  15: tokio::runtime::runtime::Runtime::block_on
+             at /home/mlokis/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.37.0/src/runtime/runtime.rs:351:45
+  16: storage_node::main
+             at ./storage/node/src/main.rs:57:5
+  17: core::ops::function::FnOnce::call_once
+             at /rustc/4fd4797c2654977f545c9a91e2aa4e6cdbb38919/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

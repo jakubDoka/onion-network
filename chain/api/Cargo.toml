@@ -23,6 +23,7 @@ subxt-signer = { version = "0.34", features = ["subxt", "sr25519"], default-feat
 chain-types = { workspace = true }
 crypto = { workspace = true }
 codec.workspace = true
+rand_chacha = "0.3.1"
 
 [features]
 native = ["subxt/default", "subxt-signer/default", "chain-types/native"]

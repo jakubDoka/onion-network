@@ -1,12 +1,27 @@
 #!/bin/bash
 
-creq() { [ -x "$(command -v $1)" ] || cargo install $1; }
+creq() { command -v $1 > /dev/null || cargo install $1; }
+local_creq() { command -v $(basename $1) > /dev/null || cargo install --path $1; }
 sod() { export "$1"="${!1:-$2}"; }
 is_running() { pgrep "$1" > /dev/null; }
+
+export PORT_ALLOC=42069
+alloc_port() {
+	export PORT_ALLOC=$((PORT_ALLOC + 1))
+	echo $PORT_ALLOC
+}
+
+export NONCE_ALLOC=0
+alloc_nonce() {
+	export NONCE_ALLOC=$((NONCE_ALLOC + 1))
+	echo $NONCE_ALLOC
+}
 
 creq trunk
 creq live-server
 creq subxt
+
+local_creq utils/mnemgen
 
 # args
 sod PROFILE          ""
@@ -16,19 +31,21 @@ sod REBUILD_NATIVE   "false"
 sod REBUILD_CLIENT   "false"
 
 # config
-sod CHAIN_NODES       "ws://localhost:9944"
-sod NODE_COUNT        15
-sod IDLE_TIMEOUT      2000
-sod FRONTEND_PORT     7777
-sod TOPOLOGY_PORT     8888
-sod RUST_LOG          "info"
-sod RUST_BACKTRACE    1
-sod NODE_START        8800
-sod NETWORK_BOOT_NODE "/ip4/127.0.0.1/tcp/$((NODE_START + 100))/ws"
-sod MIN_NODES         5
-sod BALANCE           100000000000000
-sod TEST_WALLETS      "5CwfgYUrq24dTpfh2sQ2st1FNCR2fM2JFSn3EtdWyrGdEaER,5E7YrzVdg1ovRYfWLQG1bJV7FvZWJpnVnQ3nVCKEwpFzkX8s,5CveKLTBDy6vFbgE1DwXHwPRcswa1kRSLY8rL3Yx5qUhsSCo"
-sod EXPOSED_ADDRESS   "127.0.0.1"
+sod CHAIN_NODES        "ws://localhost:9944"
+sod NODE_COUNT         15
+sod SATELITE_COUNT     3
+sod STORAGE_NODE_COUNT 20
+sod IDLE_TIMEOUT       2000
+sod FRONTEND_PORT      7777
+sod TOPOLOGY_PORT      8888
+sod RUST_LOG           "info"
+sod RUST_BACKTRACE     1
+sod MIN_NODES          5
+sod BALANCE            100000000000000
+sod TEST_WALLETS       "5CwfgYUrq24dTpfh2sQ2st1FNCR2fM2JFSn3EtdWyrGdEaER,5E7YrzVdg1ovRYfWLQG1bJV7FvZWJpnVnQ3nVCKEwpFzkX8s,5CveKLTBDy6vFbgE1DwXHwPRcswa1kRSLY8rL3Yx5qUhsSCo"
+sod EXPOSED_ADDRESS    "127.0.0.1"
+sod RPC_TIMEOUT        1000
+sod NODE_ACCOUNT       "//Alice"
 
 # constst
 CHAIN_NAME="node-template"
@@ -45,9 +62,15 @@ if [ "$PROFILE" = "release" ]; then
 	TARGET_DIR="target/native-optimized"
 fi
 
+load_mnemonic() {
+	test -d node_mnemonics || mkdir node_mnemonics
+	FILE_NAME="node_mnemonics/$1.mnem"
+	test -f $FILE_NAME || mnemgen > $FILE_NAME
+	echo $(cat $FILE_NAME)
+}
+
 cleanup_files() {
-	rm -rf node_keys node_logs
-	mkdir node_keys node_logs
+	rm -rf node_mnemonics logs
 }
 generate_falcon() { (cd $FALCON_ROOT && sh transpile.sh || exit 1); }
 init_npm() { (cd $WALLET_INTEGRATION && npm i || exit 1); }
@@ -68,21 +91,25 @@ run_wasm() {
 	(cd $TOPOLOGY_ROOT/dist && live-server --host localhost --port $TOPOLOGY_PORT > /dev/null 2>&1 &)
 	(cd $CLIENT_ROOT/dist && live-server --host localhost --port $FRONTEND_PORT > /dev/null 2>&1 &)
 }
-run_chat_servers() {
-	killall chat-server
-	for i in $(seq $NODE_COUNT); do
-		echo "Starting node $i"
+run_nodes() {
+	EXE=$1
+	COUNT=$2
 
-		export PORT=$((NODE_START + i))
-		export WS_PORT=$((PORT + 100))
-		export NODE_ACCOUNT="//Alice"
-		export KEY_PATH="node_keys/node$i.keys"
-		export NONCE=$i
-		export RPC_TIMEOUT=1000
-
-		$TARGET_DIR/chat-server > "node_logs/node$i.log" 2>&1 &
+	killall $EXE
+	test -d logs || mkdir logs
+	test -d logs/$EXE || mkdir logs/$EXE
+	for i in $(seq $COUNT); do
+		echo "Starting node $EXE-$i"
+		export PORT=$(alloc_port)
+		export WS_PORT=$(alloc_port)
+		export MNEMONIC=$(load_mnemonic $EXE-$1)
+		export NONCE=$(alloc_nonce)
+		$TARGET_DIR/$EXE > "logs/$EXE/$i.log" 2>&1 &
 	done
 }
+run_chat_servers() { run_nodes chat-server $NODE_COUNT; }
+run_satelites() { run_nodes storage-satelite $SATELITE_COUNT; }
+tun_storage_nodes() { run_nodes storage-node $STORAGE_NODE_COUNT; }
 run_chain() {
 	killall $CHAIN_NAME
 	$CHAIN_PATH --dev > /dev/null 2>&1 &
@@ -94,7 +121,7 @@ run_chain() {
 	$TARGET_DIR/init-transfer || exit 1 &
 }
 
-test -e $CHAIN_PATH && ! $REBUILD_CHAIN || rebuild_chain
+test -e $CHAIN_PATH && ! $REBUILD_CHAIN  || rebuild_chain
 
 test -d $FALCON_ROOT/falcon              || generate_falcon
 test -d $WALLET_INTEGRATION/node_modules || init_npm
@@ -105,52 +132,12 @@ test -e $TARGET_DIR/chat-server && ! $REBUILD_NATIVE   || rebuild_native
 test -d $TOPOLOGY_ROOT/dist     && ! $REBUILD_TOPOLOGY || rebuild_topology
 test -d $CLIENT_ROOT/dist       && ! $REBUILD_CLIENT   || rebuild_client
 
-is_running chat-server || run_chat_servers
-is_running live-server || run_wasm
+is_running chat-server      || run_chat_servers
+is_running storage-satelite || run_satelites
+is_running storage-node     || tun_storage_nodes
+is_running live-server      || run_wasm
 
-log_help() {
-	echo "Available commands:"
-	echo "  exec:         execute command"
-	echo "  chat-servers: rebuild and restart chat servers"
-	echo "  topology:     rebuild topology (hotreload)"
-	echo "  client:       rebuild client (hotreload)"
-	echo "  chain:        rebuild and restart chain"
-	echo "  killall:      kill all processes and exit"
-	echo "  exit:         exit and keep processes running"
-}
+#rm serve.sh.hist
 
-echo "Type 'help' for available commands"
-while read -p '> ' -r line; do
-	case "$line" in
-		"exec")
-			read -p '$ ' -r cmd
-			eval "$cmd"
-			;;
-		"chat-servers")
-			rebuild_native
-			run_chat_servers
-			;;
-		"topology")
-			rebuild_topology
-			;;
-		"client")
-			rebuild_client
-			;;
-		"chain")
-			rebuild_chain
-			run_chain
-			;;
-		"killall")
-			killall chat-server $CHAIN_NAME live-server
-			exit 0
-			;;
-		"exit")
-			exit 0
-			;;
-		"")
-			;;
-		*)
-			log_help
-			;;
-	esac
-done
+echo "begins shell from the scope of this script:"
+while read -p '$ ' -r line; do $line; done

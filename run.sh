@@ -38,6 +38,7 @@ WALLET_INTEGRATION="chat/client/wallet-integration"
 FALCON_ROOT="crypto/falcon"
 TARGET_DIR="target/debug"
 CLIENT_ROOT="chat/client"
+SILENCE=""
 if [ "$PROFILE" = "release" ]; then
 	FLAGS="--profile native-optimized"
 	WASM_FLAGS="--release"
@@ -64,8 +65,8 @@ rebuild_client() { (cd chat/client && trunk build $WASM_FLAGS || exit 1); }
 
 run_wasm() {
 	killall live-server
-	(cd $TOPOLOGY_ROOT/dist && live-server --host localhost --port $TOPOLOGY_PORT &)
-	(cd $CLIENT_ROOT/dist && live-server --host localhost --port $FRONTEND_PORT &)
+	(cd $TOPOLOGY_ROOT/dist && live-server --host localhost --port $TOPOLOGY_PORT > /dev/null 2>&1 &)
+	(cd $CLIENT_ROOT/dist && live-server --host localhost --port $FRONTEND_PORT > /dev/null 2>&1 &)
 }
 run_chat_servers() {
 	killall chat-server
@@ -107,11 +108,22 @@ test -d $CLIENT_ROOT/dist       && ! $REBUILD_CLIENT   || rebuild_client
 is_running chat-server || run_chat_servers
 is_running live-server || run_wasm
 
-while read -r line; do
+log_help() {
+	echo "Available commands:"
+	echo "  exec:         execute command"
+	echo "  chat-servers: rebuild and restart chat servers"
+	echo "  topology:     rebuild topology (hotreload)"
+	echo "  client:       rebuild client (hotreload)"
+	echo "  chain:        rebuild and restart chain"
+	echo "  killall:      kill all processes and exit"
+	echo "  exit:         exit and keep processes running"
+}
+
+echo "Type 'help' for available commands"
+while read -p '> ' -r line; do
 	case "$line" in
 		"exec")
-			echo -n "Enter command: "
-			read -r cmd
+			read -p '$ ' -r cmd
 			eval "$cmd"
 			;;
 		"chat-servers")
@@ -135,15 +147,10 @@ while read -r line; do
 		"exit")
 			exit 0
 			;;
+		"")
+			;;
 		*)
-			echo "Unknown command: $line"
-			echo "Available commands:"
-			echo "        exec: execute command"
-			echo "chat-servers: rebuild and restart chat servers"
-			echo "    topology: rebuild topology (hotreload)"
-			echo "      client: rebuild client (hotreload)"
-			echo "       chain: rebuild and restart chain"
-			echo "        exit: exit"
+			log_help
 			;;
 	esac
 done

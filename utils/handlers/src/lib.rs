@@ -8,6 +8,17 @@ macro_rules! blocking {
     };
 }
 
+pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(f).await.unwrap()
+}
+
+pub async fn async_blocking<F: Future + Send + 'static>(f: F) -> F::Output
+where
+    F::Output: Send,
+{
+    tokio::task::spawn_blocking(move || futures::executor::block_on(f)).await.unwrap()
+}
+
 #[macro_export]
 macro_rules! ensure {
     ($cond:expr, $resp:expr) => {

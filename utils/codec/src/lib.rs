@@ -48,9 +48,11 @@ impl<'a> AsRef<[u8]> for Reminder<'a> {
 
 pub trait Buffer: AsMut<[u8]> {
     #[must_use = "handle the error"]
-    fn extend_from_slice(&mut self, slice: &[u8]) -> Option<()>;
-    #[must_use = "handle the error"]
     fn push(&mut self, byte: u8) -> Option<()>;
+    #[must_use = "handle the error"]
+    fn extend_from_slice(&mut self, slice: &[u8]) -> Option<()> {
+        slice.iter().try_for_each(|&byte| self.push(byte))
+    }
 }
 
 pub trait Codec<'a>: Sized {

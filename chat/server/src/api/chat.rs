@@ -42,7 +42,7 @@ pub async fn create(
     cx: crate::Context,
     missing_topic: Option<MissingTopic>,
     name: ChatName,
-    identity: Identity,
+    (identity,): Identity,
 ) -> Result<()> {
     if let Some(missing_topic) = missing_topic {
         handlers::ensure!(

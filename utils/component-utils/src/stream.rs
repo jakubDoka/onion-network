@@ -1,7 +1,7 @@
 use {
     codec::{Buffer, Codec, Reminder},
     futures::Future,
-    std::{io, pin::Pin, task::Poll, usize},
+    std::{future::poll_fn, io, pin::Pin, task::Poll, usize},
 };
 
 const PACKET_LEN_WIDTH: usize = 2;
@@ -78,6 +78,25 @@ impl PacketReader {
         let packet = &mut self.read_buffer[PACKET_LEN_WIDTH..packet_size + PACKET_LEN_WIDTH];
         self.read_offset = 0;
         Poll::Ready(Ok(packet))
+    }
+
+    pub async fn next_packet(
+        &mut self,
+        stream: &mut (impl futures::AsyncRead + Unpin),
+    ) -> Result<Vec<u8>, io::Error> {
+        poll_fn(|cx| self.poll_packet(cx, stream).map_ok(|v| v.to_vec())).await
+    }
+
+    pub async fn next_packet_as<T: for<'a> Codec<'a>>(
+        &mut self,
+        stream: &mut (impl futures::AsyncRead + Unpin),
+    ) -> Result<T, io::Error> {
+        poll_fn(|cx| {
+            self.poll_packet(cx, stream).map(|v| {
+                v.and_then(|v| T::decode(&mut &*v).ok_or(io::ErrorKind::InvalidData.into()))
+            })
+        })
+        .await
     }
 }
 

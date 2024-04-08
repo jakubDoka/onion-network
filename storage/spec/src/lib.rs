@@ -13,8 +13,12 @@ pub use berkleamp_welch::{DecodeError, RebuildError, ResourcesError, Share as Re
 use {
     arrayvec::ArrayVec,
     codec::{Codec, Reminder},
-    crypto::{proof::Proof, sign::Signature},
+    crypto::{
+        proof::{Nonce, Proof},
+        sign::Signature,
+    },
     rpc::CallId,
+    std::fmt::Write as _,
 };
 
 pub mod handler;
@@ -31,7 +35,6 @@ pub mod rpcs {
         READ_FILE;
 
         // satelite to node
-        ALLOCATE_BLOCK;
         GET_PIECE_PROOF;
 
         // node to satellite
@@ -82,6 +85,10 @@ pub enum ClientError {
     YouWonTheLottery,
     #[error("not found")]
     NotFound,
+    #[error("invalid nonce, expected: {0}")]
+    InvalidNonce(Nonce),
+    #[error("not registered")]
+    NotRegistered,
 }
 
 impl From<anyhow::Error> for ClientError {
@@ -117,6 +124,29 @@ impl From<anyhow::Error> for NodeError {
 pub struct Address {
     pub id: FileId,
     pub size: u64,
+}
+
+impl Address {
+    pub fn to_file_name(&self) -> String {
+        // FIXME: use base64
+        struct HexBuffer(String);
+
+        impl codec::Buffer for HexBuffer {
+            fn push(&mut self, byte: u8) -> Option<()> {
+                write!(self.0, "{:02x}", byte).ok()
+            }
+        }
+
+        impl AsMut<[u8]> for HexBuffer {
+            fn as_mut(&mut self) -> &mut [u8] {
+                unimplemented!()
+            }
+        }
+
+        let mut hasher = HexBuffer(String::with_capacity(self.encoded_len() * 2));
+        self.encode(&mut hasher).unwrap();
+        hasher.0
+    }
 }
 
 #[repr(packed)]

@@ -12,7 +12,6 @@ use {
     libp2p::{
         futures::{
             channel::{mpsc, oneshot},
-            future,
             stream::FuturesUnordered,
             FutureExt, SinkExt, StreamExt,
         },
@@ -106,8 +105,7 @@ impl Node {
                     rpcs::READ_FILE => read_file;
                 };
                 satelite => {
-                    rpcs::ALLOCATE_BLOCK => allocate_block;
-                    rpcs::GET_PIECE_PROOF => get_piece_proof;
+                    rpcs::GET_PIECE_PROOF => get_piece;
                 };
             },
             request_events: rc,
@@ -288,10 +286,7 @@ type StreamIdentification = impl Future<Output = io::Result<(StreamKind, libp2p:
 
 fn identify_stream(peer: PeerId, mut stream: libp2p::Stream) -> StreamIdentification {
     let task = async move {
-        let mut pr = PacketReader::default();
-        let packet =
-            future::poll_fn(|cx| pr.poll_packet(cx, &mut stream).map_ok(|v| v.to_vec())).await?;
-        let kind = StreamKind::decode(&mut &*packet).ok_or(io::ErrorKind::InvalidData)?;
+        let kind = PacketReader::default().next_packet_as::<StreamKind>(&mut stream).await?;
         Ok((kind, stream, peer))
     };
     tokio::time::timeout(Duration::from_secs(10), task)

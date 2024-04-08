@@ -17,7 +17,19 @@ pub struct Vault {
     pub friend_index: HashMap<crypto::Hash, UserName>,
     pub friends: HashMap<UserName, FriendMeta>,
     pub theme: Theme,
+    pub personal: Personal,
     raw: chat_spec::Vault,
+}
+
+#[derive(Codec)]
+pub struct Personal {
+    storage_node: String,
+}
+
+impl Default for Personal {
+    fn default() -> Self {
+        Self { storage_node: "127.0.0.1:10000".into() }
+    }
 }
 
 impl Default for Vault {
@@ -28,6 +40,10 @@ impl Default for Vault {
 
 fn constant_key(name: &str) -> SharedSecret {
     crypto::hash::new(crypto::hash::new(name))
+}
+
+fn personal() -> SharedSecret {
+    constant_key("personal")
 }
 
 fn chats() -> SharedSecret {
@@ -70,6 +86,7 @@ impl Vault {
         Self {
             chats: get_encrypted(chats(), key, &values).unwrap_or_default(),
             theme: get_plain(theme(), &values).unwrap_or_default(),
+            personal: get_encrypted(personal(), key, &values).unwrap_or_default(),
             friend_index: friends.iter().map(|(&n, f)| (f.dr.receiver_hash(), n)).collect(),
             friends,
             raw: {

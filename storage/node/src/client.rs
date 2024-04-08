@@ -1,16 +1,15 @@
 use {
     anyhow::Context,
-    codec::Codec,
     component_utils::PacketReader,
     crypto::{proof::Proof, sign},
     libp2p::{
-        futures::{self, AsyncReadExt, AsyncWriteExt},
+        futures::{AsyncReadExt, AsyncWriteExt},
         PeerId,
     },
     rpc::CallId,
     std::{
         convert::identity,
-        fs, future,
+        fs,
         io::{Read, Seek, Write},
     },
     storage_spec::{
@@ -27,14 +26,13 @@ pub async fn store_file(
     cid: CallId,
     proof: Proof<StoreContext>,
 ) -> Result<()> {
-    // TODO: verify we are registered to the satelite
     handlers::ensure!(proof.context.dest == cx.keys.sign.identity(), ClientError::InvalidProof);
     handlers::ensure!(proof.verify(), ClientError::InvalidProof);
+    cx.storage.satelites.write().unwrap().advance_nonce(proof.context.dest, proof.nonce)?;
 
     let mut stream = cx.establish_stream(origin, cid).await?;
-
-    let download_task = async move {
-        let mut file = fs::File::open(chain_api::to_hex(proof.context.address.to_bytes()))?;
+    handlers::async_blocking(async move {
+        let mut file = fs::File::open(proof.context.address.to_file_name())?;
         let mut len = proof.context.address.size;
 
         let mut buf = [0; BUFFER_SIZE];
@@ -47,8 +45,9 @@ pub async fn store_file(
         }
 
         Ok::<_, anyhow::Error>(())
-    };
-    handlers::blocking!(futures::executor::block_on(download_task)).context("downloading file")?;
+    })
+    .await
+    .context("downloading file")?;
 
     Ok(())
 }
@@ -63,27 +62,28 @@ pub async fn read_file(
         Result<(sign::PublicKey, Proof<BandwidthContext>), UserIdentity>,
     ),
 ) -> Result<()> {
+    let identity = proof.map_or_else(identity, |(_, proof)| proof.context.dest);
+
     if let Ok((sk, proof)) = proof {
+        let success = cx.storage.satelites.read().unwrap().is_registered(identity);
+        handlers::ensure!(success, ClientError::NotRegistered);
+        // TODO: verify we are registered to the satelite
         cx.storage.bandwidts.write().unwrap().register(sk, proof)?;
     }
 
-    let identity = proof.map_or_else(identity, |(_, proof)| proof.context.dest);
     let mut stream = cx.establish_stream(origin, cid).await?;
-
-    // TODO: report the errors to user properly
-    let upload_task = async move {
-        let mut file = fs::File::open(chain_api::to_hex(address.to_bytes()))?;
+    handlers::async_blocking(async move {
+        let mut file = fs::File::open(address.to_file_name())?;
         let mut len = file.metadata()?.len() - offset;
         file.seek(std::io::SeekFrom::Start(offset)).context("seekig")?;
 
         let mut buf = [0u8; BUFFER_SIZE];
         let mut reader = PacketReader::default();
         while len != 0 {
-            let packet =
-                future::poll_fn(|cx| reader.poll_packet(cx, &mut stream).map_ok(|v| v.to_vec()))
-                    .await?;
-            let bandwidth_use = CompactBandwidthUse::decode(&mut packet.as_slice())
-                .context("decoding sig packet")?;
+            let bandwidth_use = reader
+                .next_packet_as::<CompactBandwidthUse>(&mut stream)
+                .await
+                .context("reading packet")?;
             let allowance = cx
                 .storage
                 .bandwidts
@@ -100,9 +100,9 @@ pub async fn read_file(
         }
 
         Ok::<_, anyhow::Error>(())
-    };
-
-    handlers::blocking!(futures::executor::block_on(upload_task)).context("uploading file")?;
+    })
+    .await
+    .context("uploading file")?;
 
     Ok(())
 }

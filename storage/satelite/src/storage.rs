@@ -1,6 +1,7 @@
 use {
     anyhow::Context,
     codec::Codec,
+    crypto::proof::Nonce,
     lmdb_zero::{
         open, put, traits::LmdbRaw, Cursor, CursorIter, DatabaseOptions, LmdbResultExt, MaybeOwned,
         ReadTransaction, WriteTransaction,
@@ -15,6 +16,7 @@ use {
 
 const GC_COOLDOWN: u64 = 60 * 60;
 
+// TODO: use lmdb instead
 #[derive(Default)]
 pub struct NodeProfiles {
     records: Vec<NodeProfile>,
@@ -41,7 +43,7 @@ impl<'a> Codec<'a> for NodeProfiles {
 impl NodeProfiles {
     fn load(metabase_root: &str) -> anyhow::Result<Self> {
         let path = std::path::Path::new(metabase_root).join("node_profiles");
-        let bytes = std::fs::read(&path)?;
+        let bytes = std::fs::read(path)?;
         Self::decode(&mut &bytes[..]).context("failed to decode node profiles")
     }
 
@@ -58,7 +60,7 @@ impl NodeProfiles {
         true
     }
 
-    pub fn request_gc(&mut self, identity: NodeIdentity, nonce: u64) -> Option<NodeId> {
+    pub fn request_gc(&mut self, identity: NodeIdentity, nonce: Nonce) -> Option<NodeId> {
         let current_time =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
@@ -157,7 +159,7 @@ impl<K: Copy, V: Copy> LmdbMap<K, V> {
 
 impl LmdbMap<Address, FileMeta> {
     pub fn get_files_for(&self, node: NodeId) -> anyhow::Result<Vec<Address>> {
-        // TODO: We need more scalable solution
+        // FIXME: find more scalable solution
         let rd = ReadTransaction::new(self.db.env()).context("creating transaction")?;
         let cursor = rd.cursor(&self.db).context("creating cursor")?;
 
@@ -219,13 +221,14 @@ impl Storage {
 
 #[derive(Clone, Copy, Default)]
 pub struct UserMeta {
-    pub nonce: u64,
+    pub nonce: Nonce,
 }
 
 #[derive(Default, Codec, Clone, Copy)]
 pub struct NodeProfile {
     pub identity: NodeIdentity,
-    pub nonce: u64,
+    pub nonce: Nonce,
+    pub our_nonce: Nonce,
     pub last_requested_gc: u64, // unix timestamp seconds
     pub free_blocks: FreeSpace,
 }

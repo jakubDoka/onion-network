@@ -102,7 +102,7 @@ run_nodes() {
 		echo "Starting node $EXE-$i"
 		export PORT=$(alloc_port)
 		export WS_PORT=$(alloc_port)
-		export MNEMONIC=$(load_mnemonic $EXE-$1)
+		export MNEMONIC=$(load_mnemonic $EXE-$i)
 		export NONCE=$(alloc_nonce)
 		$TARGET_DIR/$EXE > "logs/$EXE/$i.log" 2>&1 &
 	done

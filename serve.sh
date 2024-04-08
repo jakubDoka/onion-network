@@ -2,18 +2,18 @@
 
 creq() { [ -x "$(command -v $1)" ] || cargo install $1; }
 sod() { export "$1"="${!1:-$2}"; }
-is_running() { pgrep -f "$1" > /dev/null; }
+is_running() { pgrep "$1" > /dev/null; }
 
 creq trunk
 creq live-server
 creq subxt
 
 # args
-sod PROFILE         ""
-sod RELOAD_TOPOLOGY "false"
-sod REBUILD_CHAIN   "false"
-sod REBUILD_NATIVE  "false"
-sod REBUILD_CLIENT  "false"
+sod PROFILE          ""
+sod REBUILD_TOPOLOGY "false"
+sod REBUILD_CHAIN    "false"
+sod REBUILD_NATIVE   "false"
+sod REBUILD_CLIENT   "false"
 
 # config
 sod CHAIN_NODES       "ws://localhost:9944"
@@ -37,6 +37,7 @@ TOPOLOGY_ROOT="protocols/topology-vis"
 WALLET_INTEGRATION="chat/client/wallet-integration"
 FALCON_ROOT="crypto/falcon"
 TARGET_DIR="target/debug"
+CLIENT_ROOT="chat/client"
 if [ "$PROFILE" = "release" ]; then
 	FLAGS="--profile native-optimized"
 	WASM_FLAGS="--release"
@@ -62,8 +63,9 @@ rebuild_chain() { (cd chain/substrate-tests && cargo build --release); }
 rebuild_client() { (cd chat/client && trunk build $WASM_FLAGS || exit 1); }
 
 run_wasm() {
+	killall live-server
 	(cd $TOPOLOGY_ROOT/dist && live-server --host localhost --port $TOPOLOGY_PORT &)
-	(cd chat/client/dist && live-server --host localhost --port $FRONTEND_PORT &)
+	(cd $CLIENT_ROOT/dist && live-server --host localhost --port $FRONTEND_PORT &)
 }
 run_chat_servers() {
 	killall chat-server
@@ -88,21 +90,22 @@ run_chain() {
 
 	METADATA_FILE="chain/types/metadata.scale"
 	test -e $METADATA_FILE || subxt metadata > $METADATA_FILE
-	$TARGET_DIR/init-transfer || exit 1
+	$TARGET_DIR/init-transfer || exit 1 &
 }
 
 test -e $CHAIN_PATH && ! $REBUILD_CHAIN || rebuild_chain
 
 test -d $FALCON_ROOT/falcon              || generate_falcon
 test -d $WALLET_INTEGRATION/node_modules || init_npm
-is_running $CHAIN_NAME                   || run_chain
 
-test -e $TARGET_DIR/chat-server && ! $REBUILD_SERVERS  || rebuild_native
+is_running $CHAIN_NAME || run_chain
+
+test -e $TARGET_DIR/chat-server && ! $REBUILD_NATIVE   || rebuild_native
 test -d $TOPOLOGY_ROOT/dist     && ! $REBUILD_TOPOLOGY || rebuild_topology
-test -d chat/client/dist        && ! $REBUILD_CLIENT   || rebuild_client
+test -d $CLIENT_ROOT/dist       && ! $REBUILD_CLIENT   || rebuild_client
 
-run_chat_servers
-run_wasm
+is_running chat-server || run_chat_servers
+is_running live-server || run_wasm
 
 while read -r line; do
 	case "$line" in
@@ -127,6 +130,7 @@ while read -r line; do
 			;;
 		"killall")
 			killall chat-server $CHAIN_NAME live-server
+			exit 0
 			;;
 		"exit")
 			exit 0

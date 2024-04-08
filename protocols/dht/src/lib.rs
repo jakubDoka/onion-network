@@ -115,11 +115,11 @@ impl RoutingTable {
     }
 
     pub fn insert(&mut self, route: Route) {
+        self.remove(route.id.into());
         self.routes.push(route);
     }
 
-    pub fn remove(&mut self, id: PeerId) -> Option<Route> {
-        let id = try_peer_id_to_ed(id)?;
+    pub fn remove(&mut self, id: [u8; 32]) -> Option<Route> {
         let index = self.routes.iter().position(|r| r.id == id.into())?;
         Some(self.routes.remove(index))
     }
@@ -158,8 +158,8 @@ pub struct Route {
 
 impl Route {
     #[must_use]
-    pub fn new(id: ed25519::PublicKey, addr: Multiaddr) -> Self {
-        let id = U256::from(id.to_bytes());
+    pub fn new(id: [u8; 32], addr: Multiaddr) -> Self {
+        let id = U256::from(id);
         Self { id, addr }
     }
 

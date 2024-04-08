@@ -11,7 +11,6 @@ use {
     crypto::{
         enc,
         proof::{Nonce, Proof},
-        sign,
     },
     dht::Route,
     libp2p::{
@@ -20,7 +19,6 @@ use {
             channel::{mpsc, oneshot},
             StreamExt,
         },
-        identity::ed25519,
         swarm::{NetworkBehaviour, SwarmEvent},
         *,
     },
@@ -94,11 +92,6 @@ impl Node {
                 .with_idle_connection_timeout(Duration::from_secs(2)),
         );
 
-        fn unpack_node_id(id: sign::Pre) -> anyhow::Result<ed25519::PublicKey> {
-            libp2p::identity::ed25519::PublicKey::try_from_bytes(&id)
-                .context("deriving ed signature")
-        }
-
         fn unpack_node_addr(addr: chain_api::NodeAddress) -> Multiaddr {
             let (addr, port) = addr.into();
             Multiaddr::empty()
@@ -119,9 +112,8 @@ impl Node {
         let nodes = node_data
             .into_iter()
             .map(|stake| {
-                let id = unpack_node_id(stake.id).unwrap();
                 let addr = unpack_node_addr(stake.addr);
-                Ok(Route::new(id, addr))
+                Ok(Route::new(stake.id, addr))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         swarm.behaviour_mut().dht.table.bulk_insert(nodes);

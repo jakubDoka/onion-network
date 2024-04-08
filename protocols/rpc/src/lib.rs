@@ -460,7 +460,7 @@ mod test {
 
             for (j, pk) in public_keys.iter().enumerate() {
                 swarm.behaviour_mut().dht.table.insert(Route::new(
-                    pk.clone(),
+                    pk.to_bytes(),
                     Multiaddr::empty()
                         .with(Protocol::Ip4(Ipv4Addr::LOCALHOST))
                         .with(Protocol::Tcp(3000 + j as u16)),

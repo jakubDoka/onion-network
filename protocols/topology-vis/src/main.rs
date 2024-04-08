@@ -418,8 +418,7 @@ async fn main() {
         log::info!("detected {} nodes", nodes.len());
         for node in nodes {
             let ip = node.addr;
-            let id = libp2p::identity::ed25519::PublicKey::try_from_bytes(&node.id).unwrap();
-            let route = Route::new(id, unpack_node_addr(ip));
+            let route = Route::new(node.id, unpack_node_addr(ip));
             let peer_id = route.peer_id();
             swarm.behaviour_mut().dht.table.insert(route);
             swarm.behaviour_mut().collector.world_mut().0.borrow_mut().servers.insert(peer_id);

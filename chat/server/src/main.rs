@@ -18,14 +18,12 @@ use {
     chain_api::{NodeKeys, Stake},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
-    crypto::sign,
     dashmap::{mapref::entry::Entry, DashMap},
     dht::Route,
     futures::channel::mpsc,
     libp2p::{
         core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
         futures::{self, channel::oneshot, SinkExt, StreamExt},
-        identity::ed25519,
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId, Transport,
     },
@@ -111,10 +109,6 @@ struct Server {
     server_router: handlers::Router<api::RouterContext>,
     stake_events: StakeEvents,
     pending_rpcs: HashMap<CallId, RpcRespChannel>,
-}
-
-fn unpack_node_id(id: sign::Pre) -> anyhow::Result<ed25519::PublicKey> {
-    libp2p::identity::ed25519::PublicKey::try_from_bytes(&id).context("deriving ed signature")
 }
 
 fn unpack_node_addr(addr: chain_api::NodeAddress) -> Multiaddr {
@@ -296,9 +290,8 @@ impl Server {
         let node_data = node_list
             .into_iter()
             .map(|stake| {
-                let pk = unpack_node_id(stake.id)?;
                 let addr = unpack_node_addr(stake.addr);
-                Ok(Route::new(pk, addr))
+                Ok(Route::new(stake.id, addr))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         swarm.behaviour_mut().dht.table.bulk_insert(node_data);
@@ -505,33 +498,14 @@ impl Server {
 
         match event {
             chain_api::StakeEvent::Joined { identity, addr } => {
-                let Ok(pk) = unpack_node_id(identity) else {
-                    log::warn!("invalid node id");
-                    return;
-                };
-                log::debug!("node joined the network: {pk:?}");
-                let route = Route::new(pk, unpack_node_addr(addr));
+                let route = Route::new(identity, unpack_node_addr(addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
             chain_api::StakeEvent::Reclaimed { identity } => {
-                let Ok(pk) = unpack_node_id(identity) else {
-                    log::warn!("invalid node id");
-                    return;
-                };
-                log::debug!("node left the network: {pk:?}");
-                self.swarm
-                    .behaviour_mut()
-                    .dht
-                    .table
-                    .remove(libp2p::identity::PublicKey::from(pk).to_peer_id());
+                self.swarm.behaviour_mut().dht.table.remove(identity);
             }
             chain_api::StakeEvent::AddrChanged { identity, addr } => {
-                let Ok(pk) = unpack_node_id(identity) else {
-                    log::warn!("invalid node id");
-                    return;
-                };
-                log::debug!("node changed address: {pk:?}");
-                let route = Route::new(pk, unpack_node_addr(addr));
+                let route = Route::new(identity, unpack_node_addr(addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
         }

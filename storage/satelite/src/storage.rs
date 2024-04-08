@@ -9,6 +9,7 @@ use {
     rand_core::OsRng,
     std::{
         collections::{hash_map::Entry, HashMap},
+        net::SocketAddr,
         sync::RwLock,
     },
     storage_spec::*,
@@ -47,7 +48,13 @@ impl NodeProfiles {
         Self::decode(&mut &bytes[..]).context("failed to decode node profiles")
     }
 
-    pub fn register_node(&mut self, identity: NodeIdentity, free_blocks: FreeSpace) -> bool {
+    pub fn register_node(
+        &mut self,
+        identity: NodeIdentity,
+        pre_identity: NodeIdentity,
+        addr: SocketAddr,
+        free_blocks: FreeSpace,
+    ) -> bool {
         let id = self.records.len() as NodeId;
         let Entry::Vacant(entry) = self.identity_to_id.entry(identity) else {
             return false;
@@ -55,7 +62,15 @@ impl NodeProfiles {
 
         entry.insert(id);
         self.free_space_index.push((free_blocks, id));
-        self.records.push(NodeProfile { identity, free_blocks, ..Default::default() });
+        self.records.push(NodeProfile {
+            identity,
+            free_blocks,
+            pre_identity,
+            nonce: 0,
+            our_nonce: 0,
+            last_requested_gc: 0,
+            addr,
+        });
 
         true
     }
@@ -94,6 +109,22 @@ impl NodeProfiles {
 
     pub fn expand_holders(&self, holders: [NodeId; MAX_PIECES]) -> [NodeIdentity; MAX_PIECES] {
         holders.map(|id| self.records[id as usize].identity)
+    }
+
+    pub fn update_addr(&mut self, identity: NodeIdentity, nonce: Nonce, addr: SocketAddr) -> bool {
+        let Some(&id) = self.identity_to_id.get(&identity) else {
+            return false;
+        };
+        let profile = &mut self.records[id as usize];
+
+        if profile.nonce + 1 != nonce {
+            return false;
+        }
+
+        profile.nonce += 1;
+        profile.addr = addr;
+
+        true
     }
 }
 
@@ -224,13 +255,15 @@ pub struct UserMeta {
     pub nonce: Nonce,
 }
 
-#[derive(Default, Codec, Clone, Copy)]
+#[derive(Codec, Clone, Copy)]
 pub struct NodeProfile {
     pub identity: NodeIdentity,
+    pub pre_identity: NodeIdentity,
     pub nonce: Nonce,
     pub our_nonce: Nonce,
     pub last_requested_gc: u64, // unix timestamp seconds
     pub free_blocks: FreeSpace,
+    pub addr: SocketAddr,
 }
 
 #[repr(packed)]

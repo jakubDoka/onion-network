@@ -39,6 +39,7 @@ pub mod rpcs {
 
         // node to satellite
         REGISTER_NODE;
+        HEARTBEAT;
         GET_GC_META;
 
         // client to satellite
@@ -110,6 +111,8 @@ pub enum NodeError {
     InvalidNonce(u64),
     #[error("store thrown unexpected error, actual message is logged")]
     StoreError,
+    #[error("invalid address, expected ip followed by port in the multiaddr format")]
+    InvalidAddress,
 }
 
 impl From<anyhow::Error> for NodeError {

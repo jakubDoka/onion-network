@@ -1,3 +1,4 @@
+#![feature(if_let_guard)]
 #![feature(slice_take)]
 #![feature(never_type)]
 use {
@@ -7,6 +8,7 @@ use {
     codec::Codec,
     component_utils::futures::StreamExt,
     libp2p::{
+        core::ConnectedPoint,
         multiaddr::Protocol,
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId,
@@ -86,6 +88,7 @@ impl Satelite {
                 };
                 node => {
                     rpcs::REGISTER_NODE => register;
+                    rpcs::HEARTBEAT => heartbeat;
                     rpcs::GET_GC_META => get_gc_meta;
                 };
             },
@@ -95,6 +98,14 @@ impl Satelite {
     fn swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         let beh = match event {
             SwarmEvent::Behaviour(beh) => beh,
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                endpoint: ConnectedPoint::Listener { send_back_addr, .. },
+                ..
+            } if let Some(pk) = dht::try_peer_id_to_ed(peer_id) => {
+                self.swarm.behaviour_mut().dht.table.insert(dht::Route::new(pk, send_back_addr));
+                return;
+            }
             _ => return,
         };
 
@@ -105,7 +116,12 @@ impl Satelite {
                     return;
                 };
 
-                self.router.handle(State { req, id, origin, context: self.context });
+                let Some(addr) = self.swarm.behaviour().dht.table.get(origin).cloned() else {
+                    log::warn!("no route to {:?}", origin);
+                    return;
+                };
+
+                self.router.handle(State { req, id, origin, context: self.context, addr });
             }
             _ => {}
         }
@@ -166,6 +182,7 @@ struct State<'a> {
     req: storage_spec::Request<'a>,
     id: CallId,
     origin: PeerId,
+    addr: Multiaddr,
     context: Context,
 }
 
@@ -182,4 +199,5 @@ struct OwnedContext {
 
 handlers::quick_impl_from_request! { State<'_> => [
     Context => |state| state.context,
+    Multiaddr => |state| state.addr.clone(),
 ]}

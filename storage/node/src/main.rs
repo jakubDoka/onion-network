@@ -37,7 +37,6 @@ mod storage;
 
 type Context = &'static OwnedContext;
 
-// TODO: add disk space limit that we can check when saving files
 config::env_config! {
     struct Config {
         port: u16 = "8080",
@@ -45,6 +44,7 @@ config::env_config! {
         satelites: config::List<config::Hex> = "",
         keys: String = "node.keys",
         storage_dir: String = "storage",
+        disk_limit_gb: u64 = "100",
     }
 }
 

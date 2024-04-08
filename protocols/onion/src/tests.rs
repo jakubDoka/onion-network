@@ -224,7 +224,7 @@ async fn settle_down() {
         let addr = libp2p::core::Multiaddr::empty()
             .with(Protocol::Ip4(Ipv4Addr::LOCALHOST))
             .with(Protocol::Tcp(first_port + i as u16));
-        Route::new(k, addr)
+        Route::new(k.to_bytes(), addr)
     }));
 
     let (swarms, node_data): (Vec<_>, Vec<_>) = kps

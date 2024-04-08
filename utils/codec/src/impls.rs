@@ -1,6 +1,11 @@
 use {
     crate::{Buffer, Codec, Reminder},
-    core::{convert::Infallible, marker::PhantomData, ops::Range},
+    core::{
+        convert::Infallible,
+        marker::PhantomData,
+        net::{IpAddr, SocketAddr},
+        ops::Range,
+    },
 };
 
 #[cfg(feature = "arrayvec")]
@@ -66,6 +71,62 @@ impl<'a, T> Codec<'a> for PhantomData<T> {
 
     fn decode(_: &mut &'a [u8]) -> Option<Self> {
         Some(Self)
+    }
+}
+
+impl<'a> Codec<'a> for SocketAddr {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        self.ip().encode(buffer)?;
+        self.port().encode(buffer)
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        Some(Self::new(<IpAddr>::decode(buffer)?, <u16>::decode(buffer)?))
+    }
+}
+
+impl<'a> Codec<'a> for IpAddr {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        match self {
+            IpAddr::V4(v4) => {
+                0u8.encode(buffer)?;
+                v4.encode(buffer)
+            }
+            IpAddr::V6(v6) => {
+                1u8.encode(buffer)?;
+                v6.encode(buffer)
+            }
+        }
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        match <u8>::decode(buffer)? {
+            0 => std::net::Ipv4Addr::decode(buffer).map(IpAddr::V4),
+            1 => std::net::Ipv6Addr::decode(buffer).map(IpAddr::V6),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> Codec<'a> for std::net::Ipv4Addr {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        buffer.extend_from_slice(&self.octets())
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let octets = <[u8; 4]>::decode(buffer)?;
+        Some(Self::from(octets))
+    }
+}
+
+impl<'a> Codec<'a> for std::net::Ipv6Addr {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        buffer.extend_from_slice(&self.octets())
+    }
+
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let octets = <[u8; 16]>::decode(buffer)?;
+        Some(Self::from(octets))
     }
 }
 

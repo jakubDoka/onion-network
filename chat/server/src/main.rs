@@ -70,7 +70,6 @@ config::env_config! {
         port: u16,
         ws_port: u16,
         key_path: String,
-        boot_nodes: config::List<Multiaddr>,
         idle_timeout: u64,
         rpc_timeout: u64,
     }
@@ -209,7 +208,7 @@ impl Server {
         node_list: Vec<Stake>,
         stake_events: StakeEvents,
     ) -> anyhow::Result<Self> {
-        let NodeConfig { port, ws_port, boot_nodes, idle_timeout, .. } = config;
+        let NodeConfig { port, ws_port, idle_timeout, .. } = config;
 
         let local_key = libp2p::identity::Keypair::ed25519_from_bytes(keys.sign.pre_quantum())
             .context("deriving ed signature")?;
@@ -295,10 +294,6 @@ impl Server {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         swarm.behaviour_mut().dht.table.bulk_insert(node_data);
-
-        for boot_node in boot_nodes.0 {
-            swarm.dial(boot_node).context("dialing a boot peer")?;
-        }
 
         let (request_event_sink, request_events) = mpsc::channel(100);
 

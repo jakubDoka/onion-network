@@ -425,7 +425,6 @@ fn next_node_config() -> NodeConfig {
         port: port * 2 + 5000,
         ws_port: port * 2 + 1 + 5000,
         key_path: Default::default(),
-        boot_nodes: config::List::default(),
         idle_timeout: 1000,
         rpc_timeout: 10000,
     }

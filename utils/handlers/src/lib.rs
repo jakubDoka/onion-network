@@ -328,6 +328,21 @@ impl<'a, 'b, C> Selector<'a, 'b, C> {
 
         self
     }
+
+    pub fn try_stream<S, O, E>(
+        self,
+        stream: impl FnMut(&mut C) -> &mut S,
+        mut f: impl FnMut(&mut C, O),
+        mut log: impl FnMut(&mut C, E),
+    ) -> Self
+    where
+        S: Stream<Item = Result<O, E>> + Unpin + StreamIsEmpty,
+    {
+        self.stream(stream, |context, event| match event {
+            Ok(event) => f(context, event),
+            Err(e) => log(context, e),
+        })
+    }
 }
 
 pub trait StreamIsEmpty {

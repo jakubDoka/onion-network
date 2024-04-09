@@ -344,7 +344,7 @@ impl Stream {
         futures::select! {
             _ = nodes.select_next_some() => unreachable!(),
             res = self.next().fuse() => {
-                let res = res.unwrap().1.unwrap();
+                let res = res.unwrap().unwrap().1;
                 {
                     let (_, resp) = <(CallId, T)>::decode(&mut unsafe { std::mem::transmute(res.as_slice()) }).unwrap();
                     assert_eq!(resp, expected);
@@ -375,7 +375,7 @@ async fn response<'a, R: PartialEq + Debug + Codec<'a>>(
     futures::select! {
         _ = nodes.select_next_some() => unreachable!(),
         res = stream.next().fuse() => {
-            let res = res.unwrap().1.unwrap();
+            let res = res.unwrap().unwrap().1;
             {
                 log::debug!("res: {:?} {:?}", res, std::any::type_name::<R>());
                 let (_, resp) = <(CallId, R)>::decode(&mut unsafe { std::mem::transmute(res.as_slice()) }).unwrap();

@@ -6,7 +6,7 @@
 
 use {
     anyhow::Context as _,
-    chain_api::{Mnemonic, NodeKeys},
+    chain_api::{Mnemonic, NodeKeys, SateliteStakeEvent, StakeEvents},
     codec::Codec,
     component_utils::PacketReader,
     libp2p::{
@@ -53,7 +53,9 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let storage = storage::Storage::new(&config.storage_dir)?;
     let keys = NodeKeys::from_mnemonic(&config.mnemonic);
-    let satelite = Node::new(config, storage, keys)?;
+    let (satelites, events) =
+        chain_api::ChainConfig::from_env()?.connect_satelite(&keys, false).await?;
+    let satelite = Node::new(config, storage, keys, events)?;
     satelite.await?
 }
 
@@ -64,11 +66,17 @@ struct Node {
     request_events: mpsc::Receiver<RequestEvent>,
     pending_streams:
         HashMap<(CallId, PeerId), Result<oneshot::Sender<libp2p::Stream>, libp2p::Stream>>,
+    stake_events: StakeEvents<SateliteStakeEvent>,
     stream_negots: FuturesUnordered<StreamIdentification>,
 }
 
 impl Node {
-    fn new(config: Config, storage: storage::Storage, keys: NodeKeys) -> anyhow::Result<Self> {
+    fn new(
+        config: Config,
+        storage: storage::Storage,
+        keys: NodeKeys,
+        stake_events: StakeEvents<SateliteStakeEvent>,
+    ) -> anyhow::Result<Self> {
         let identity =
             libp2p::identity::ed25519::Keypair::try_from_bytes(&mut keys.sign.pre_quantum())
                 .context("invalid identity")?;
@@ -110,6 +118,7 @@ impl Node {
             },
             request_events: rc,
             pending_streams: Default::default(),
+            stake_events,
             stream_negots: Default::default(),
         })
     }
@@ -162,13 +171,7 @@ impl Node {
         }
     }
 
-    fn stream_negot(&mut self, event: io::Result<(StreamKind, libp2p::Stream, PeerId)>) {
-        let Ok((kind, stream, peer)) =
-            event.inspect_err(|e| log::warn!("stream negotiation failed: {e:#}"))
-        else {
-            return;
-        };
-
+    fn stream_negot(&mut self, (kind, stream, peer): (StreamKind, libp2p::Stream, PeerId)) {
         match kind {
             StreamKind::RequestStream(cid) => match self.pending_streams.entry((cid, peer)) {
                 hash_map::Entry::Occupied(o) => {
@@ -182,6 +185,14 @@ impl Node {
             },
         }
     }
+
+    fn stake_event(&mut self, event: SateliteStakeEvent) {
+        match event {
+            SateliteStakeEvent::Joined { identity, addr } => todo!(),
+            SateliteStakeEvent::AddrChanged { identity, addr } => todo!(),
+            SateliteStakeEvent::Reclaimed { identity } => todo!(),
+        }
+    }
 }
 
 impl Future for Node {
@@ -193,11 +204,15 @@ impl Future for Node {
     ) -> Poll<Self::Output> {
         use handlers::field as f;
 
+        let log_negot = |_: &mut Self, e| log::warn!("stream negotiation failed: {e}");
+        let log_stake = |_: &mut Self, e| log::error!("stake event stream failure: {e}");
+
         while handlers::Selector::new(self.deref_mut(), cx)
             .stream(f!(mut swarm), Self::swarm_event)
             .stream(f!(mut router), Self::router_event)
             .stream(f!(mut request_events), Self::request_event)
-            .stream(f!(mut stream_negots), Self::stream_negot)
+            .try_stream(f!(mut stream_negots), Self::stream_negot, log_negot)
+            .try_stream(f!(mut stake_events), Self::stake_event, log_stake)
             .done()
         {}
 

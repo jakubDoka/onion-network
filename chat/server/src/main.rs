@@ -255,7 +255,7 @@ impl Server {
         })
     }
 
-    fn handle_event(&mut self, event: SE) {
+    fn swarm_event(&mut self, event: SE) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Request(peer, id, body))) => {
                 let Some((prefix, topic, body)) =
@@ -296,11 +296,7 @@ impl Server {
         }
     }
 
-    fn handle_client_message(&mut self, (id, req): (PathId, io::Result<Vec<u8>>)) {
-        let Ok(req) = req.inspect_err(|e| log::warn!("failed to read from client: {}", e)) else {
-            return;
-        };
-
+    fn client_message(&mut self, (id, req): (PathId, Vec<u8>)) {
         let Some(req) = chat_spec::Request::decode(&mut req.as_slice()) else {
             log::warn!("failed to decode client request: {:?}", req);
             return;
@@ -397,11 +393,7 @@ impl Server {
         })
     }
 
-    fn handle_stake_event(&mut self, event: Result<ChatStakeEvent, chain_api::Error>) {
-        let Ok(event) = event.inspect_err(|e| log::warn!("failed to read from chain: {e}")) else {
-            return;
-        };
-
+    fn stake_event(&mut self, event: ChatStakeEvent) {
         match event {
             ChatStakeEvent::Joined { identity, addr } => {
                 let route = Route::new(identity, unpack_node_addr(addr));
@@ -504,7 +496,7 @@ impl Server {
         }
     }
 
-    fn handle_server_router_response(
+    fn server_router_response(
         &mut self,
         (res, (loc, id)): (handlers::Response, (OnlineLocation, CallId)),
     ) {
@@ -518,7 +510,7 @@ impl Server {
         };
     }
 
-    fn handle_client_router_response(
+    fn client_router_response(
         &mut self,
         (res, (loc, id)): (handlers::Response, (OnlineLocation, CallId)),
     ) {
@@ -549,12 +541,15 @@ impl Future for Server {
     ) -> Poll<Self::Output> {
         use handlers::field as f;
 
+        let log_message = |_: &mut Self, e| log::warn!("failed to read client message: {e}");
+        let log_stake = |_: &mut Self, e| log::warn!("failed to read stake event: {e}");
+
         while handlers::Selector::new(self.deref_mut(), cx)
-            .stream(f!(mut clients), Self::handle_client_message)
-            .stream(f!(mut swarm), Self::handle_event)
-            .stream(f!(mut stake_events), Self::handle_stake_event)
-            .stream(f!(mut client_router), Self::handle_client_router_response)
-            .stream(f!(mut server_router), Self::handle_server_router_response)
+            .try_stream(f!(mut clients), Self::client_message, log_message)
+            .stream(f!(mut swarm), Self::swarm_event)
+            .try_stream(f!(mut stake_events), Self::stake_event, log_stake)
+            .stream(f!(mut client_router), Self::client_router_response)
+            .stream(f!(mut server_router), Self::server_router_response)
             .stream(f!(mut request_events), |s, event| match event {
                 RequestEvent::Profile(identity, event, resp) => {
                     s.handle_profile_event(identity, event, resp)
@@ -636,16 +631,16 @@ impl Stream {
 }
 
 impl libp2p::futures::Stream for Stream {
-    type Item = (PathId, io::Result<Vec<u8>>);
+    type Item = io::Result<(PathId, Vec<u8>)>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         match &mut self.inner {
-            InnerStream::Normal(n) => n.poll_next_unpin(cx).map(|v| v.map(|v| (self.id, v))),
+            InnerStream::Normal(n) => n.poll_next_unpin(cx).map_ok(|v| (self.id, v)),
             #[cfg(test)]
-            InnerStream::Test(t, _) => t.poll_next_unpin(cx).map(|v| v.map(|v| (self.id, Ok(v)))),
+            InnerStream::Test(t, _) => t.poll_next_unpin(cx).map(|v| v.map(|v| Ok((self.id, v)))),
         }
     }
 }

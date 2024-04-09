@@ -1,5 +1,7 @@
+use config::EnvError;
+
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), EnvError> {
     config::env_config! {
         struct Config {
             test_wallets: config::List<chain_api::AccountId>,
@@ -8,7 +10,7 @@ async fn main() {
         }
     }
 
-    let Config { test_wallets, balance, chain_nodes } = Config::from_env();
+    let Config { test_wallets, balance, chain_nodes } = Config::from_env()?;
 
     let client =
         chain_api::Client::with_signer(chain_nodes.as_str(), chain_api::dev_keypair("//Bob"))
@@ -18,4 +20,6 @@ async fn main() {
     for (i, wallet) in test_wallets.0.into_iter().enumerate() {
         client.transfere(wallet, balance, i as _).await.unwrap();
     }
+
+    Ok(())
 }

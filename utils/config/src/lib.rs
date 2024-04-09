@@ -6,7 +6,7 @@ use std::str::FromStr;
 macro_rules! env_config {
     (
        struct $name:ident {$(
-            $field:ident: $ty:ty $(= $default:expr)?,
+            $field:ident: $ty:ty,
        )*}
     ) => {
         pub struct $name {$(
@@ -14,34 +14,60 @@ macro_rules! env_config {
         )*}
 
         impl $name {
-            pub fn from_env() -> Self {
-                $name {$(
-                    $field: $crate::get_env(stringify!($field), $crate::env_config!(@default $($default)?)),
-                )*}
+            pub fn from_env() -> Result<Self, $crate::EnvError> {
+                let mut errors = Vec::new();
+
+                $(
+                    let $field = $crate::get_env(stringify!($field))
+                        .map_err(|e| errors.push(e));
+                )*
+
+                match errors.len() {
+                    0 => Ok(Self { $( $field: $field.unwrap(),)* }),
+                    1 => Err(errors.pop().unwrap()),
+                    _ => Err($crate::EnvError::MultipleErrors(errors)),
+                }
             }
         }
     };
-
-    (@default $value:expr) => { Some($value) };
-    (@default ) => { None };
 }
 
 #[must_use]
-pub fn get_env<T: std::str::FromStr>(key: &str, default: Option<&str>) -> T
+pub fn get_env<T: std::str::FromStr>(key: &'static str) -> Result<T, EnvError>
 where
     T::Err: std::fmt::Display,
 {
     let key = key.to_uppercase();
-    if cfg!(debug_assertions)
-        && let Some(default) = default
-    {
-        std::env::var(&key).unwrap_or_else(|_| default.to_string())
-    } else {
-        std::env::var(&key).unwrap_or_else(|_| panic!("{key} is not set"))
-    }
-    .parse()
-    .unwrap_or_else(|e| panic!("{key} is not valid {}: {e:#}", std::any::type_name::<T>()))
+    std::env::var(&key)
+        .map_err(|_| EnvError::KeyNotFound(key.clone()))?
+        .parse::<T>()
+        .map_err(|e| EnvError::ParseError(key, std::any::type_name::<T>(), e.to_string()))
 }
+
+#[derive(Debug)]
+pub enum EnvError {
+    KeyNotFound(String),
+    ParseError(String, &'static str, String),
+    MultipleErrors(Vec<EnvError>),
+}
+
+impl std::fmt::Display for EnvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeyNotFound(key) => write!(f, "key not found: {key}"),
+            Self::ParseError(key, ty, value) => write!(f, "failed to parse {key} as {ty}: {value}"),
+            Self::MultipleErrors(errors) => {
+                write!(f, "multiple env errors:")?;
+                for error in errors {
+                    write!(f, "\n  {error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for EnvError {}
 
 pub struct List<T>(pub Vec<T>);
 

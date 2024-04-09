@@ -25,15 +25,15 @@ type Context = &'static OwnedContext;
 
 config::env_config! {
     struct Config {
-        port: u16 = "8080",
-        metabase_root: String = "metabase",
+        port: u16,
+        metabase_root: String,
         mnemonic: Mnemonic,
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::from_env();
+    let config = Config::from_env()?;
     let db = Storage::new(&config.metabase_root)?;
     let keys = NodeKeys::from_mnemonic(&config.mnemonic);
     let satelite = Satelite::new(config, db, keys)?;

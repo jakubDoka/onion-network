@@ -50,7 +50,7 @@ config::env_config! {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::from_env();
+    let config = Config::from_env()?;
     let storage = storage::Storage::new(&config.storage_dir)?;
     let keys = NodeKeys::from_mnemonic(&config.mnemonic);
     let satelite = Node::new(config, storage, keys)?;

@@ -378,17 +378,19 @@ impl ChainConfig {
     pub async fn connect_satelite(
         self,
         keys: &NodeKeys,
+        register: bool,
     ) -> anyhow::Result<(Vec<SateliteStake>, StakeEvents<SateliteStakeEvent>)> {
         let tx = chain_types::storage().satelite_staker().stakes_iter();
-        self.connect(keys, tx, "SateliteStaker", unwrap_satelite_staker).await
+        self.connect(keys, tx, "SateliteStaker", unwrap_satelite_staker, register).await
     }
 
     pub async fn connect_chat(
         self,
         keys: &NodeKeys,
+        register: bool,
     ) -> anyhow::Result<(Vec<ChatStake>, StakeEvents<ChatStakeEvent>)> {
         let tx = chain_types::storage().chat_staker().stakes_iter();
-        self.connect(keys, tx, "ChatStaker", unwrap_chat_staker).await
+        self.connect(keys, tx, "ChatStaker", unwrap_chat_staker, register).await
     }
 
     async fn connect<SA, E>(
@@ -397,6 +399,7 @@ impl ChainConfig {
         tx: SA,
         pallet_name: &'static str,
         unwrap: fn(chain_types::Event) -> Option<E>,
+        register: bool,
     ) -> anyhow::Result<(Vec<SA::Target>, StakeEvents<E>)>
     where
         SA: StorageAddress<IsIterable = Yes> + 'static + Clone,
@@ -448,7 +451,7 @@ impl ChainConfig {
             }
         });
 
-        if node_list.iter().all(|s| s.id() != keys.sign.public_key().pre) {
+        if register && node_list.iter().all(|s| s.id() != keys.sign.public_key().pre) {
             let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
             client
                 .join(keys.to_stored(), (exposed_address, port).into(), nonce)

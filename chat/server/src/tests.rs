@@ -5,7 +5,7 @@ use {
     crypto::proof::Proof,
     libp2p::futures::{stream::FuturesUnordered, FutureExt, TryStreamExt},
     rand_core::OsRng,
-    std::{fmt::Debug, usize},
+    std::{fmt::Debug, net::IpAddr, usize},
 };
 
 type Result<T> = std::result::Result<T, ChatError>;

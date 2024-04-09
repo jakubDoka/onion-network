@@ -185,14 +185,6 @@ impl Node {
             },
         }
     }
-
-    fn stake_event(&mut self, event: SateliteStakeEvent) {
-        match event {
-            SateliteStakeEvent::Joined { identity, addr } => todo!(),
-            SateliteStakeEvent::AddrChanged { identity, addr } => todo!(),
-            SateliteStakeEvent::Reclaimed { identity } => todo!(),
-        }
-    }
 }
 
 impl Future for Node {
@@ -212,11 +204,17 @@ impl Future for Node {
             .stream(f!(mut router), Self::router_event)
             .stream(f!(mut request_events), Self::request_event)
             .try_stream(f!(mut stream_negots), Self::stream_negot, log_negot)
-            .try_stream(f!(mut stake_events), Self::stake_event, log_stake)
+            .try_stream(f!(mut stake_events), chain_api::stake_event, log_stake)
             .done()
         {}
 
         Poll::Pending
+    }
+}
+
+impl AsMut<dht::Behaviour> for Node {
+    fn as_mut(&mut self) -> &mut dht::Behaviour {
+        &mut self.swarm.behaviour_mut().dht
     }
 }
 

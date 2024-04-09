@@ -1,11 +1,12 @@
+use {
+    polkadot::runtime_types::pallet_node_staker::pallet::{Event as PNSE, Event2 as PNSE2},
+    runtime_types::pallet_node_staker::pallet::{NodeAddress, Stake},
+    std::net::IpAddr,
+};
 pub use {
     polkadot::*,
     subxt::{self, ext::*, Error, PolkadotConfig as Config},
     subxt_signer::{self, sr25519::Keypair},
-};
-use {
-    runtime_types::pallet_node_staker::pallet::{NodeAddress, Stake},
-    std::net::IpAddr,
 };
 
 pub type AccountId = <Config as subxt::config::Config>::AccountId;
@@ -36,6 +37,16 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
     )
 )]
 mod polkadot {}
+
+impl From<PNSE2> for PNSE {
+    fn from(event: PNSE2) -> Self {
+        match event {
+            PNSE2::Joined { identity, addr } => PNSE::Joined { identity, addr },
+            PNSE2::AddrChanged { identity, addr } => PNSE::AddrChanged { identity, addr },
+            PNSE2::Reclaimed { identity } => PNSE::Reclaimed { identity },
+        }
+    }
+}
 
 impl Stake {
     pub fn fake() -> Self {

@@ -28,9 +28,7 @@ use {
         collections::{BTreeMap, HashMap, HashSet},
         convert::Infallible,
         future::Future,
-        io,
-        net::IpAddr,
-        pin,
+        io, pin,
         task::Poll,
         time::Duration,
     },
@@ -92,17 +90,6 @@ impl Node {
                 .with_idle_connection_timeout(Duration::from_secs(2)),
         );
 
-        fn unpack_node_addr(addr: chain_api::NodeAddress) -> Multiaddr {
-            let (addr, port) = addr.into();
-            Multiaddr::empty()
-                .with(match addr {
-                    IpAddr::V4(ip) => multiaddr::Protocol::Ip4(ip),
-                    IpAddr::V6(ip) => multiaddr::Protocol::Ip6(ip),
-                })
-                .with(multiaddr::Protocol::Tcp(port + 100))
-                .with(multiaddr::Protocol::Ws("/".into()))
-        }
-
         let node_count = node_data.len();
         let tolerance = 0;
         set_state!(CollecringKeys(
@@ -112,7 +99,8 @@ impl Node {
         let nodes = node_data
             .into_iter()
             .map(|stake| {
-                let addr = unpack_node_addr(stake.addr);
+                let addr = chain_api::unpack_node_addr(stake.addr)
+                    .with(multiaddr::Protocol::Ws("/".into()));
                 Ok(Route::new(stake.id, addr))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

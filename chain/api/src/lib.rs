@@ -8,6 +8,7 @@ use {
         sign,
     },
     futures::{SinkExt, StreamExt, TryStreamExt},
+    libp2p::{multiaddr, Multiaddr},
     rand_chacha::ChaChaRng,
     std::{fs, io, net::IpAddr, str::FromStr},
     subxt::{
@@ -464,4 +465,25 @@ impl ChainConfig {
 
         Ok((node_list, stake_events))
     }
+}
+
+pub fn stake_event(s: &mut impl AsMut<dht::Behaviour>, event: impl Into<ChatStakeEvent>) {
+    let dht = s.as_mut();
+    match event.into() {
+        ChatStakeEvent::Joined { identity, addr }
+        | ChatStakeEvent::AddrChanged { identity, addr } => {
+            dht.table.insert(dht::Route::new(identity, unpack_node_addr(addr)));
+        }
+        ChatStakeEvent::Reclaimed { identity } => _ = dht.table.remove(identity),
+    }
+}
+
+pub fn unpack_node_addr(addr: NodeAddress) -> Multiaddr {
+    let (addr, port) = addr.into();
+    Multiaddr::empty()
+        .with(match addr {
+            IpAddr::V4(ip) => multiaddr::Protocol::Ip4(ip),
+            IpAddr::V6(ip) => multiaddr::Protocol::Ip6(ip),
+        })
+        .with(multiaddr::Protocol::Tcp(port))
 }

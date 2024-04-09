@@ -2,14 +2,13 @@ use {
     dht::Route,
     libp2p::{
         core::upgrade::Version, futures::StreamExt, multiaddr, swarm::NetworkBehaviour,
-        websocket_websys, Multiaddr, PeerId, Transport,
+        websocket_websys, PeerId, Transport,
     },
     macroquad::prelude::*,
     std::{
         cell::RefCell,
         collections::{BTreeMap, HashSet},
         mem,
-        net::IpAddr,
     },
     wasm_bindgen_futures::spawn_local,
 };
@@ -397,17 +396,6 @@ async fn main() {
         libp2p::swarm::Config::with_wasm_executor(),
     );
 
-    fn unpack_node_addr(addr: chain_api::NodeAddress) -> Multiaddr {
-        let (addr, port) = addr.into();
-        Multiaddr::empty()
-            .with(match addr {
-                IpAddr::V4(ip) => multiaddr::Protocol::Ip4(ip),
-                IpAddr::V6(ip) => multiaddr::Protocol::Ip6(ip),
-            })
-            .with(multiaddr::Protocol::Tcp(port + 100))
-            .with(multiaddr::Protocol::Ws("/".into()))
-    }
-
     spawn_local(async move {
         let nodes = chain_api::Client::with_signer(&chain_node(), ())
             .await
@@ -418,7 +406,9 @@ async fn main() {
         log::info!("detected {} nodes", nodes.len());
         for node in nodes {
             let ip = node.addr;
-            let route = Route::new(node.id, unpack_node_addr(ip));
+
+            let addr = chain_api::unpack_node_addr(ip).with(multiaddr::Protocol::Ws("/".into()));
+            let route = Route::new(node.id, addr);
             let peer_id = route.peer_id();
             swarm.behaviour_mut().dht.table.insert(route);
             swarm.behaviour_mut().collector.world_mut().0.borrow_mut().servers.insert(peer_id);

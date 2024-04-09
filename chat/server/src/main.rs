@@ -30,15 +30,8 @@ use {
     onion::{key_share, EncryptedStream, PathId},
     rpc::CallId,
     std::{
-        collections::HashMap,
-        convert::Infallible,
-        future::Future,
-        io,
-        net::{IpAddr, Ipv4Addr},
-        ops::DerefMut,
-        sync::Arc,
-        task::Poll,
-        time::Duration,
+        collections::HashMap, convert::Infallible, future::Future, io, net::Ipv4Addr,
+        ops::DerefMut, sync::Arc, task::Poll, time::Duration,
     },
     tokio::sync::RwLock,
     topology_wrapper::BuildWrapped,
@@ -98,16 +91,6 @@ struct Server {
     server_router: handlers::Router<api::RouterContext>,
     stake_events: StakeEvents<ChatStakeEvent>,
     pending_rpcs: HashMap<CallId, RpcRespChannel>,
-}
-
-fn unpack_node_addr(addr: chain_api::NodeAddress) -> Multiaddr {
-    let (addr, port) = addr.into();
-    Multiaddr::empty()
-        .with(match addr {
-            IpAddr::V4(ip) => multiaddr::Protocol::Ip4(ip),
-            IpAddr::V6(ip) => multiaddr::Protocol::Ip6(ip),
-        })
-        .with(multiaddr::Protocol::Tcp(port))
 }
 
 fn filter_incoming(
@@ -192,7 +175,7 @@ impl Server {
         let node_data = node_list
             .into_iter()
             .map(|stake| {
-                let addr = unpack_node_addr(stake.addr);
+                let addr = chain_api::unpack_node_addr(stake.addr);
                 Ok(Route::new(stake.id, addr))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -393,22 +376,6 @@ impl Server {
         })
     }
 
-    fn stake_event(&mut self, event: ChatStakeEvent) {
-        match event {
-            ChatStakeEvent::Joined { identity, addr } => {
-                let route = Route::new(identity, unpack_node_addr(addr));
-                self.swarm.behaviour_mut().dht.table.insert(route);
-            }
-            ChatStakeEvent::Reclaimed { identity } => {
-                self.swarm.behaviour_mut().dht.table.remove(identity);
-            }
-            ChatStakeEvent::AddrChanged { identity, addr } => {
-                let route = Route::new(identity, unpack_node_addr(addr));
-                self.swarm.behaviour_mut().dht.table.insert(route);
-            }
-        }
-    }
-
     fn handle_chat_event(&mut self, chat: ChatName, event: Vec<u8>) {
         for client in self.clients.iter_mut() {
             let Some(call) = client.subscriptions.get(&chat) else {
@@ -547,7 +514,7 @@ impl Future for Server {
         while handlers::Selector::new(self.deref_mut(), cx)
             .try_stream(f!(mut clients), Self::client_message, log_message)
             .stream(f!(mut swarm), Self::swarm_event)
-            .try_stream(f!(mut stake_events), Self::stake_event, log_stake)
+            .try_stream(f!(mut stake_events), chain_api::stake_event, log_stake)
             .stream(f!(mut client_router), Self::client_router_response)
             .stream(f!(mut server_router), Self::server_router_response)
             .stream(f!(mut request_events), |s, event| match event {
@@ -562,6 +529,12 @@ impl Future for Server {
         {}
 
         Poll::Pending
+    }
+}
+
+impl AsMut<dht::Behaviour> for Server {
+    fn as_mut(&mut self) -> &mut dht::Behaviour {
+        &mut self.swarm.behaviour_mut().dht
     }
 }
 

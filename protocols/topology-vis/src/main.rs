@@ -412,7 +412,7 @@ async fn main() {
         let nodes = chain_api::Client::with_signer(&chain_node(), ())
             .await
             .unwrap()
-            .list_nodes()
+            .list_chat_nodes()
             .await
             .unwrap();
         log::info!("detected {} nodes", nodes.len());

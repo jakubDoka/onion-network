@@ -438,10 +438,10 @@ async fn create_nodes(count: usize) -> FuturesUnordered<Server> {
         .iter()
         .map(|(config, keys)| {
             let NodeData { id, .. } = keys.to_stored();
-            Stake {
+            ChatStake {
                 id,
                 addr: (IpAddr::from(Ipv4Addr::LOCALHOST), config.port).into(),
-                ..Stake::fake()
+                ..ChatStake::fake()
             }
         })
         .collect::<Vec<_>>();

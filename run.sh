@@ -122,7 +122,7 @@ run_chain() {
 	sleep 3
 
 	METADATA_FILE="chain/types/metadata.scale"
-	test -e $METADATA_FILE || subxt metadata > $METADATA_FILE
+	subxt metadata > $METADATA_FILE
 	$TARGET_DIR/init-transfer || exit 1 &
 }
 

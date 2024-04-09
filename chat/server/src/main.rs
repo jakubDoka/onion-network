@@ -15,7 +15,7 @@ use {
     self::api::{chat::Chat, MissingTopic},
     crate::api::Handler as _,
     anyhow::Context as _,
-    chain_api::{ChainConfig, Mnemonic, NodeKeys, Stake, StakeEvents},
+    chain_api::{ChainConfig, ChatStake, ChatStakeEvent, Mnemonic, NodeKeys, StakeEvents},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::{mapref::entry::Entry, DashMap},
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
 
     let node_config = NodeConfig::from_env();
     let keys = NodeKeys::from_mnemonic(&node_config.mnemonic);
-    let (node_list, stake_events) = ChainConfig::from_env().connect(&keys).await?;
+    let (node_list, stake_events) = ChainConfig::from_env().connect_chat(&keys).await?;
 
     Server::new(node_config, keys, node_list, stake_events).await?.await;
 
@@ -96,7 +96,7 @@ struct Server {
     clients: futures::stream::SelectAll<Stream>,
     client_router: handlers::Router<api::RouterContext>,
     server_router: handlers::Router<api::RouterContext>,
-    stake_events: StakeEvents,
+    stake_events: StakeEvents<ChatStakeEvent>,
     pending_rpcs: HashMap<CallId, RpcRespChannel>,
 }
 
@@ -131,8 +131,8 @@ impl Server {
     async fn new(
         config: NodeConfig,
         keys: NodeKeys,
-        node_list: Vec<Stake>,
-        stake_events: StakeEvents,
+        node_list: Vec<ChatStake>,
+        stake_events: StakeEvents<ChatStakeEvent>,
     ) -> anyhow::Result<Self> {
         let NodeConfig { port, ws_port, idle_timeout, .. } = config;
 
@@ -397,20 +397,20 @@ impl Server {
         })
     }
 
-    fn handle_stake_event(&mut self, event: Result<chain_api::StakeEvent, chain_api::Error>) {
+    fn handle_stake_event(&mut self, event: Result<ChatStakeEvent, chain_api::Error>) {
         let Ok(event) = event.inspect_err(|e| log::warn!("failed to read from chain: {e}")) else {
             return;
         };
 
         match event {
-            chain_api::StakeEvent::Joined { identity, addr } => {
+            ChatStakeEvent::Joined { identity, addr } => {
                 let route = Route::new(identity, unpack_node_addr(addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }
-            chain_api::StakeEvent::Reclaimed { identity } => {
+            ChatStakeEvent::Reclaimed { identity } => {
                 self.swarm.behaviour_mut().dht.table.remove(identity);
             }
-            chain_api::StakeEvent::AddrChanged { identity, addr } => {
+            ChatStakeEvent::AddrChanged { identity, addr } => {
                 let route = Route::new(identity, unpack_node_addr(addr));
                 self.swarm.behaviour_mut().dht.table.insert(route);
             }

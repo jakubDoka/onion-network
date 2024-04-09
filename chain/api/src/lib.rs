@@ -7,11 +7,13 @@ use {
         rand_core::{OsRng, SeedableRng},
         sign,
     },
-    futures::{SinkExt, StreamExt, TryFutureExt, TryStreamExt},
+    futures::{SinkExt, StreamExt, TryStreamExt},
     rand_chacha::ChaChaRng,
     std::{fs, io, net::IpAddr, str::FromStr},
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
+        blocks::Block,
+        storage::{address::Yes, StorageAddress},
         tx::TxProgress,
         OnlineClient,
     },
@@ -19,7 +21,8 @@ use {
 pub use {
     chain_types::runtime_types::{
         pallet_node_staker::pallet::{
-            Event as StakeEvent, NodeAddress, NodeData, NodeIdentity, Stake,
+            Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, NodeData,
+            NodeIdentity, Stake as ChatStake, Stake2 as SateliteStake,
         },
         pallet_user_manager::pallet::Profile,
     },
@@ -38,7 +41,7 @@ pub type AccountId = <Config as subxt::Config>::AccountId;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type Nonce = u64;
 pub type RawUserName = [u8; USER_NAME_CAP];
-pub type StakeEvents = futures::channel::mpsc::Receiver<Result<StakeEvent>>;
+pub type StakeEvents<E> = futures::channel::mpsc::Receiver<Result<E>>;
 
 #[must_use]
 pub fn immortal_era() -> String {
@@ -78,7 +81,7 @@ pub fn new_signature(sig: [u8; 64]) -> Signature {
 }
 
 #[allow(async_fn_in_trait)]
-pub trait TransactionHandler {
+pub trait TransactionHandler: Send + Sync + 'static {
     async fn account_id_async(&self) -> Result<AccountId>;
     async fn handle(&self, client: &InnerClient, call: impl TxPayload, nonce: Nonce) -> Result<()>;
 }
@@ -171,35 +174,53 @@ pub struct Client<S: TransactionHandler> {
     inner: InnerClient,
 }
 
+fn unwrap_chat_staker(e: chain_types::Event) -> Option<ChatStakeEvent> {
+    match e {
+        chain_types::Event::ChatStaker(e) => Some(e),
+        _ => None,
+    }
+}
+
+fn unwrap_satelite_staker(e: chain_types::Event) -> Option<SateliteStakeEvent> {
+    match e {
+        chain_types::Event::SateliteStaker(e) => Some(e),
+        _ => None,
+    }
+}
+
 impl<S: TransactionHandler> Client<S> {
-    pub async fn node_contract_event_stream(
+    pub async fn chat_event_stream(
         &self,
-    ) -> Result<impl futures::Stream<Item = Result<StakeEvent>>, Error> {
-        Ok(self
-            .inner
-            .client
-            .blocks()
-            .subscribe_finalized()
-            .await?
-            .then(move |block| {
-                async move {
-                    Ok::<_, Error>(
-                        block?
-                            .events()
-                            .await?
-                            .iter()
-                            .filter(|e| e.as_ref().map_or(true, |e| e.pallet_name() == "Staker"))
-                            .map(|e| e.and_then(|e| e.as_root_event::<chain_types::Event>()))
-                            .filter_map(|e| match e {
-                                Ok(chain_types::Event::Staker(e)) => Some(Ok(e)),
-                                Ok(_) => None,
-                                Err(e) => Some(Err(e)),
-                            }),
-                    )
-                }
-                .map_ok(futures::stream::iter)
-            })
-            .try_flatten())
+    ) -> Result<impl futures::Stream<Item = Result<ChatStakeEvent>>> {
+        self.node_event_stream("ChatStaker", unwrap_chat_staker).await
+    }
+
+    pub async fn satelite_event_stream(
+        &self,
+    ) -> Result<impl futures::Stream<Item = Result<SateliteStakeEvent>>> {
+        self.node_event_stream("SateliteStaker", unwrap_satelite_staker).await
+    }
+
+    async fn node_event_stream<E: 'static>(
+        &self,
+        pallet_name: &'static str,
+        unwrap: fn(chain_types::Event) -> Option<E>,
+    ) -> Result<impl futures::Stream<Item = Result<E>>, Error> {
+        let then = move |block: Result<Block<_, _>>| async move {
+            let iter = block?
+                .events()
+                .await?
+                .iter()
+                .filter(move |e| e.as_ref().map_or(true, |e| e.pallet_name() == pallet_name))
+                .map(|e| e.and_then(|e| e.as_root_event::<chain_types::Event>()))
+                .filter_map(move |e| match e {
+                    Ok(e) => unwrap(e).map(Ok),
+                    Err(e) => Some(Err(e)),
+                });
+            Ok::<_, Error>(futures::stream::iter(iter))
+        };
+        let sub = self.inner.client.blocks().subscribe_finalized().await?;
+        Ok(sub.then(then).try_flatten())
     }
 
     pub async fn with_signer(url: &str, account: S) -> Result<Self> {
@@ -216,20 +237,24 @@ impl<S: TransactionHandler> Client<S> {
     }
 
     pub async fn join(&self, data: NodeData, addr: NodeAddress, nonce: Nonce) -> Result<()> {
-        self.signer.handle(&self.inner, chain_types::tx().staker().join(data, addr), nonce).await
+        let tx = chain_types::tx().chat_staker().join(data, addr);
+        self.signer.handle(&self.inner, tx, nonce).await
     }
 
-    pub async fn list_nodes(&self) -> Result<Vec<Stake>> {
-        self.inner
-            .client
-            .storage()
-            .at_latest()
-            .await?
-            .iter(chain_types::storage().staker().stakes_iter())
-            .await?
-            .map_ok(|(_, v)| v)
-            .try_collect()
-            .await
+    pub async fn list_chat_nodes(&self) -> Result<Vec<ChatStake>> {
+        self.list_nodes(chain_types::storage().chat_staker().stakes_iter()).await
+    }
+
+    pub async fn list_satelite_nodes(&self) -> Result<Vec<SateliteStake>> {
+        self.list_nodes(chain_types::storage().satelite_staker().stakes_iter()).await
+    }
+
+    async fn list_nodes<SA>(&self, tx: SA) -> Result<Vec<SA::Target>>
+    where
+        SA: StorageAddress<IsIterable = Yes> + 'static,
+    {
+        let latest = self.inner.client.storage().at_latest().await?;
+        latest.iter(tx).await?.map_ok(|(_, v)| v).try_collect().await
     }
 
     pub async fn vote(
@@ -239,41 +264,30 @@ impl<S: TransactionHandler> Client<S> {
         rating: i32,
         nonce: Nonce,
     ) -> Result<()> {
-        self.signer
-            .handle(&self.inner, chain_types::tx().staker().vote(me, target, rating), nonce)
-            .await
+        let tx = chain_types::tx().chat_staker().vote(me, target, rating);
+        self.signer.handle(&self.inner, tx, nonce).await
     }
 
     pub async fn reclaim(&self, me: NodeIdentity, nonce: Nonce) -> Result<()> {
-        self.signer.handle(&self.inner, chain_types::tx().staker().reclaim(me), nonce).await
+        self.signer.handle(&self.inner, chain_types::tx().chat_staker().reclaim(me), nonce).await
     }
 
     pub async fn register(&self, name: RawUserName, data: Profile, nonce: Nonce) -> Result<()> {
-        self.signer
-            .handle(
-                &self.inner,
-                chain_types::tx().user_manager().register_with_name(data, name),
-                nonce,
-            )
-            .await
+        let tx = chain_types::tx().user_manager().register_with_name(data, name);
+        self.signer.handle(&self.inner, tx, nonce).await
     }
 
     pub async fn get_profile_by_name(&self, name: RawUserName) -> Result<Option<Profile>> {
         let latest = self.inner.client.storage().at_latest().await?;
-        let Some(account_id) =
-            latest.fetch(&chain_types::storage().user_manager().username_to_owner(name)).await?
-        else {
-            return Ok(None);
-        };
+        let tx = chain_types::storage().user_manager().username_to_owner(name);
+        let Some(account_id) = latest.fetch(&tx).await? else { return Ok(None) };
         latest.fetch(&chain_types::storage().user_manager().identities(account_id)).await
     }
 
     pub async fn user_exists(&self, name: RawUserName) -> Result<bool> {
         let latest = self.inner.client.storage().at_latest().await?;
-        latest
-            .fetch(&chain_types::storage().user_manager().username_to_owner(name))
-            .await
-            .map(|o| o.is_some())
+        let tx = chain_types::storage().user_manager().username_to_owner(name);
+        latest.fetch(&tx).await.map(|o| o.is_some())
     }
 
     pub async fn get_username(&self, id: crypto::Hash) -> Result<Option<RawUserName>> {
@@ -344,8 +358,51 @@ config::env_config! {
     }
 }
 
+trait Stake {
+    fn id(&self) -> sign::Pre;
+}
+
+impl Stake for ChatStake {
+    fn id(&self) -> sign::Pre {
+        self.id
+    }
+}
+
+impl Stake for SateliteStake {
+    fn id(&self) -> sign::Pre {
+        self.id
+    }
+}
+
 impl ChainConfig {
-    pub async fn connect(self, keys: &NodeKeys) -> anyhow::Result<(Vec<Stake>, StakeEvents)> {
+    pub async fn connect_satelite(
+        self,
+        keys: &NodeKeys,
+    ) -> anyhow::Result<(Vec<SateliteStake>, StakeEvents<SateliteStakeEvent>)> {
+        let tx = chain_types::storage().satelite_staker().stakes_iter();
+        self.connect(keys, tx, "SateliteStaker", unwrap_satelite_staker).await
+    }
+
+    pub async fn connect_chat(
+        self,
+        keys: &NodeKeys,
+    ) -> anyhow::Result<(Vec<ChatStake>, StakeEvents<ChatStakeEvent>)> {
+        let tx = chain_types::storage().chat_staker().stakes_iter();
+        self.connect(keys, tx, "ChatStaker", unwrap_chat_staker).await
+    }
+
+    async fn connect<SA, E>(
+        self,
+        keys: &NodeKeys,
+        tx: SA,
+        pallet_name: &'static str,
+        unwrap: fn(chain_types::Event) -> Option<E>,
+    ) -> anyhow::Result<(Vec<SA::Target>, StakeEvents<E>)>
+    where
+        SA: StorageAddress<IsIterable = Yes> + 'static + Clone,
+        SA::Target: Stake,
+        E: 'static + Send,
+    {
         let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
         let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
         let account = if node_account.starts_with("//") {
@@ -361,13 +418,13 @@ impl ChainConfig {
                 let Ok(client) = Client::with_signer(&node, account.clone()).await else {
                     continue;
                 };
-                let Ok(node_list) = client.list_nodes().await else { continue };
+                let Ok(node_list) = client.list_nodes(tx.clone()).await else { continue };
                 break 'a (node_list, client);
             }
             anyhow::bail!("failed to fetch node list");
         };
 
-        let mut stream = client.node_contract_event_stream().await;
+        let mut stream = client.node_event_stream(pallet_name, unwrap).await;
         tokio::spawn(async move {
             loop {
                 if let Ok(mut stream) = stream {
@@ -387,11 +444,11 @@ impl ChainConfig {
                     continue;
                 };
 
-                stream = client.node_contract_event_stream().await;
+                stream = client.node_event_stream(pallet_name, unwrap).await;
             }
         });
 
-        if node_list.iter().all(|s| s.id != keys.sign.public_key().pre) {
+        if node_list.iter().all(|s| s.id() != keys.sign.public_key().pre) {
             let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
             client
                 .join(keys.to_stored(), (exposed_address, port).into(), nonce)

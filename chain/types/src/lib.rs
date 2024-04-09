@@ -1,28 +1,40 @@
-use {
-    self::polkadot::runtime_types::pallet_node_staker::pallet::{
-        NodeAddress, NodeData, Stake, Votes,
-    },
-    std::net::IpAddr,
-    subxt::PolkadotConfig,
-};
 pub use {
     polkadot::*,
-    subxt::{self, ext::*},
-    subxt_signer,
+    subxt::{self, ext::*, Error, PolkadotConfig as Config},
+    subxt_signer::{self, sr25519::Keypair},
+};
+use {
+    runtime_types::pallet_node_staker::pallet::{NodeAddress, Stake},
+    std::net::IpAddr,
 };
 
-pub type Config = PolkadotConfig;
 pub type AccountId = <Config as subxt::config::Config>::AccountId;
 pub type Balance = u128;
 pub type BlockNumber = u32;
 pub type Hash = <Config as subxt::config::Config>::Hash;
-pub type Error = subxt::Error;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-pub type Keypair = subxt_signer::sr25519::Keypair;
-
 #[allow(clippy::needless_return)]
-#[subxt::subxt(runtime_metadata_path = "metadata.scale", generate_docs)]
+#[subxt::subxt(
+    runtime_metadata_path = "metadata.scale",
+    generate_docs,
+    derive_for_type(
+        path = "pallet_node_staker::pallet::Stake",
+        derive = "Debug, Clone, PartialEq, Eq, PartialOrd, Ord"
+    ),
+    derive_for_type(
+        path = "pallet_node_staker::pallet::Votes",
+        derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash"
+    ),
+    derive_for_type(
+        path = "pallet_node_staker::pallet::NodeAddress",
+        derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash"
+    ),
+    derive_for_type(
+        path = "pallet_node_staker::pallet::NodeData",
+        derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash"
+    )
+)]
 mod polkadot {}
 
 impl Stake {
@@ -30,43 +42,6 @@ impl Stake {
         unsafe { std::mem::zeroed() }
     }
 }
-
-impl Clone for Votes {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl Copy for Votes {}
-
-impl Clone for Stake {
-    fn clone(&self) -> Self {
-        Stake {
-            owner: self.owner.clone(),
-            amount: self.amount,
-            created_at: self.created_at,
-            votes: self.votes,
-            id: self.id,
-            addr: self.addr,
-        }
-    }
-}
-
-impl Clone for NodeAddress {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl Copy for NodeAddress {}
-
-impl Clone for NodeData {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl Copy for NodeData {}
 
 impl From<(IpAddr, u16)> for NodeAddress {
     fn from((addr, port): (IpAddr, u16)) -> Self {

@@ -55,7 +55,7 @@ impl Node {
 
         let (mut request_dispatch, commands) = Requests::new();
         let chain_api = chain_node(keys.name).await?;
-        let node_request = chain_api.list_nodes();
+        let node_request = chain_api.list_chat_nodes();
         let profile_request = chain_api.get_profile_by_name(username_to_raw(keys.name));
         let (node_data, profile_hash) = futures::try_join!(node_request, profile_request)?;
         let profile_hash = profile_hash.context("profile not found")?;

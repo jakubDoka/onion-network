@@ -48,11 +48,7 @@ pub struct Satelite {
 
 impl Satelite {
     fn new(config: Config, store: Storage, keys: NodeKeys) -> anyhow::Result<Self> {
-        let identity: libp2p::identity::ed25519::Keypair =
-            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut keys.sign.pre_quantum())
-                .context("invalid identity")?;
-
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(identity.clone().into())
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys.libp2p_keypair())
             .with_tokio()
             .with_tcp(
                 libp2p::tcp::Config::default(),
@@ -142,9 +138,9 @@ impl Future for Satelite {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        use handlers::field as f;
+        use component_utils::field as f;
 
-        while handlers::Selector::new(self.deref_mut(), cx)
+        while component_utils::Selector::new(self.deref_mut(), cx)
             .stream(f!(mut swarm), Self::swarm_event)
             .stream(f!(mut router), Self::router_event)
             .done()

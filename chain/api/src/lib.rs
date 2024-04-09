@@ -8,7 +8,7 @@ use {
         sign,
     },
     futures::{SinkExt, StreamExt, TryStreamExt},
-    libp2p::{multiaddr, Multiaddr},
+    libp2p::{multiaddr, Multiaddr, PeerId},
     rand_chacha::ChaChaRng,
     std::{fs, io, net::IpAddr, str::FromStr},
     subxt::{
@@ -316,6 +316,10 @@ impl Default for NodeKeys {
 }
 
 impl NodeKeys {
+    pub fn libp2p_keypair(&self) -> libp2p::identity::Keypair {
+        libp2p::identity::Keypair::ed25519_from_bytes(&mut self.sign.pre_quantum()).unwrap()
+    }
+
     pub fn to_stored(&self) -> NodeData {
         NodeData {
             sign: crypto::hash::new(self.sign.public_key()),
@@ -486,4 +490,21 @@ pub fn unpack_node_addr(addr: NodeAddress) -> Multiaddr {
             IpAddr::V6(ip) => multiaddr::Protocol::Ip6(ip),
         })
         .with(multiaddr::Protocol::Tcp(port))
+}
+
+pub fn filter_incoming(
+    table: &mut dht::RoutingTable,
+    peer: PeerId,
+    local_addr: &Multiaddr,
+    _: &Multiaddr,
+) -> Result<(), libp2p::swarm::ConnectionDenied> {
+    if local_addr.iter().any(|p| matches!(p, multiaddr::Protocol::Ws(_))) {
+        return Ok(());
+    }
+
+    if table.get(peer).is_some() {
+        return Ok(());
+    }
+
+    Err(libp2p::swarm::ConnectionDenied::new("not registered as a node"))
 }

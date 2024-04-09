@@ -28,7 +28,9 @@ use {
         collections::{BTreeMap, HashMap, HashSet},
         convert::Infallible,
         future::Future,
-        io, pin,
+        io,
+        ops::DerefMut,
+        pin,
         task::Poll,
         time::Duration,
     },
@@ -96,14 +98,10 @@ impl Node {
             node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance
         ));
 
-        let nodes = node_data
-            .into_iter()
-            .map(|stake| {
-                let addr = chain_api::unpack_node_addr(stake.addr)
-                    .with(multiaddr::Protocol::Ws("/".into()));
-                Ok(Route::new(stake.id, addr))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let nodes = node_data.into_iter().map(|stake| {
+            let addr = chain_api::unpack_node_addr(stake.addr);
+            Route::new(stake.id, addr.with(multiaddr::Protocol::Ws("/".into())))
+        });
         swarm.behaviour_mut().dht.table.bulk_insert(nodes);
 
         let routes = swarm.behaviour_mut().dht.table.iter().map(Route::peer_id).collect::<Vec<_>>();
@@ -172,12 +170,12 @@ impl Node {
         {
             Ok((vn, m, v)) => (vn + 1, m + 1, v),
             Err(e) => {
-                log::info!("cannot access vault: {e} {:?}", profile_hash.sign);
+                log::debug!("cannot access vault: {e} {:?}", profile_hash.sign);
                 Default::default()
             }
         };
 
-        log::info!("{:?}", vault);
+        log::debug!("{:?}", vault);
 
         let vault = if vault.is_empty() && vault_nonce == 0 {
             set_state!(ProfileCreate);
@@ -326,7 +324,7 @@ impl Node {
         if let Some(sub) = self.subscriptions.iter_mut().find(|s| peers.contains(&s.peer_id)) {
             log::debug!("shortcut topic found");
             sub.topics.push(search_key);
-            self.handle_command(command);
+            self.command(command);
             return;
         }
 
@@ -383,7 +381,7 @@ impl Node {
         log::debug!("subscription request sent, {:?}", sub.id);
     }
 
-    fn handle_command(&mut self, command: RequestInit) {
+    fn command(&mut self, command: RequestInit) {
         match command {
             RequestInit::Request(req) => self.handle_request(req),
             RequestInit::Subscription(sub) => self.handle_subscription_request(sub),
@@ -414,7 +412,7 @@ impl Node {
         }
     }
 
-    fn handle_swarm_event(&mut self, event: SE) {
+    fn swarm_event(&mut self, event: SE) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Onion(onion::Event::OutboundStream(
                 stream,
@@ -430,14 +428,14 @@ impl Node {
                         subscriptions: Default::default(),
                         stream,
                     });
-                    req.into_iter().for_each(|r| self.handle_command(r));
+                    req.into_iter().for_each(|r| self.command(r));
                 }
             }
             e => log::debug!("{:?}", e),
         }
     }
 
-    fn handle_subscription_response(&mut self, (id, request): (PathId, io::Result<Vec<u8>>)) {
+    fn subscription_response(&mut self, (id, request): (PathId, io::Result<Vec<u8>>)) {
         let Ok(msg) = request.inspect_err(|e| log::error!("chat subscription error: {e}")) else {
             return;
         };
@@ -483,23 +481,14 @@ impl Future for Node {
         mut self: pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<Infallible, ()>> {
-        let mut changed = true;
-        while std::mem::take(&mut changed) {
-            while let Poll::Ready(next) = self.requests.poll_next_unpin(cx) {
-                self.handle_command(next.ok_or(())?);
-                changed = true;
-            }
+        use component_utils::field as f;
 
-            while let Poll::Ready(next) = self.subscriptions.poll_next_unpin(cx) {
-                self.handle_subscription_response(next.unwrap());
-                changed = true;
-            }
-
-            while let Poll::Ready(next) = self.swarm.poll_next_unpin(cx) {
-                self.handle_swarm_event(next.unwrap());
-                changed = true;
-            }
-        }
+        while component_utils::Selector::new(self.deref_mut(), cx)
+            .stream(f!(mut requests), Self::command)
+            .stream(f!(mut subscriptions), Self::subscription_response)
+            .stream(f!(mut swarm), Self::swarm_event)
+            .done()
+        {}
 
         Poll::Pending
     }

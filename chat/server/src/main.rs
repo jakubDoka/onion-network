@@ -93,23 +93,6 @@ struct Server {
     pending_rpcs: HashMap<CallId, RpcRespChannel>,
 }
 
-fn filter_incoming(
-    table: &mut dht::RoutingTable,
-    peer: PeerId,
-    local_addr: &Multiaddr,
-    _: &Multiaddr,
-) -> Result<(), libp2p::swarm::ConnectionDenied> {
-    if local_addr.iter().any(|p| matches!(p, multiaddr::Protocol::Ws(_))) {
-        return Ok(());
-    }
-
-    if table.get(peer).is_some() {
-        return Ok(());
-    }
-
-    Err(libp2p::swarm::ConnectionDenied::new("not registered as a node"))
-}
-
 impl Server {
     async fn new(
         config: NodeConfig,
@@ -119,14 +102,9 @@ impl Server {
     ) -> anyhow::Result<Self> {
         let NodeConfig { port, ws_port, idle_timeout, .. } = config;
 
-        let local_key = libp2p::identity::Keypair::ed25519_from_bytes(keys.sign.pre_quantum())
-            .context("deriving ed signature")?;
-        let peer_id = local_key.public().to_peer_id();
-        log::info!("peer id: {}", peer_id);
-
         let (sender, receiver) = topology_wrapper::channel();
 
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys.libp2p_keypair())
             .with_tokio()
             .with_tcp(
                 libp2p::tcp::Config::new(),
@@ -135,15 +113,15 @@ impl Server {
             )?
             .with_websocket(libp2p::noise::Config::new, libp2p::yamux::Config::default)
             .await?
-            .with_behaviour(|_| Behaviour {
+            .with_behaviour(|kp| Behaviour {
                 key_share: key_share::Behaviour::new(keys.enc.public_key())
                     .include_in_vis(sender.clone()),
-                onion: onion::Config::new(keys.enc.into(), peer_id)
+                onion: onion::Config::new(keys.enc.into(), kp.public().to_peer_id())
                     .max_streams(10)
                     .keep_alive_interval(Duration::from_secs(100))
                     .build()
                     .include_in_vis(sender.clone()),
-                dht: dht::Behaviour::new(filter_incoming),
+                dht: dht::Behaviour::new(chain_api::filter_incoming),
                 rpc: rpc::Config::new()
                     .request_timeout(Duration::from_millis(config.rpc_timeout))
                     .build()
@@ -172,13 +150,10 @@ impl Server {
             )
             .context("starting to isten for clients")?;
 
-        let node_data = node_list
-            .into_iter()
-            .map(|stake| {
-                let addr = chain_api::unpack_node_addr(stake.addr);
-                Ok(Route::new(stake.id, addr))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let node_data = node_list.into_iter().map(|stake| {
+            let addr = chain_api::unpack_node_addr(stake.addr);
+            Route::new(stake.id, addr)
+        });
         swarm.behaviour_mut().dht.table.bulk_insert(node_data);
 
         let (request_event_sink, request_events) = mpsc::channel(100);
@@ -506,12 +481,12 @@ impl Future for Server {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
-        use handlers::field as f;
+        use component_utils::field as f;
 
         let log_message = |_: &mut Self, e| log::warn!("failed to read client message: {e}");
         let log_stake = |_: &mut Self, e| log::warn!("failed to read stake event: {e}");
 
-        while handlers::Selector::new(self.deref_mut(), cx)
+        while component_utils::Selector::new(self.deref_mut(), cx)
             .try_stream(f!(mut clients), Self::client_message, log_message)
             .stream(f!(mut swarm), Self::swarm_event)
             .try_stream(f!(mut stake_events), chain_api::stake_event, log_stake)

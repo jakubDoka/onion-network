@@ -31,6 +31,7 @@ dht = { workspace = true }
 onion = { workspace = true }
 codec.workspace = true
 handlers.workspace = true
+component-utils.workspace = true
 
 [lints]
 workspace = true

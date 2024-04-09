@@ -1,7 +1,19 @@
 #![feature(array_chunks)]
+#![feature(specialization)]
 #![feature(macro_metavar_expr)]
 #![feature(slice_take)]
 #![feature(slice_from_ptr_range)]
+#![allow(incomplete_features)]
+
+#[macro_export]
+macro_rules! field {
+    (mut $field:ident) => {
+        |s| &mut s.$field
+    };
+    ($field:ident) => {
+        |s| &s.$field
+    };
+}
 
 #[macro_export]
 macro_rules! build_env {
@@ -86,7 +98,10 @@ macro_rules! gen_unique_id {
 
 pub mod stream;
 
-use core::task::Waker;
+use {
+    core::task::Waker,
+    futures::{stream::FuturesUnordered, Stream, StreamExt as _},
+};
 pub use {futures, stream::*};
 
 pub struct DropFn<F: FnOnce()>(Option<F>);
@@ -130,5 +145,72 @@ pub fn set_waker(old: &mut Option<Waker>, new: &Waker) {
         old.clone_from(new);
     } else {
         *old = Some(new.clone());
+    }
+}
+
+pub struct Selector<'a, 'b, C> {
+    progressed: bool,
+    cx: &'a mut std::task::Context<'b>,
+    context: &'a mut C,
+}
+
+impl<'a, 'b, C> Selector<'a, 'b, C> {
+    pub fn new(context: &'a mut C, cx: &'a mut std::task::Context<'b>) -> Self {
+        Self { progressed: false, cx, context }
+    }
+
+    pub fn done(self) -> bool {
+        self.progressed
+    }
+
+    pub fn stream<S, SF, F>(mut self, mut stream: SF, mut f: F) -> Self
+    where
+        SF: FnMut(&mut C) -> &mut S,
+        S: Stream + Unpin + StreamIsEmpty,
+        F: FnMut(&mut C, S::Item),
+    {
+        if stream.is_empty() {
+            return self;
+        }
+
+        while let std::task::Poll::Ready(Some(event)) =
+            stream(self.context).poll_next_unpin(self.cx)
+        {
+            f(self.context, event);
+            self.progressed = true;
+        }
+
+        self
+    }
+
+    pub fn try_stream<S, O, E>(
+        self,
+        stream: impl FnMut(&mut C) -> &mut S,
+        mut f: impl FnMut(&mut C, O),
+        mut log: impl FnMut(&mut C, E),
+    ) -> Self
+    where
+        S: Stream<Item = Result<O, E>> + Unpin + StreamIsEmpty,
+    {
+        self.stream(stream, |context, event| match event {
+            Ok(event) => f(context, event),
+            Err(e) => log(context, e),
+        })
+    }
+}
+
+pub trait StreamIsEmpty {
+    fn is_empty(&self) -> bool;
+}
+
+impl<F> StreamIsEmpty for FuturesUnordered<F> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T> StreamIsEmpty for T {
+    default fn is_empty(&self) -> bool {
+        false
     }
 }

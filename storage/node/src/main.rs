@@ -6,9 +6,10 @@
 
 use {
     anyhow::Context as _,
-    chain_api::{Mnemonic, NodeKeys, SateliteStakeEvent, StakeEvents},
+    chain_api::{Mnemonic, NodeKeys, SateliteStake, SateliteStakeEvent, StakeEvents},
     codec::Codec,
     component_utils::PacketReader,
+    dht::Route,
     libp2p::{
         futures::{
             channel::{mpsc, oneshot},
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let keys = NodeKeys::from_mnemonic(&config.mnemonic);
     let (satelites, events) =
         chain_api::ChainConfig::from_env()?.connect_satelite(&keys, false).await?;
-    let satelite = Node::new(config, storage, keys, events)?;
+    let satelite = Node::new(config, storage, keys, events, satelites)?;
     satelite.await?
 }
 
@@ -76,19 +77,19 @@ impl Node {
         storage: storage::Storage,
         keys: NodeKeys,
         stake_events: StakeEvents<SateliteStakeEvent>,
+        satelites: Vec<SateliteStake>,
     ) -> anyhow::Result<Self> {
-        let identity =
-            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut keys.sign.pre_quantum())
-                .context("invalid identity")?;
-
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(identity.clone().into())
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys.libp2p_keypair())
             .with_tokio()
             .with_tcp(
                 libp2p::tcp::Config::default(),
                 libp2p::noise::Config::new,
                 libp2p::yamux::Config::default,
             )?
-            .with_behaviour(|_| Behaviour::default())?
+            .with_behaviour(|_| Behaviour {
+                dht: dht::Behaviour::new(chain_api::filter_incoming),
+                ..Default::default()
+            })?
             .with_swarm_config(|c| {
                 c.with_idle_connection_timeout(std::time::Duration::from_secs(60))
             })
@@ -101,6 +102,10 @@ impl Node {
                     .with(Protocol::Tcp(config.port)),
             )
             .context("oprning listener")?;
+
+        let node_data =
+            satelites.into_iter().map(|s| Route::new(s.id, chain_api::unpack_node_addr(s.addr)));
+        swarm.behaviour_mut().dht.table.bulk_insert(node_data);
 
         let (sd, rc) = mpsc::channel(100);
 
@@ -194,12 +199,12 @@ impl Future for Node {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
-        use handlers::field as f;
+        use component_utils::field as f;
 
         let log_negot = |_: &mut Self, e| log::warn!("stream negotiation failed: {e}");
         let log_stake = |_: &mut Self, e| log::error!("stake event stream failure: {e}");
 
-        while handlers::Selector::new(self.deref_mut(), cx)
+        while component_utils::Selector::new(self.deref_mut(), cx)
             .stream(f!(mut swarm), Self::swarm_event)
             .stream(f!(mut router), Self::router_event)
             .stream(f!(mut request_events), Self::request_event)

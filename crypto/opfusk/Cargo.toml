@@ -1,0 +1,22 @@
+[package]
+name = "opfusk"
+version = "0.1.0"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+codec.workspace = true
+crypto.workspace = true
+futures.workspace = true
+libp2p-core = "0.41.2"
+libp2p-identity = "0.2.8"
+multihash = "0.19.1"
+rand_core = "0.6.4"
+thiserror.workspace = true
+
+[lints]
+workspace = true

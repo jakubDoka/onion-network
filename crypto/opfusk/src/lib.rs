@@ -247,9 +247,9 @@ impl<R, T> Output<R, T> {
         let tag = crypto::encrypt(slice, self.sender_ss, &mut self.rng);
         log::debug!("tag: {:?}", tag);
         let tag_start = rest.len() - TAG_SIZE;
-        rest[tag_start..][..crypto::TAG_SIZE].copy_from_slice(&tag);
+        rest[tag_start + 2..].copy_from_slice(&tag);
         let body_len = slice.len() as u16;
-        rest[tag_start + crypto::TAG_SIZE..].copy_from_slice(&body_len.to_be_bytes());
+        rest[tag_start..][..2].copy_from_slice(&body_len.to_be_bytes());
         log::debug!("body len: {}", body_len);
         log::debug!("send key: {:?}", self.sender_ss);
         self.in_progress_start += slice.len() + TAG_SIZE;
@@ -285,7 +285,7 @@ where
             }
 
             let written = 'try_write_inner: {
-                let to_write = &s.write_buffer[s.writable_start..s.in_progress_start - TAG_SIZE];
+                let to_write = &s.write_buffer[s.writable_start..s.in_progress_start];
                 if to_write.is_empty() {
                     break 'try_write_inner false;
                 }
@@ -332,7 +332,7 @@ where
             s.encrypt_in_progress();
         }
 
-        let mut to_write = &s.write_buffer[s.writable_start..s.in_progress_start - TAG_SIZE];
+        let mut to_write = &s.write_buffer[s.writable_start..s.in_progress_start];
         while !to_write.is_empty() {
             let n = futures::ready!(Pin::new(&mut s.stream).poll_write(cx, to_write))?;
             to_write = &to_write[n..];
@@ -373,7 +373,7 @@ where
             while !buf.is_empty() {
                 if s.chunk_reminder == 0 && s.read_buffer.len() - s.readable_end >= TAG_SIZE {
                     let body_len = u16::from_be_bytes(
-                        s.read_buffer[s.readable_end + crypto::TAG_SIZE..][..2].try_into().unwrap(),
+                        s.read_buffer[s.readable_end..][..2].try_into().unwrap(),
                     ) as usize;
                     s.chunk_reminder = body_len;
                     s.readable_start += TAG_SIZE;
@@ -437,9 +437,9 @@ where
                     break 'try_read_inner_body;
                 }
 
-                let body_len = u16::from_be_bytes(
-                    s.read_buffer[s.readable_end + crypto::TAG_SIZE..][..2].try_into().unwrap(),
-                ) as usize;
+                let body_len =
+                    u16::from_be_bytes(s.read_buffer[s.readable_end..][..2].try_into().unwrap())
+                        as usize;
 
                 if body_len > s.read_buffer.capacity() {
                     return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
@@ -466,10 +466,10 @@ where
 
             if has_body {
                 let tag: [u8; crypto::TAG_SIZE] =
-                    s.read_buffer[s.readable_end..][..crypto::TAG_SIZE].try_into().unwrap();
-                let body_len = u16::from_be_bytes(
-                    s.read_buffer[s.readable_end + crypto::TAG_SIZE..][..2].try_into().unwrap(),
-                ) as usize;
+                    s.read_buffer[s.readable_end + 2..].try_into().unwrap();
+                let body_len =
+                    u16::from_be_bytes(s.read_buffer[s.readable_end..][..2].try_into().unwrap())
+                        as usize;
                 log::debug!("tag recv: {:?}", tag);
                 log::debug!("body len recv: {}", body_len);
                 log::debug!("recv key: {:?}", s.receiver_ss);

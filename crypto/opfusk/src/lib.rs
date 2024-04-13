@@ -15,6 +15,7 @@ use {
     std::{collections::VecDeque, io, ops::DerefMut, pin::Pin, task::Poll, usize},
 };
 
+#[derive(Clone)]
 pub struct Config<R> {
     kp: sign::Keypair,
     rng: R,
@@ -43,7 +44,7 @@ impl<R> UpgradeInfo for Config<R> {
     type InfoIter = std::iter::Once<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        std::iter::once(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        std::iter::once(concat!("/", env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
     }
 }
 
@@ -243,6 +244,7 @@ where
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        log::debug!("writing {} bytes", buf.len());
         let s = self.deref_mut();
         s.sender_cursor.write_to(cx, &s.sender_ss, &mut s.rng, buf, Pin::new(&mut s.stream))
     }
@@ -251,6 +253,7 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<io::Result<()>> {
+        log::debug!("flushing");
         let s = self.deref_mut();
         futures::ready!(s.sender_cursor.force_flush(cx, &s.sender_ss, &mut s.rng, &mut s.stream))?;
         Pin::new(&mut s.stream).poll_flush(cx)
@@ -285,7 +288,7 @@ impl ReadCursor {
     }
 
     fn as_slices_mut(buffer: &mut [u8], start: usize, end: usize) -> (&mut [u8], &mut [u8]) {
-        if start > end {
+        if start >= end {
             let (left, right) = buffer.split_at_mut(start);
             (right, &mut left[..end])
         } else {
@@ -294,15 +297,11 @@ impl ReadCursor {
     }
 
     fn remove_first_n(start: &mut usize, cap: usize, end: usize, n: usize) {
-        let prev_order = *start < end;
         *start = wrap(*start + n, cap);
-        debug_assert_eq!(prev_order, *start < end);
     }
 
     fn add_last_n(end: &mut usize, cap: usize, start: usize, n: usize) {
-        let prev_order = start < *end;
         *end = wrap(*end + n, cap);
-        debug_assert_eq!(prev_order, start < *end);
     }
 
     fn distance(start: usize, end: usize, cap: usize) -> usize {
@@ -384,6 +383,7 @@ impl ReadCursor {
             let end = wrap(self.start + self.current_chunk_len, cap);
             let (mut left, mut right) = Self::as_slices_mut(&mut self.buffer, self.start, end);
             if left.len() + right.len() == 0 {
+                log::debug!("no more data to read");
                 break;
             }
 
@@ -402,6 +402,8 @@ impl ReadCursor {
         if red == 0 {
             return Poll::Pending;
         }
+
+        log::debug!("read {} bytes", red);
 
         Self::remove_first_n(&mut self.start, cap, self.end, red);
         Poll::Ready(Ok(red))
@@ -463,7 +465,7 @@ impl WriteCursor {
     }
 
     fn can_flush(&self) -> bool {
-        self.cursor + TAG_SIZE <= self.buffer.len()
+        self.cursor + TAG_SIZE < self.buffer.len()
     }
 
     fn force_flush(
@@ -479,6 +481,8 @@ impl WriteCursor {
             return Poll::Ready(Ok(()));
         }
 
+        log::debug!("force flushing: {} bytes", to_write.len());
+
         let n = futures::ready!(Pin::new(stream).poll_write(cx, to_write))?;
         self.buffer.drain(..n);
         self.cursor -= n;
@@ -488,6 +492,7 @@ impl WriteCursor {
         }
 
         if self.cursor == TAG_SIZE {
+            log::debug!("flushed");
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
@@ -496,8 +501,11 @@ impl WriteCursor {
 
     fn flush(&mut self, ss: &SharedSecret, rng: impl CryptoRngCore) {
         if !self.can_flush() {
+            log::debug!("cannot flush");
             return;
         }
+
+        log::debug!("flushing");
 
         let (left, right) = self.buffer.as_mut_slices();
         let slice = if self.cursor > left.len() {
@@ -508,8 +516,8 @@ impl WriteCursor {
 
         let len = slice.len() - TAG_SIZE;
         let tag = crypto::encrypt(&mut slice[crypto::TAG_SIZE..], *ss, rng);
-        slice[..crypto::TAG_SIZE - 2].copy_from_slice(&tag);
-        slice[crypto::TAG_SIZE - 2..crypto::TAG_SIZE].copy_from_slice(&len.to_be_bytes());
+        slice[..crypto::TAG_SIZE].copy_from_slice(&tag);
+        slice[crypto::TAG_SIZE..TAG_SIZE].copy_from_slice(&(len as u16).to_be_bytes());
 
         self.cursor += slice.len();
     }
@@ -546,4 +554,56 @@ pub fn peer_id_to_hash(peer_id: PeerId) -> Option<crypto::Hash> {
     let mut hash = [0; 32];
     hash.copy_from_slice(digest);
     Some(hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        futures::StreamExt,
+        libp2p::{Multiaddr, Transport},
+        libp2p_core::{transport::MemoryTransport, upgrade::Version},
+        rand_core::OsRng,
+        std::time::Duration,
+    };
+
+    fn create_swarm() -> (libp2p::Swarm<libp2p::ping::Behaviour>, crypto::sign::Keypair) {
+        let kp = crypto::sign::Keypair::new(OsRng);
+        let transport = MemoryTransport::default()
+            .upgrade(Version::V1)
+            .authenticate(super::Config::new(OsRng, kp))
+            .multiplex(libp2p::yamux::Config::default())
+            .boxed();
+        let behaviour = libp2p::ping::Behaviour::default();
+        (
+            libp2p::Swarm::new(
+                transport,
+                behaviour,
+                super::hash_to_peer_id(kp.identity()),
+                libp2p::swarm::Config::with_tokio_executor()
+                    .with_idle_connection_timeout(Duration::MAX),
+            ),
+            kp,
+        )
+    }
+
+    #[tokio::test]
+    async fn test() {
+        _ = env_logger::builder().is_test(true).try_init();
+
+        let (mut swarm1, _kp1) = create_swarm();
+        let (mut swarm2, _kp2) = create_swarm();
+
+        swarm1.listen_on("/memory/1".parse().unwrap()).unwrap();
+        swarm2.dial("/memory/1".parse::<Multiaddr>().unwrap()).unwrap();
+
+        _ = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    e = swarm1.next() => log::info!("event1: {:?}", e),
+                    e = swarm2.next() => log::info!("event2: {:?}", e),
+                }
+            }
+        })
+        .await;
+    }
 }

@@ -11,12 +11,18 @@ edition.workspace = true
 [dependencies]
 codec.workspace = true
 crypto.workspace = true
+env_logger = "0.11.3"
 futures.workspace = true
 libp2p-core = "0.41.2"
 libp2p-identity = "0.2.8"
+log.workspace = true
 multihash = "0.19.1"
 rand_core = "0.6.4"
 thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+libp2p = { workspace = true, features = ["ping", "tcp", "tokio", "yamux"] }
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "time"] }

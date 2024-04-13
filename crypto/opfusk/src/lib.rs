@@ -1,3 +1,6 @@
+#![feature(let_chains)]
+#![feature(slice_take)]
+#![feature(iter_next_chunk)]
 #![feature(impl_trait_in_assoc_type)]
 use {
     crypto::{enc, sign, SharedSecret},
@@ -9,7 +12,7 @@ use {
     libp2p_identity::PeerId,
     multihash::Multihash,
     rand_core::CryptoRngCore,
-    std::{collections::VecDeque, io, ops::DerefMut, pin::Pin, task::Poll},
+    std::{collections::VecDeque, io, ops::DerefMut, pin::Pin, task::Poll, usize},
 };
 
 pub struct Config<R> {
@@ -136,8 +139,8 @@ where
                 rng: self.rng,
                 sender_ss,
                 receiver_ss,
-                sender_cursor: Cursor::new(self.buffer_size),
-                reciever_cursor: Cursor::new(self.buffer_size),
+                sender_cursor: WriteCursor::new(self.buffer_size),
+                reciever_cursor: ReadCursor::new(self.buffer_size),
             }))
         }
     }
@@ -199,8 +202,8 @@ where
                 rng: self.rng,
                 sender_ss,
                 receiver_ss,
-                sender_cursor: Cursor::new(self.buffer_size),
-                reciever_cursor: Cursor::new(self.buffer_size),
+                sender_cursor: WriteCursor::new(self.buffer_size),
+                reciever_cursor: ReadCursor::new(self.buffer_size),
             }))
         }
     }
@@ -211,21 +214,22 @@ pub struct Output<R, T> {
     rng: R,
     sender_ss: SharedSecret,
     receiver_ss: SharedSecret,
-    sender_cursor: Cursor,
-    reciever_cursor: Cursor,
+    sender_cursor: WriteCursor,
+    reciever_cursor: ReadCursor,
 }
 
 impl<R, T> AsyncRead for Output<R, T>
 where
     R: CryptoRngCore + Unpin,
-    T: AsyncWrite + Unpin,
+    T: AsyncRead + Unpin,
 {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        todo!()
+        let s = self.get_mut();
+        s.reciever_cursor.read_from(cx, &s.receiver_ss, buf, &mut s.stream)
     }
 }
 
@@ -237,21 +241,10 @@ where
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-        mut buf: &[u8],
+        buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let prev_len = buf.len();
         let s = self.deref_mut();
-
-        let res = s.sender_cursor.write_to(cx, Pin::new(&mut s.stream));
-        // never pending or error
-        _ = s.sender_cursor.read_from(&s.sender_ss, &mut s.rng, cx, Pin::new(&mut buf));
-        futures::ready!(res)?;
-
-        if prev_len == buf.len() {
-            return Poll::Pending;
-        }
-
-        Poll::Ready(Ok(prev_len - buf.len()))
+        s.sender_cursor.write_to(cx, &s.sender_ss, &mut s.rng, buf, Pin::new(&mut s.stream))
     }
 
     fn poll_flush(
@@ -259,10 +252,7 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> Poll<io::Result<()>> {
         let s = self.deref_mut();
-        if s.sender_cursor.can_flush() {
-            s.sender_cursor.flush(&s.sender_ss, &mut s.rng);
-        }
-        futures::ready!(s.sender_cursor.write_to(cx, Pin::new(&mut s.stream)))?;
+        futures::ready!(s.sender_cursor.force_flush(cx, &s.sender_ss, &mut s.rng, &mut s.stream))?;
         Pin::new(&mut s.stream).poll_flush(cx)
     }
 
@@ -275,121 +265,258 @@ where
     }
 }
 
-struct Cursor {
+struct ReadCursor {
     buffer: Box<[u8]>,
+    cursor: usize,
     start: usize,
     end: usize,
+    current_chunk_len: usize,
+}
+
+impl ReadCursor {
+    fn new(cap: usize) -> Self {
+        Self {
+            buffer: vec![0; cap].into_boxed_slice(),
+            cursor: 0,
+            start: 0,
+            end: 0,
+            current_chunk_len: 0,
+        }
+    }
+
+    fn as_slices_mut(buffer: &mut [u8], start: usize, end: usize) -> (&mut [u8], &mut [u8]) {
+        if start > end {
+            let (left, right) = buffer.split_at_mut(start);
+            (right, &mut left[..end])
+        } else {
+            (&mut buffer[start..end], &mut [][..])
+        }
+    }
+
+    fn remove_first_n(start: &mut usize, cap: usize, end: usize, n: usize) {
+        let prev_order = *start < end;
+        *start = wrap(*start + n, cap);
+        debug_assert_eq!(prev_order, *start < end);
+    }
+
+    fn add_last_n(end: &mut usize, cap: usize, start: usize, n: usize) {
+        let prev_order = start < *end;
+        *end = wrap(*end + n, cap);
+        debug_assert_eq!(prev_order, start < *end);
+    }
+
+    fn distance(start: usize, end: usize, cap: usize) -> usize {
+        if start < end {
+            end - start
+        } else {
+            cap - start + end
+        }
+    }
+
+    fn read_from(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        ss: &SharedSecret,
+        mut bytes: &mut [u8],
+        stream: &mut (impl AsyncRead + Unpin),
+    ) -> Poll<io::Result<usize>> {
+        let cap = self.buffer.len();
+        let (to_read_left, to_read_right) =
+            Self::as_slices_mut(&mut self.buffer, self.end, self.start);
+
+        'b: {
+            if to_read_left.is_empty() {
+                break 'b;
+            }
+
+            let Poll::Ready(n) = Pin::new(&mut *stream).poll_read(cx, to_read_left)? else {
+                break 'b;
+            };
+            Self::add_last_n(&mut self.end, cap, self.start, n);
+
+            if n == 0 {
+                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+            }
+
+            if to_read_right.is_empty() || to_read_left.len() != n {
+                break 'b;
+            }
+
+            let Poll::Ready(n) = Pin::new(stream).poll_read(cx, to_read_right)? else {
+                break 'b;
+            };
+            Self::add_last_n(&mut self.end, cap, self.start, n);
+
+            if n == 0 {
+                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+            }
+        }
+
+        if let Some(chunk_len) = self.extract_chunk_len(self.cursor) {
+            if Self::distance(self.cursor, self.end, cap) >= chunk_len + TAG_SIZE {
+                if self.cursor > self.end {
+                    let rotate_by = cap - self.cursor;
+                    self.buffer.rotate_right(rotate_by);
+                    self.start += rotate_by;
+                    self.end += rotate_by;
+                    self.cursor = 0;
+                }
+
+                let tag = &self.buffer[self.cursor..][..crypto::TAG_SIZE];
+                let tag: [u8; crypto::TAG_SIZE] = tag.try_into().unwrap();
+                let to_decrypt = &mut self.buffer[self.cursor + TAG_SIZE..][..chunk_len];
+                _ = crypto::decrypt_separate_tag(to_decrypt, *ss, tag);
+
+                self.cursor = wrap(self.cursor + chunk_len + TAG_SIZE, cap);
+            }
+        }
+
+        let prev_len = bytes.len();
+
+        while !bytes.is_empty() {
+            if self.current_chunk_len == 0
+                && let Some(chunk_len) = self.extract_chunk_len(self.start)
+            {
+                self.start += TAG_SIZE;
+                self.current_chunk_len = chunk_len;
+            }
+
+            let end = wrap(self.start + self.current_chunk_len, cap);
+            let (mut left, mut right) = Self::as_slices_mut(&mut self.buffer, self.start, end);
+            if left.len() + right.len() == 0 {
+                break;
+            }
+
+            fn take<'a>(bytes: &mut &'a mut [u8], n: usize) -> &'a mut [u8] {
+                bytes.take_mut(..n).unwrap()
+            }
+
+            let common_len = bytes.len().min(left.len());
+            take(&mut bytes, common_len).copy_from_slice(take(&mut left, common_len));
+            let common_len = bytes.len().min(right.len());
+            take(&mut bytes, common_len).copy_from_slice(take(&mut right, common_len));
+        }
+
+        let red = prev_len - bytes.len();
+
+        if red == 0 {
+            return Poll::Pending;
+        }
+
+        Self::remove_first_n(&mut self.start, cap, self.end, red);
+        Poll::Ready(Ok(red))
+    }
+
+    fn extract_chunk_len(&self, offset: usize) -> Option<usize> {
+        let chunk_len = self.buffer.iter().cycle().take(self.end).skip(offset + crypto::TAG_SIZE);
+        let chunk_len = chunk_len.copied().next_chunk::<2>().ok()?;
+        Some(u16::from_be_bytes(chunk_len) as usize)
+    }
+}
+
+struct WriteCursor {
+    buffer: VecDeque<u8>,
     cursor: usize,
 }
 
 const TAG_SIZE: usize = crypto::TAG_SIZE + 2;
 
-impl Cursor {
+impl WriteCursor {
     fn new(cap: usize) -> Self {
-        Self {
-            buffer: vec![0; cap].into_boxed_slice(),
-            start: 0,
-            end: TAG_SIZE * 2,
-            cursor: TAG_SIZE,
-        }
+        let mut buffer = VecDeque::with_capacity(cap);
+        buffer.extend([0; TAG_SIZE * 2]);
+        Self { buffer, cursor: TAG_SIZE }
     }
 
     fn write_to(
         &mut self,
         cx: &mut std::task::Context<'_>,
+        ss: &SharedSecret,
+        rng: impl CryptoRngCore,
+        bytes: &[u8],
         stream: Pin<&mut impl AsyncWrite>,
-    ) -> Poll<io::Result<()>> {
-        let to_write = &self.buffer[self.start + TAG_SIZE..self.cursor];
+    ) -> Poll<io::Result<usize>> {
+        let to_write = &self.buffer.as_slices().0[..self.cursor - TAG_SIZE];
 
         if !to_write.is_empty() {
             let n = futures::ready!(stream.poll_write(cx, to_write))?;
-            self.start += n;
+            self.buffer.drain(..n);
+            self.cursor -= n;
 
             if n == 0 {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
         }
 
-        if self.start + TAG_SIZE == self.cursor {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
-    }
-
-    fn read_from(
-        &mut self,
-        ss: &SharedSecret,
-        rng: impl CryptoRngCore,
-        cx: &mut std::task::Context<'_>,
-        mut stream: Pin<&mut impl AsyncRead>,
-    ) -> Poll<io::Result<()>> {
-        let cap = self.buffer.len();
-        let (read_a, write_b) = if self.end < self.start {
-            (&mut self.buffer[self.end..self.start], &mut [][..])
-        } else {
-            let (left, right) = self.buffer.split_at_mut(self.end);
-            (&mut left[..self.start], right)
-        };
-
-        let mut written = false;
-
-        if !read_a.is_empty() {
-            written = true;
-            let n = futures::ready!(stream.as_mut().poll_read(cx, read_a))?;
-            self.end += n;
-
-            if n == 0 {
-                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+        let free_cap = self.buffer.capacity() - self.buffer.len();
+        if free_cap == 0 {
+            if self.can_flush() {
+                self.flush(ss, rng);
             }
+            return Poll::Pending;
         }
 
-        if !write_b.is_empty() && self.end == cap {
-            written = true;
-            let n = futures::ready!(stream.poll_read(cx, read_a))?;
-            self.end = n;
+        let read_len = free_cap.min(bytes.len());
+        self.buffer.extend(&bytes[..read_len]);
 
-            if n == 0 {
-                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
-            }
-        }
-
-        if self.end * (self.end == self.buffer.len()) as usize == self.start {
-            self.flush(ss, rng)
-        }
-
-        if written {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
+        Poll::Ready(Ok(read_len))
     }
 
     fn can_flush(&self) -> bool {
-        self.cursor + TAG_SIZE != self.end
+        self.cursor + TAG_SIZE <= self.buffer.len()
+    }
+
+    fn force_flush(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        ss: &SharedSecret,
+        rng: impl CryptoRngCore,
+        stream: &mut (impl AsyncWrite + Unpin),
+    ) -> Poll<io::Result<()>> {
+        self.flush(ss, rng);
+        let to_write = &self.buffer.as_slices().0[..self.cursor - TAG_SIZE];
+        if to_write.is_empty() {
+            return Poll::Ready(Ok(()));
+        }
+
+        let n = futures::ready!(Pin::new(stream).poll_write(cx, to_write))?;
+        self.buffer.drain(..n);
+        self.cursor -= n;
+
+        if n == 0 {
+            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+        }
+
+        if self.cursor == TAG_SIZE {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
     }
 
     fn flush(&mut self, ss: &SharedSecret, rng: impl CryptoRngCore) {
-        if self.start > self.end {
-            let rotate_by = self.start;
-            self.start = 0;
-            self.cursor -= rotate_by;
-            self.end += self.buffer.len() - rotate_by;
-            self.buffer.rotate_left(rotate_by);
+        if !self.can_flush() {
+            return;
         }
 
-        let tag =
-            crypto::encrypt(&mut self.buffer[self.cursor + crypto::TAG_SIZE..self.end], *ss, rng);
-        self.buffer[self.cursor..self.cursor].copy_from_slice(&tag);
+        let (left, right) = self.buffer.as_mut_slices();
+        let slice = if self.cursor > left.len() {
+            &mut right[self.cursor - left.len()..]
+        } else {
+            &mut self.buffer.make_contiguous()[self.cursor..]
+        };
 
-        self.start = self.cursor - TAG_SIZE;
-        self.cursor = wrap(self.end + TAG_SIZE, self.buffer.len());
-        self.end = wrap(self.end + TAG_SIZE * 2, self.buffer.len());
+        let len = slice.len() - TAG_SIZE;
+        let tag = crypto::encrypt(&mut slice[crypto::TAG_SIZE..], *ss, rng);
+        slice[..crypto::TAG_SIZE - 2].copy_from_slice(&tag);
+        slice[crypto::TAG_SIZE - 2..crypto::TAG_SIZE].copy_from_slice(&len.to_be_bytes());
+
+        self.cursor += slice.len();
     }
 }
 
 fn wrap(num: usize, around: usize) -> usize {
-    if num > around {
+    if num >= around {
         num - around
     } else {
         num

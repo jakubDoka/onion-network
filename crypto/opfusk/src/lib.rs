@@ -12,7 +12,7 @@ use {
     libp2p_identity::PeerId,
     multihash::Multihash,
     rand_core::CryptoRngCore,
-    std::{collections::VecDeque, io, ops::DerefMut, pin::Pin, task::Poll, usize},
+    std::{io, ops::DerefMut, pin::Pin, task::Poll, u16, usize},
 };
 
 #[derive(Clone)]
@@ -201,13 +201,12 @@ pub struct Output<R, T> {
     rng: R,
     sender_ss: SharedSecret,
     receiver_ss: SharedSecret,
-    buffer_cap: usize,
     read_buffer: Vec<u8>,
     readable_end: usize,
     readable_start: usize,
     chunk_reminder: usize,
     write_buffer: Vec<u8>,
-    in_progress_start: usize,
+    writable_end: usize,
     writable_start: usize,
 }
 
@@ -224,7 +223,6 @@ impl<R, T> Output<R, T> {
             rng,
             sender_ss,
             receiver_ss,
-            buffer_cap: _buffer_cap,
             read_buffer: Vec::with_capacity(_buffer_cap),
             chunk_reminder: 0,
             readable_end: 0,
@@ -234,7 +232,7 @@ impl<R, T> Output<R, T> {
                 vec.extend([0; TAG_SIZE]);
                 vec
             },
-            in_progress_start: TAG_SIZE,
+            writable_end: 0,
             writable_start: 0,
         }
     }
@@ -243,16 +241,16 @@ impl<R, T> Output<R, T> {
     where
         R: CryptoRngCore,
     {
-        let (rest, slice) = self.write_buffer.split_at_mut(self.in_progress_start);
-        let tag = crypto::encrypt(slice, self.sender_ss, &mut self.rng);
+        let in_progress = &mut self.write_buffer[self.writable_end..];
+        let (tag_part, message) = in_progress.split_at_mut(TAG_SIZE);
+        log::debug!("key: {:?}", self.sender_ss);
+        let tag = crypto::encrypt(message, self.sender_ss, &mut self.rng);
         log::debug!("tag: {:?}", tag);
-        let tag_start = rest.len() - TAG_SIZE;
-        rest[tag_start + 2..].copy_from_slice(&tag);
-        let body_len = slice.len() as u16;
-        rest[tag_start..][..2].copy_from_slice(&body_len.to_be_bytes());
-        log::debug!("body len: {}", body_len);
-        log::debug!("send key: {:?}", self.sender_ss);
-        self.in_progress_start += slice.len() + TAG_SIZE;
+        tag_part[2..].copy_from_slice(&tag);
+        let body_len = message.len() as u16;
+        log::debug!("body_len: {}", body_len);
+        tag_part[..2].copy_from_slice(&body_len.to_be_bytes());
+        self.writable_end = self.write_buffer.len();
         self.write_buffer.extend([0; TAG_SIZE]);
     }
 }
@@ -271,45 +269,58 @@ where
 
         let prev_len = buf.len();
 
-        'o: loop {
-            let buffer = get_buffer(&mut s.write_buffer);
-            // make sure next tag fits
-            let n = buffer.len().min(buf.len());
-            buffer[..n].copy_from_slice((&mut buf).take(..n).unwrap());
-            extend_used_buffer(&mut s.write_buffer, n);
-
-            if s.write_buffer.len().saturating_sub(s.in_progress_start)
-                > s.write_buffer.capacity() / 2
-            {
-                s.encrypt_in_progress();
-            }
-
-            let written = 'try_write_inner: {
-                let to_write = &s.write_buffer[s.writable_start..s.in_progress_start];
-                if to_write.is_empty() {
-                    break 'try_write_inner false;
+        let mut updated = true;
+        while std::mem::take(&mut updated) {
+            'encrypt: {
+                if s.write_buffer.len() - s.writable_end < s.write_buffer.capacity() / 2 {
+                    break 'encrypt;
                 }
 
-                let Poll::Ready(n) = Pin::new(&mut s.stream).poll_write(cx, to_write)? else {
-                    break 'o;
+                s.encrypt_in_progress();
+                updated = true;
+            }
+
+            'write_inner: {
+                let available = &s.write_buffer[s.writable_start..s.writable_end];
+                if available.is_empty() {
+                    break 'write_inner;
+                }
+
+                log::debug!("available: {:?}", available);
+
+                let Poll::Ready(n) = Pin::new(&mut s.stream).poll_write(cx, available)? else {
+                    break 'write_inner;
                 };
-                s.writable_start += n;
 
                 if n == 0 {
-                    return Poll::Ready(Ok(0));
+                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                 }
 
-                true
-            };
-
-            if s.in_progress_start >= s.write_buffer.capacity() && s.writable_start > TAG_SIZE * 2 {
-                s.write_buffer.drain(..s.writable_start);
-                s.in_progress_start -= s.writable_start;
-                s.writable_start = 0;
+                s.writable_start += n;
+                updated = true;
             }
 
-            if !written {
-                break;
+            'gc: {
+                if s.write_buffer.len() != s.write_buffer.capacity() {
+                    break 'gc;
+                }
+
+                s.write_buffer.drain(..s.writable_start);
+                s.writable_end -= s.writable_start;
+                s.writable_start = 0;
+                updated = true;
+            }
+
+            'write_buf: {
+                let buffer = get_buffer(&mut s.write_buffer);
+                let to_write = buffer.len().min(buf.len());
+                if to_write == 0 {
+                    break 'write_buf;
+                }
+
+                buffer[..to_write].copy_from_slice((&mut buf).take(..to_write).unwrap());
+                extend_used_buffer(&mut s.write_buffer, to_write);
+                updated = true;
             }
         }
 
@@ -328,19 +339,18 @@ where
     ) -> Poll<io::Result<()>> {
         let s = self.deref_mut();
 
-        if s.write_buffer.len().saturating_sub(s.in_progress_start) != 0 {
+        if s.write_buffer.len().saturating_sub(s.writable_end) != TAG_SIZE {
             s.encrypt_in_progress();
         }
 
-        let mut to_write = &s.write_buffer[s.writable_start..s.in_progress_start];
+        let mut to_write = &s.write_buffer[s.writable_start..s.writable_end];
         while !to_write.is_empty() {
+            log::debug!("to_write: {:?}", to_write);
             let n = futures::ready!(Pin::new(&mut s.stream).poll_write(cx, to_write))?;
             to_write = &to_write[n..];
             s.writable_start += n;
-            log::debug!("flushed: {}", n);
         }
 
-        log::debug!("flushed all");
         Pin::new(&mut s.stream).poll_flush(cx)
     }
 
@@ -363,132 +373,101 @@ where
         cx: &mut std::task::Context<'_>,
         mut buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        log::debug!("read: {}", buf.len());
+        log::debug!("readd: {}", buf.len());
 
         let s = self.get_mut();
 
         let prev_len = buf.len();
 
-        'o: loop {
-            while !buf.is_empty() {
-                if s.chunk_reminder == 0 && s.read_buffer.len() - s.readable_end >= TAG_SIZE {
-                    let body_len = u16::from_be_bytes(
-                        s.read_buffer[s.readable_end..][..2].try_into().unwrap(),
-                    ) as usize;
-                    s.chunk_reminder = body_len;
-                    s.readable_start += TAG_SIZE;
-                    s.readable_end += TAG_SIZE + body_len;
-                    if s.chunk_reminder == 0 {
-                        // thats useless and suspicious
-                        return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
-                    }
-                }
-
-                let readable = &s.read_buffer[s.readable_start..s.readable_end];
-                if readable.is_empty() {
-                    break;
-                }
-                let to_copy = buf.len().min(s.chunk_reminder);
-                if to_copy == 0 {
-                    break;
-                }
-                buf.take_mut(..to_copy).unwrap().copy_from_slice(&readable[..to_copy]);
-                s.readable_start += to_copy;
-                s.chunk_reminder -= to_copy;
-            }
-
-            let buffer_is_full = s.read_buffer.len() == s.read_buffer.capacity();
-            if buffer_is_full {
-                if s.readable_start < TAG_SIZE * 2 {
-                    // not worth it garbage collect
-                    break 'o;
+        let mut updated = true;
+        while std::mem::take(&mut updated) {
+            'gc: {
+                if s.read_buffer.len() != s.read_buffer.capacity() {
+                    break 'gc;
                 }
 
                 s.read_buffer.drain(..s.readable_start);
                 s.readable_end -= s.readable_start;
                 s.readable_start = 0;
+                updated = true;
             }
 
-            let prev_read_end = s.readable_end;
-
-            let mut has_tag = s.read_buffer.len() - s.readable_end >= TAG_SIZE;
-            'try_read_inner_prefix: {
-                if has_tag {
-                    break 'try_read_inner_prefix;
-                }
-
+            'read_inner: {
                 let buffer = get_buffer(&mut s.read_buffer);
-                let Poll::Ready(n) = Pin::new(&mut s.stream).poll_read(cx, buffer)? else {
-                    break 'try_read_inner_prefix;
-                };
-
-                if n == 0 {
-                    return Poll::Ready(Ok(0));
+                if buffer.is_empty() {
+                    break 'read_inner;
                 }
-
+                let Poll::Ready(n) = Pin::new(&mut s.stream).poll_read(cx, buffer)? else {
+                    break 'read_inner;
+                };
                 extend_used_buffer(&mut s.read_buffer, n);
 
-                has_tag = s.read_buffer.len() - s.readable_end >= TAG_SIZE;
-            }
-
-            let mut has_body = false;
-            'try_read_inner_body: {
-                if !has_tag {
-                    break 'try_read_inner_body;
+                if n == 0 {
+                    return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
                 }
 
-                let body_len =
-                    u16::from_be_bytes(s.read_buffer[s.readable_end..][..2].try_into().unwrap())
-                        as usize;
+                log::debug!("readed: {}", n);
 
-                if body_len > s.read_buffer.capacity() {
-                    return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
-                }
+                updated = true;
 
-                has_body = s.read_buffer.len() - s.readable_end >= TAG_SIZE + body_len;
-                if has_body {
-                    break 'try_read_inner_body;
-                }
+                let available = &mut s.read_buffer[s.readable_end..];
 
-                let buffer = get_buffer(&mut s.read_buffer);
-                let Poll::Ready(n) = Pin::new(&mut s.stream).poll_read(cx, buffer)? else {
-                    break 'try_read_inner_body;
+                log::debug!("available: {:?}", available);
+
+                let Some((&mut len, rest)) = available.split_first_chunk_mut::<2>() else {
+                    break 'read_inner;
                 };
 
-                if n == 0 {
-                    return Poll::Ready(Ok(0));
-                }
+                let len = u16::from_be_bytes(len) as usize + crypto::TAG_SIZE;
+                let Some(body) = rest.get_mut(..len) else {
+                    log::debug!("len: {len} {}", rest.len());
+                    break 'read_inner;
+                };
 
-                extend_used_buffer(&mut s.read_buffer, n);
-
-                has_body = s.read_buffer.len() - s.readable_end >= TAG_SIZE + body_len;
-            }
-
-            if has_body {
-                let tag: [u8; crypto::TAG_SIZE] =
-                    s.read_buffer[s.readable_end + 2..].try_into().unwrap();
-                let body_len =
-                    u16::from_be_bytes(s.read_buffer[s.readable_end..][..2].try_into().unwrap())
-                        as usize;
-                log::debug!("tag recv: {:?}", tag);
-                log::debug!("body len recv: {}", body_len);
+                log::debug!("len: {len}");
                 log::debug!("recv key: {:?}", s.receiver_ss);
-                let body = &mut s.read_buffer[TAG_SIZE..][..body_len];
+                log::debug!("body: {:?}", body);
+
+                let Some((&mut tag, body)) = body.split_first_chunk_mut::<{ crypto::TAG_SIZE }>()
+                else {
+                    break 'read_inner;
+                };
+
                 if !crypto::decrypt_separate_tag(body, s.receiver_ss, tag) {
                     return Poll::Ready(Err(io::ErrorKind::PermissionDenied.into()));
                 }
+                s.readable_end += len + 2;
             }
 
-            log::debug!("rr",);
-            if (prev_read_end == s.readable_end || buf.is_empty()) && !has_body {
-                log::debug!(
-                    "no progress, {:?} {:?} {:?} {:?}",
-                    buf.len(),
-                    s.read_buffer.len(),
-                    prev_read_end,
-                    s.readable_end
-                );
-                break;
+            'advacne_chunk: {
+                if s.chunk_reminder != 0 || s.readable_start == s.readable_end {
+                    log::debug!(
+                        "chunk_reminder: {} {} {}",
+                        s.chunk_reminder,
+                        s.readable_start,
+                        s.readable_end
+                    );
+                    break 'advacne_chunk;
+                }
+
+                let len = &s.read_buffer[s.readable_start..][..2];
+                let len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
+                s.readable_start += TAG_SIZE;
+                s.chunk_reminder = len;
+                updated = true;
+            }
+
+            'write_buf: {
+                let read_len = s.chunk_reminder.min(buf.len());
+                if read_len == 0 {
+                    break 'write_buf;
+                }
+
+                let available = &s.read_buffer[s.readable_start..][..read_len];
+                buf.take_mut(..read_len).unwrap().copy_from_slice(available);
+                s.chunk_reminder -= read_len;
+                s.readable_start += read_len;
+                updated = true;
             }
         }
 
@@ -496,15 +475,10 @@ where
         if red == 0 {
             Poll::Pending
         } else {
-            log::debug!("read: {}", red);
+            log::debug!("red: {}", red);
             Poll::Ready(Ok(red))
         }
     }
-}
-
-fn extend_used_buffer(buffer: &mut Vec<u8>, n: usize) {
-    let len = buffer.len();
-    unsafe { buffer.set_len(len + n) }
 }
 
 const TAG_SIZE: usize = crypto::TAG_SIZE + 2;
@@ -538,7 +512,12 @@ fn get_buffer(buffer: &mut Vec<u8>) -> &mut [u8] {
     let cap = buffer.capacity();
     let len = buffer.len();
     let ptr = buffer.as_mut_ptr();
-    unsafe { std::slice::from_raw_parts_mut(ptr.add(len), cap) }
+    unsafe { std::slice::from_raw_parts_mut(ptr.add(len), cap - len) }
+}
+
+fn extend_used_buffer(buffer: &mut Vec<u8>, n: usize) {
+    let len = buffer.len();
+    unsafe { buffer.set_len(len + n) }
 }
 
 #[cfg(test)]
@@ -555,7 +534,7 @@ mod tests {
         let kp = crypto::sign::Keypair::new(OsRng);
         let transport = MemoryTransport::default()
             .upgrade(Version::V1)
-            .authenticate(super::Config::new(OsRng, kp))
+            .authenticate(super::Config::new(OsRng, kp).with_buffer_size(300))
             .multiplex(libp2p::yamux::Config::default())
             .boxed();
         let behaviour = libp2p::ping::Behaviour::default();

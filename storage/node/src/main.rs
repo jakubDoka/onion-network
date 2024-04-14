@@ -6,13 +6,15 @@
 
 use {
     anyhow::Context as _,
-    chain_api::{Mnemonic, NodeKeys, SateliteStake, SateliteStakeEvent, StakeEvents},
+    chain_api::{Mnemonic, NodeIdentity, NodeKeys, SateliteStake, SateliteStakeEvent, StakeEvents},
     codec::Codec,
     component_utils::PacketReader,
     dht::Route,
     libp2p::{
+        core::{muxing::StreamMuxerBox, upgrade::Version},
         futures::{
             channel::{mpsc, oneshot},
+            future::Either,
             stream::FuturesUnordered,
             FutureExt, SinkExt,
         },
@@ -20,6 +22,8 @@ use {
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId,
     },
+    opfusk::ToPeerId,
+    rand_core::OsRng,
     rpc::CallId,
     std::{
         collections::{hash_map, HashMap},
@@ -77,23 +81,34 @@ impl Node {
         storage: storage::Storage,
         keys: NodeKeys,
         stake_events: StakeEvents<SateliteStakeEvent>,
-        satelites: Vec<SateliteStake>,
+        satelites: Vec<(NodeIdentity, SateliteStake)>,
     ) -> anyhow::Result<Self> {
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys.libp2p_keypair())
-            .with_tokio()
-            .with_tcp(
-                libp2p::tcp::Config::default(),
-                libp2p::noise::Config::new,
-                libp2p::yamux::Config::default,
-            )?
-            .with_behaviour(|_| Behaviour {
+        use libp2p::core::Transport;
+
+        let mut swarm = libp2p::Swarm::new(
+            libp2p::tcp::tokio::Transport::default()
+                .upgrade(Version::V1)
+                .authenticate(opfusk::Config::new(OsRng, keys.sign))
+                .multiplex(libp2p::yamux::Config::default())
+                .or_transport(
+                    libp2p::websocket::WsConfig::new(libp2p::tcp::tokio::Transport::default())
+                        .upgrade(Version::V1)
+                        .authenticate(opfusk::Config::new(OsRng, keys.sign))
+                        .multiplex(libp2p::yamux::Config::default()),
+                )
+                .map(|option, _| match option {
+                    Either::Left((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
+                    Either::Right((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
+                })
+                .boxed(),
+            Behaviour {
                 dht: dht::Behaviour::new(chain_api::filter_incoming),
                 ..Default::default()
-            })?
-            .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(std::time::Duration::from_secs(60))
-            })
-            .build();
+            },
+            keys.sign.to_peer_id(),
+            libp2p::swarm::Config::with_tokio_executor()
+                .with_idle_connection_timeout(Duration::from_micros(10)),
+        );
 
         swarm
             .listen_on(
@@ -103,8 +118,10 @@ impl Node {
             )
             .context("oprning listener")?;
 
-        let node_data =
-            satelites.into_iter().map(|s| Route::new(s.id, chain_api::unpack_node_addr(s.addr)));
+        let node_data = satelites
+            .into_iter()
+            .map(|(id, s)| Route::new(id.sign, chain_api::unpack_node_addr(s.addr)));
+
         swarm.behaviour_mut().dht.table.bulk_insert(node_data);
 
         let (sd, rc) = mpsc::channel(100);

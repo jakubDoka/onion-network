@@ -479,8 +479,12 @@ pub fn stake_event(s: &mut impl AsMut<dht::Behaviour>, event: impl Into<ChatStak
 }
 
 pub fn unpack_node_addr(addr: NodeAddress) -> Multiaddr {
+    unpack_node_addr_offset(addr, 0)
+}
+
+pub fn unpack_node_addr_offset(addr: NodeAddress, port_offset: u16) -> Multiaddr {
     let (addr, port) = addr.into();
-    unpack_socket_addr(SocketAddr::new(addr, port))
+    unpack_socket_addr(SocketAddr::new(addr, port + port_offset))
 }
 
 pub fn unpack_socket_addr(addr: SocketAddr) -> Multiaddr {

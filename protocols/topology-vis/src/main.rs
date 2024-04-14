@@ -409,7 +409,8 @@ async fn main() {
         for (id, node) in nodes {
             let ip = node.addr;
 
-            let addr = chain_api::unpack_node_addr(ip).with(multiaddr::Protocol::Ws("/".into()));
+            let addr =
+                chain_api::unpack_node_addr_offset(ip, 1).with(multiaddr::Protocol::Ws("/".into()));
             let route = Route::new(id.sign, addr);
             let peer_id = route.peer_id();
             swarm.behaviour_mut().dht.table.insert(route);

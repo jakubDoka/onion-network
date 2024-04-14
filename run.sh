@@ -6,16 +6,22 @@ sod() { export "$1"="${!1:-$2}"; }
 is_running() { pgrep -f "$1" > /dev/null; }
 ensure_dir() { test -d $1 || mkdir -p $1; }
 
-export PORT_ALLOC=42069
+ensure_dir tmp
+echo 42069 > tmp/port
+echo 0 > tmp/nonce
+
 alloc_port() {
-	export PORT_ALLOC=$((PORT_ALLOC + 1))
-	echo $PORT_ALLOC
+	PORT=$(cat tmp/port)
+	PORT=$((PORT + 1))
+	echo $PORT > tmp/port
+	echo $((PORT - 1))
 }
 
-export NONCE_ALLOC=0
 alloc_nonce() {
-	export NONCE_ALLOC=$((NONCE_ALLOC + 1))
-	echo $NONCE_ALLOC
+	NONCE=$(cat tmp/nonce)
+	NONCE=$((NONCE + 1))
+	echo $NONCE > tmp/nonce
+	echo $((NONCE - 1))
 }
 
 creq trunk
@@ -73,7 +79,7 @@ load_mnemonic() {
 }
 
 cleanup_files() {
-	rm -rf node_mnemonics logs storage
+	rm -rf tmp
 }
 generate_falcon() { (cd $FALCON_ROOT && sh transpile.sh || exit 1); }
 init_npm() { (cd $WALLET_INTEGRATION && npm i || exit 1); }

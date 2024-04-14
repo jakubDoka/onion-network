@@ -98,7 +98,7 @@ impl Node {
         ));
 
         let nodes = node_data.into_iter().map(|(id, stake)| {
-            let addr = chain_api::unpack_node_addr(stake.addr);
+            let addr = chain_api::unpack_node_addr_offset(stake.addr, 1);
             Route::new(id.sign, addr.with(multiaddr::Protocol::Ws("/".into())))
         });
         swarm.behaviour_mut().dht.table.bulk_insert(nodes);

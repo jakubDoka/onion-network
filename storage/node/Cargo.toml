@@ -13,7 +13,7 @@ description = "node that stores data requested by satelites"
 
 [dependencies]
 anyhow = { workspace = true }
-libp2p = { workspace = true, features = ["tcp", "noise", "macros", "tokio", "yamux"] }
+libp2p = { workspace = true, features = ["tcp", "macros", "tokio", "yamux"] }
 log = { workspace = true }
 bitflags = "2.4.1"
 env_logger = "0.11.0"
@@ -21,6 +21,7 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 smallvec = "1.11.1"
 thiserror = "1.0.50"
 tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
+lmdb-zero = "0.4.4"
 
 streaming = { workspace = true }
 rpc = { workspace = true }
@@ -33,7 +34,7 @@ component-utils = { workspace = true }
 config = { workspace = true }
 handlers.workspace = true
 codec.workspace = true
-lmdb-zero = "0.4.4"
+opfusk.workspace = true
 
 [lints]
 workspace = true

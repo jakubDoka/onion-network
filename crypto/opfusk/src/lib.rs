@@ -384,7 +384,7 @@ where
                 updated = true;
             }
 
-            'read_inner: {
+            'read_inner: loop {
                 let buffer = get_buffer(&mut s.read_buffer);
                 if buffer.is_empty() {
                     break 'read_inner;
@@ -399,42 +399,45 @@ where
                 }
 
                 updated = true;
+            }
 
+            'decyrpt: loop {
                 let available = &mut s.read_buffer[s.readable_end..];
 
                 let Some((&mut len, rest)) = available.split_first_chunk_mut::<2>() else {
-                    break 'read_inner;
+                    break 'decyrpt;
                 };
 
                 let len = u16::from_be_bytes(len) as usize + crypto::TAG_SIZE;
                 let Some(body) = rest.get_mut(..len) else {
-                    break 'read_inner;
+                    break 'decyrpt;
                 };
 
                 let Some((&mut tag, body)) = body.split_first_chunk_mut::<{ crypto::TAG_SIZE }>()
                 else {
-                    break 'read_inner;
+                    break 'decyrpt;
                 };
 
                 if !crypto::decrypt_separate_tag(body, s.receiver_ss, tag) {
                     return Poll::Ready(Err(io::ErrorKind::PermissionDenied.into()));
                 }
                 s.readable_end += len + 2;
-            }
-
-            'advacne_chunk: {
-                if s.chunk_reminder != 0 || s.readable_start == s.readable_end {
-                    break 'advacne_chunk;
-                }
-
-                let len = &s.read_buffer[s.readable_start..][..2];
-                let len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
-                s.readable_start += TAG_SIZE;
-                s.chunk_reminder = len;
                 updated = true;
             }
 
-            'write_buf: {
+            'write_buf: loop {
+                'advacne_chunk: {
+                    if s.chunk_reminder != 0 || s.readable_start == s.readable_end {
+                        break 'advacne_chunk;
+                    }
+
+                    let len = &s.read_buffer[s.readable_start..][..2];
+                    let len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
+                    s.readable_start += TAG_SIZE;
+                    s.chunk_reminder = len;
+                    updated = true;
+                }
+
                 let read_len = s.chunk_reminder.min(buf.len());
                 if read_len == 0 {
                     break 'write_buf;
@@ -533,14 +536,14 @@ mod tests {
     use {
         futures::StreamExt,
         libp2p::{Multiaddr, Transport},
-        libp2p_core::{transport::MemoryTransport, upgrade::Version},
+        libp2p_core::upgrade::Version,
         rand_core::OsRng,
         std::time::Duration,
     };
 
     fn create_swarm() -> (libp2p::Swarm<libp2p::ping::Behaviour>, crypto::sign::Keypair) {
         let kp = crypto::sign::Keypair::new(OsRng);
-        let transport = MemoryTransport::default()
+        let transport = libp2p::tcp::tokio::Transport::default()
             .upgrade(Version::V1)
             .authenticate(super::Config::new(OsRng, kp).with_buffer_size(300))
             .multiplex(libp2p::yamux::Config::default())
@@ -568,8 +571,8 @@ mod tests {
         let (mut swarm1, _kp1) = create_swarm();
         let (mut swarm2, _kp2) = create_swarm();
 
-        swarm1.listen_on("/memory/1".parse().unwrap()).unwrap();
-        swarm2.dial("/memory/1".parse::<Multiaddr>().unwrap()).unwrap();
+        swarm1.listen_on("/ip4/0.0.0.0/tcp/7000".parse().unwrap()).unwrap();
+        swarm2.dial("/ip4/127.0.0.1/tcp/7000".parse::<Multiaddr>().unwrap()).unwrap();
 
         _ = tokio::time::timeout(Duration::from_secs(5), async {
             loop {

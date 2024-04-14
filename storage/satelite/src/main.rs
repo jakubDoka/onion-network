@@ -7,13 +7,16 @@ use {
     chain_api::{Mnemonic, NodeKeys},
     codec::Codec,
     libp2p::{
-        core::ConnectedPoint,
+        core::{muxing::StreamMuxerBox, upgrade::Version, ConnectedPoint},
+        futures::future::Either,
         multiaddr::Protocol,
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId,
     },
+    opfusk::ToPeerId,
+    rand_core::OsRng,
     rpc::CallId,
-    std::{future::Future, net::Ipv4Addr, ops::DerefMut, task::Poll},
+    std::{future::Future, net::Ipv4Addr, ops::DerefMut, task::Poll, time::Duration},
     storage_spec::rpcs,
 };
 
@@ -48,18 +51,29 @@ pub struct Satelite {
 
 impl Satelite {
     fn new(config: Config, store: Storage, keys: NodeKeys) -> anyhow::Result<Self> {
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys.libp2p_keypair())
-            .with_tokio()
-            .with_tcp(
-                libp2p::tcp::Config::default(),
-                libp2p::noise::Config::new,
-                libp2p::yamux::Config::default,
-            )?
-            .with_behaviour(|_| Behaviour::default())?
-            .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(std::time::Duration::from_secs(60))
-            })
-            .build();
+        use libp2p::core::Transport;
+
+        let mut swarm = libp2p::Swarm::new(
+            libp2p::tcp::tokio::Transport::default()
+                .upgrade(Version::V1)
+                .authenticate(opfusk::Config::new(OsRng, keys.sign))
+                .multiplex(libp2p::yamux::Config::default())
+                .or_transport(
+                    libp2p::websocket::WsConfig::new(libp2p::tcp::tokio::Transport::default())
+                        .upgrade(Version::V1)
+                        .authenticate(opfusk::Config::new(OsRng, keys.sign))
+                        .multiplex(libp2p::yamux::Config::default()),
+                )
+                .map(|option, _| match option {
+                    Either::Left((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
+                    Either::Right((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
+                })
+                .boxed(),
+            Behaviour::default(),
+            keys.sign.to_peer_id(),
+            libp2p::swarm::Config::with_tokio_executor()
+                .with_idle_connection_timeout(Duration::from_micros(10)),
+        );
 
         swarm
             .listen_on(

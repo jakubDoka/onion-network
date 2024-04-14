@@ -8,7 +8,6 @@ members = [
 	"crypto/*",
 	"chat/*",
 	"chain/*",
-	"pocs/kyber_from_mnemonic",
 	"storage/*",
 ]
 
@@ -49,6 +48,7 @@ chat-spec = { path = "chat/spec" }
 crypto = { path = "crypto/crypto", features = ["codec", "arrayvec"] }
 falcon = { path = "crypto/falcon/falcon" }
 kyber = { path = "crypto/kyber" }
+opfusk = { path = "crypto/opfusk" }
 
 codec-derive = { path = "utils/codec-derive" }
 codec = { path = "utils/codec" }
@@ -58,9 +58,6 @@ handlers = { path = "utils/handlers" }
 
 chain-api = { path = "chain/api", default-features = false }
 chain-types = { path = "chain/types", default-features = false }
-
-storage-node = { path = "storage/node" }
-storage-satelite = { path = "storage/satelite" }
 storage-spec = { path = "storage/spec" }
 berkleamp-welch = { path = "storage/berkleamp-welch" }
 

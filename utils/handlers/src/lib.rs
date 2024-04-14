@@ -177,6 +177,10 @@ pub trait Handler<'a, C: Context, T: FromRequestOwned<C> + Send + 'static, R: Co
             self.call_computed(args, r).await
         }
     }
+
+    fn no_resp(self) -> NoResp<Self> {
+        NoResp { handler: self }
+    }
 }
 
 macro_rules! impl_handler {
@@ -281,5 +285,32 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         self.requests.poll_next_unpin(cx)
+    }
+}
+
+#[derive(Clone)]
+pub struct NoResp<H> {
+    handler: H,
+}
+
+impl<'a, H, S: Context, T, R> Handler<'a, S, T, R> for NoResp<H>
+where
+    H: Handler<'a, S, T, R>,
+    T: FromRequestOwned<S> + Send + 'static,
+    R: Codec<'a>,
+{
+    type Future = impl Future<Output = Response> + Send;
+
+    fn call_computed(self, args: T, req: R) -> Self::Future {
+        self.handler.call_computed(args, req).map(|e| {
+            if let Response::Failure(e) = e {
+                log::warn!(
+                    "no response from {:?} {:?}",
+                    std::any::type_name::<Self>(),
+                    e.as_slice(),
+                );
+            }
+            Response::DontRespond(DontRespondReason::NoResponse)
+        })
     }
 }

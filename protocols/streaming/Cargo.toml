@@ -19,9 +19,11 @@ void = "1.0.2"
 
 [dev-dependencies]
 tokio = { version = "1.34.0", features = ["macros", "rt", "time"] }
-libp2p = { workspace = true, features = ["noise", "yamux", "tcp", "macros", "tokio"]}
+libp2p = { workspace = true, features = ["yamux", "tcp", "macros", "tokio"]}
 env_logger = "0.11.0"
 dht = { path = "../dht" }
+opfusk = { path = "../../crypto/opfusk" }
+crypto.workspace = true
 
 [lints]
 workspace = true

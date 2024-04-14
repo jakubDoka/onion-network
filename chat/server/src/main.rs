@@ -1,4 +1,5 @@
 #![feature(iter_advance_by)]
+#![feature(never_type)]
 #![feature(trait_alias)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(array_windows)]
@@ -15,23 +16,28 @@ use {
     self::api::{chat::Chat, MissingTopic},
     crate::api::Handler as _,
     anyhow::Context as _,
-    chain_api::{ChainConfig, ChatStake, ChatStakeEvent, Mnemonic, NodeKeys, StakeEvents},
+    chain_api::{
+        ChainConfig, ChatStake, ChatStakeEvent, Mnemonic, NodeIdentity, NodeKeys, StakeEvents,
+    },
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::{mapref::entry::Entry, DashMap},
     dht::Route,
     futures::channel::mpsc,
+    handlers::Handler,
     libp2p::{
-        core::multiaddr,
-        futures::{self, channel::oneshot, SinkExt, StreamExt},
+        core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
+        futures::{self, channel::oneshot, future::Either, SinkExt, StreamExt},
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId,
     },
     onion::{key_share, EncryptedStream, PathId},
+    opfusk::ToPeerId,
+    rand_core::OsRng,
     rpc::CallId,
     std::{
-        collections::HashMap, convert::Infallible, future::Future, io, net::Ipv4Addr,
-        ops::DerefMut, sync::Arc, task::Poll, time::Duration,
+        collections::HashMap, future::Future, io, net::Ipv4Addr, ops::DerefMut, sync::Arc,
+        task::Poll, time::Duration,
     },
     tokio::sync::RwLock,
     topology_wrapper::BuildWrapped,
@@ -97,26 +103,35 @@ impl Server {
     async fn new(
         config: NodeConfig,
         keys: NodeKeys,
-        node_list: Vec<ChatStake>,
+        node_list: Vec<(NodeIdentity, ChatStake)>,
         stake_events: StakeEvents<ChatStakeEvent>,
     ) -> anyhow::Result<Self> {
+        use libp2p::core::Transport;
+
         let NodeConfig { port, ws_port, idle_timeout, .. } = config;
 
         let (sender, receiver) = topology_wrapper::channel();
 
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys.libp2p_keypair())
-            .with_tokio()
-            .with_tcp(
-                libp2p::tcp::Config::new(),
-                libp2p::noise::Config::new,
-                libp2p::yamux::Config::default,
-            )?
-            .with_websocket(libp2p::noise::Config::new, libp2p::yamux::Config::default)
-            .await?
-            .with_behaviour(|kp| Behaviour {
+        let mut swarm = libp2p::Swarm::new(
+            libp2p::tcp::tokio::Transport::default()
+                .upgrade(Version::V1)
+                .authenticate(opfusk::Config::new(OsRng, keys.sign))
+                .multiplex(libp2p::yamux::Config::default())
+                .or_transport(
+                    libp2p::websocket::WsConfig::new(libp2p::tcp::tokio::Transport::default())
+                        .upgrade(Version::V1)
+                        .authenticate(opfusk::Config::new(OsRng, keys.sign))
+                        .multiplex(libp2p::yamux::Config::default()),
+                )
+                .map(|option, _| match option {
+                    Either::Left((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
+                    Either::Right((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
+                })
+                .boxed(),
+            Behaviour {
                 key_share: key_share::Behaviour::new(keys.enc.public_key())
                     .include_in_vis(sender.clone()),
-                onion: onion::Config::new(keys.enc.into(), kp.public().to_peer_id())
+                onion: onion::Config::new(keys.enc.into(), keys.sign.to_peer_id())
                     .max_streams(10)
                     .keep_alive_interval(Duration::from_secs(100))
                     .build()
@@ -127,11 +142,11 @@ impl Server {
                     .build()
                     .include_in_vis(sender.clone()),
                 report: topology_wrapper::report::new(receiver),
-            })?
-            .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(Duration::from_secs(idle_timeout))
-            })
-            .build();
+            },
+            keys.sign.to_peer_id(),
+            libp2p::swarm::Config::with_tokio_executor()
+                .with_idle_connection_timeout(Duration::from_micros(idle_timeout)),
+        );
 
         swarm
             .listen_on(
@@ -150,9 +165,9 @@ impl Server {
             )
             .context("starting to isten for clients")?;
 
-        let node_data = node_list.into_iter().map(|stake| {
+        let node_data = node_list.into_iter().map(|(id, stake)| {
             let addr = chain_api::unpack_node_addr(stake.addr);
-            Route::new(stake.id, addr)
+            Route::new(id.sign, addr)
         });
         swarm.behaviour_mut().dht.table.bulk_insert(node_data);
 
@@ -475,7 +490,7 @@ impl Server {
 }
 
 impl Future for Server {
-    type Output = Infallible;
+    type Output = !;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,

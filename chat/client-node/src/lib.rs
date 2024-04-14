@@ -10,7 +10,8 @@ use {
     libp2p::futures::channel::{mpsc, oneshot},
     onion::SharedSecret,
     rand::{rngs::OsRng, CryptoRng, RngCore},
-    std::{future::Future, marker::PhantomData, pin, task::Poll, time::Duration},
+    std::{future::Future, marker::PhantomData, net::SocketAddr, pin, task::Poll, time::Duration},
+    storage_spec::NodeIdentity,
     web_sys::{
         wasm_bindgen::{closure::Closure, JsCast},
         window,
@@ -48,10 +49,12 @@ fn vault_chat_404(name: ChatName) -> impl FnOnce() -> String {
     move || format!("chat {name} not found in vault")
 }
 
-pub type RequestStream = mpsc::Receiver<RequestInit>;
+pub type RequestChannel = mpsc::Receiver<RequestInit>;
 
 pub enum RequestInit {
-    Request(RawRequest),
+    OnionRequest(RawOnionRequest),
+    StorageRequest(RawStorageRequest),
+    SateliteRequest(RawSateliteRequest),
     Subscription(SubscriptionInit),
     EndSubscription(Topic),
 }
@@ -59,9 +62,10 @@ pub enum RequestInit {
 impl RequestInit {
     pub fn topic(&self) -> Topic {
         match self {
-            Self::Request(r) => r.topic.unwrap(),
+            Self::OnionRequest(r) => r.topic.unwrap(),
             Self::Subscription(s) => s.topic,
             Self::EndSubscription(t) => *t,
+            _ => unreachable!(),
         }
     }
 }
@@ -72,12 +76,29 @@ pub struct SubscriptionInit {
     pub channel: mpsc::Sender<SubscriptionMessage>,
 }
 
-pub struct RawRequest {
+pub struct RawOnionRequest {
     pub id: CallId,
     pub topic: Option<Topic>,
     pub prefix: u8,
     pub payload: Vec<u8>,
-    pub channel: oneshot::Sender<RawResponse>,
+    pub response: oneshot::Sender<RawResponse>,
+}
+
+pub struct RawStorageRequest {
+    pub id: CallId,
+    pub prefix: u8,
+    pub payload: Vec<u8>,
+    pub identity: NodeIdentity,
+    pub addr: SocketAddr,
+    pub response: Result<oneshot::Sender<libp2p::Stream>, oneshot::Sender<RawResponse>>,
+}
+
+pub struct RawSateliteRequest {
+    pub id: CallId,
+    pub prefix: u8,
+    pub payload: Vec<u8>,
+    pub identity: NodeIdentity,
+    pub response: oneshot::Sender<RawResponse>,
 }
 
 #[derive(Clone)]

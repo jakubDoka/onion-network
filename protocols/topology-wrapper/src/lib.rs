@@ -538,7 +538,7 @@ pub mod report {
                             peer: *peer,
                             connection: *connection,
                         };
-                        stream.writer.write_packet(&update);
+                        stream.writer.write_packet(&update).unwrap();
                     }
                 }
             }
@@ -567,7 +567,7 @@ pub mod report {
                 let connection = unsafe { std::mem::transmute(connection) };
                 let update = Update { event, peer, connection };
                 for l in &mut self.listeners {
-                    l.writer.write_packet(&update);
+                    l.writer.write_packet(&update).unwrap();
                 }
 
                 match extra {
@@ -599,7 +599,7 @@ pub mod report {
 
                 let update = Update { event, peer, connection };
                 for l in &mut self.listeners {
-                    l.writer.write_packet(&update);
+                    l.writer.write_packet(&update).unwrap();
                 }
 
                 if matches!(kind, crate::PacketKind::Closed) {

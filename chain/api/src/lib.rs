@@ -10,7 +10,11 @@ use {
     futures::{SinkExt, StreamExt, TryStreamExt},
     libp2p::{multiaddr, Multiaddr, PeerId},
     rand_chacha::ChaChaRng,
-    std::{fs, io, net::IpAddr, str::FromStr},
+    std::{
+        fs, io,
+        net::{IpAddr, SocketAddr},
+        str::FromStr,
+    },
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
         blocks::Block,
@@ -22,8 +26,8 @@ use {
 pub use {
     chain_types::runtime_types::{
         pallet_node_staker::pallet::{
-            Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, NodeData,
-            NodeIdentity, Stake as ChatStake, Stake2 as SateliteStake,
+            Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, NodeIdentity,
+            Stake as ChatStake, Stake2 as SateliteStake,
         },
         pallet_user_manager::pallet::Profile,
     },
@@ -237,25 +241,31 @@ impl<S: TransactionHandler> Client<S> {
         self.signer.handle(&self.inner, transaction, nonce).await
     }
 
-    pub async fn join(&self, data: NodeData, addr: NodeAddress, nonce: Nonce) -> Result<()> {
+    pub async fn join(&self, data: NodeIdentity, addr: NodeAddress, nonce: Nonce) -> Result<()> {
         let tx = chain_types::tx().chat_staker().join(data, addr);
         self.signer.handle(&self.inner, tx, nonce).await
     }
 
-    pub async fn list_chat_nodes(&self) -> Result<Vec<ChatStake>> {
+    pub async fn list_chat_nodes(&self) -> Result<Vec<(NodeIdentity, ChatStake)>> {
         self.list_nodes(chain_types::storage().chat_staker().stakes_iter()).await
     }
 
-    pub async fn list_satelite_nodes(&self) -> Result<Vec<SateliteStake>> {
+    pub async fn list_satelite_nodes(&self) -> Result<Vec<(NodeIdentity, SateliteStake)>> {
         self.list_nodes(chain_types::storage().satelite_staker().stakes_iter()).await
     }
 
-    async fn list_nodes<SA>(&self, tx: SA) -> Result<Vec<SA::Target>>
+    async fn list_nodes<ID, SA>(&self, tx: SA) -> Result<Vec<(ID, SA::Target)>>
     where
+        ID: parity_scale_codec::Decode + 'static + Default,
         SA: StorageAddress<IsIterable = Yes> + 'static,
     {
         let latest = self.inner.client.storage().at_latest().await?;
-        latest.iter(tx).await?.map_ok(|(_, v)| v).try_collect().await
+        latest
+            .iter(tx)
+            .await?
+            .map_ok(|(key, v)| (ID::decode(&mut key.as_slice()).unwrap_or_default(), v))
+            .try_collect()
+            .await
     }
 
     pub async fn vote(
@@ -316,15 +326,10 @@ impl Default for NodeKeys {
 }
 
 impl NodeKeys {
-    pub fn libp2p_keypair(&self) -> libp2p::identity::Keypair {
-        libp2p::identity::Keypair::ed25519_from_bytes(&mut self.sign.pre_quantum()).unwrap()
-    }
-
-    pub fn to_stored(&self) -> NodeData {
-        NodeData {
+    pub fn to_identity(&self) -> NodeIdentity {
+        NodeIdentity {
             sign: crypto::hash::new(self.sign.public_key()),
             enc: crypto::hash::new(self.enc.public_key()),
-            id: self.sign.public_key().pre,
         }
     }
 
@@ -363,28 +368,12 @@ config::env_config! {
     }
 }
 
-trait Stake {
-    fn id(&self) -> sign::Pre;
-}
-
-impl Stake for ChatStake {
-    fn id(&self) -> sign::Pre {
-        self.id
-    }
-}
-
-impl Stake for SateliteStake {
-    fn id(&self) -> sign::Pre {
-        self.id
-    }
-}
-
 impl ChainConfig {
     pub async fn connect_satelite(
         self,
         keys: &NodeKeys,
         register: bool,
-    ) -> anyhow::Result<(Vec<SateliteStake>, StakeEvents<SateliteStakeEvent>)> {
+    ) -> anyhow::Result<(Vec<(NodeIdentity, SateliteStake)>, StakeEvents<SateliteStakeEvent>)> {
         let tx = chain_types::storage().satelite_staker().stakes_iter();
         self.connect(keys, tx, "SateliteStaker", unwrap_satelite_staker, register).await
     }
@@ -393,7 +382,7 @@ impl ChainConfig {
         self,
         keys: &NodeKeys,
         register: bool,
-    ) -> anyhow::Result<(Vec<ChatStake>, StakeEvents<ChatStakeEvent>)> {
+    ) -> anyhow::Result<(Vec<(NodeIdentity, ChatStake)>, StakeEvents<ChatStakeEvent>)> {
         let tx = chain_types::storage().chat_staker().stakes_iter();
         self.connect(keys, tx, "ChatStaker", unwrap_chat_staker, register).await
     }
@@ -405,10 +394,9 @@ impl ChainConfig {
         pallet_name: &'static str,
         unwrap: fn(chain_types::Event) -> Option<E>,
         register: bool,
-    ) -> anyhow::Result<(Vec<SA::Target>, StakeEvents<E>)>
+    ) -> anyhow::Result<(Vec<(NodeIdentity, SA::Target)>, StakeEvents<E>)>
     where
         SA: StorageAddress<IsIterable = Yes> + 'static + Clone,
-        SA::Target: Stake,
         E: 'static + Send,
     {
         let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
@@ -426,14 +414,16 @@ impl ChainConfig {
                 let Ok(client) = Client::with_signer(&node, account.clone()).await else {
                     continue;
                 };
-                let Ok(node_list) = client.list_nodes(tx.clone()).await else { continue };
+                let Ok(node_list) = client.list_nodes::<NodeIdentity, _>(tx.clone()).await else {
+                    continue;
+                };
                 break 'a (node_list, client);
             }
             anyhow::bail!("failed to fetch node list");
         };
 
         let mut stream = client.node_event_stream(pallet_name, unwrap).await;
-        tokio::spawn(async move {
+        let fut = async move {
             loop {
                 if let Ok(mut stream) = stream {
                     let mut stream = std::pin::pin!(stream);
@@ -454,12 +444,18 @@ impl ChainConfig {
 
                 stream = client.node_event_stream(pallet_name, unwrap).await;
             }
-        });
+        };
 
-        if register && node_list.iter().all(|s| s.id() != keys.sign.public_key().pre) {
+        #[cfg(feature = "native")]
+        tokio::spawn(fut);
+        #[cfg(feature = "web")]
+        wasm_bindgen_futures::spawn_local(fut);
+
+        if register && node_list.iter().all(|(id, _)| id.sign != keys.sign.identity()) {
+            log::info!("registering on chain");
             let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
             client
-                .join(keys.to_stored(), (exposed_address, port).into(), nonce)
+                .join(keys.to_identity(), (exposed_address, port).into(), nonce)
                 .await
                 .context("registeing to chain")?;
             log::info!("registered on chain");
@@ -484,12 +480,16 @@ pub fn stake_event(s: &mut impl AsMut<dht::Behaviour>, event: impl Into<ChatStak
 
 pub fn unpack_node_addr(addr: NodeAddress) -> Multiaddr {
     let (addr, port) = addr.into();
+    unpack_socket_addr(SocketAddr::new(addr, port))
+}
+
+pub fn unpack_socket_addr(addr: SocketAddr) -> Multiaddr {
     Multiaddr::empty()
-        .with(match addr {
+        .with(match addr.ip() {
             IpAddr::V4(ip) => multiaddr::Protocol::Ip4(ip),
             IpAddr::V6(ip) => multiaddr::Protocol::Ip6(ip),
         })
-        .with(multiaddr::Protocol::Tcp(port))
+        .with(multiaddr::Protocol::Tcp(addr.port()))
 }
 
 pub fn filter_incoming(

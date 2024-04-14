@@ -1,6 +1,6 @@
 use {
     polkadot::runtime_types::pallet_node_staker::pallet::{Event as PNSE, Event2 as PNSE2},
-    runtime_types::pallet_node_staker::pallet::{NodeAddress, Stake},
+    runtime_types::pallet_node_staker::pallet::{NodeAddress, Stake, Stake2},
     std::net::IpAddr,
 };
 pub use {
@@ -20,6 +20,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
     runtime_metadata_path = "metadata.scale",
     generate_docs,
     derive_for_type(
+        path = "pallet_node_staker::pallet::NodeIdentity",
+        derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default"
+    ),
+    derive_for_type(
         path = "pallet_node_staker::pallet::Stake",
         derive = "Debug, Clone, PartialEq, Eq, PartialOrd, Ord"
     ),
@@ -30,13 +34,15 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
     derive_for_type(
         path = "pallet_node_staker::pallet::NodeAddress",
         derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash"
-    ),
-    derive_for_type(
-        path = "pallet_node_staker::pallet::NodeData",
-        derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash"
     )
 )]
 mod polkadot {}
+
+impl Clone for Stake2 {
+    fn clone(&self) -> Self {
+        unsafe { std::ptr::read(self) }
+    }
+}
 
 impl From<PNSE2> for PNSE {
     fn from(event: PNSE2) -> Self {

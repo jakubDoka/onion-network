@@ -298,13 +298,14 @@ pub enum HEvent {
 mod test {
     use {
         super::*,
+        crypto::rand_core::OsRng,
         dht::Route,
         libp2p::{
             futures::{stream::FuturesUnordered, StreamExt},
-            identity::{Keypair, PublicKey},
             multiaddr::Protocol,
             Multiaddr, Transport,
         },
+        opfusk::ToPeerId as _,
         std::{net::Ipv4Addr, time::Duration},
     };
 
@@ -318,22 +319,20 @@ mod test {
     async fn test_random_rpc_calls() {
         env_logger::init();
 
-        let pks =
-            (0..10).map(|_| libp2p::identity::ed25519::Keypair::generate()).collect::<Vec<_>>();
-        let public_keys = pks.iter().map(|kp| kp.public()).collect::<Vec<_>>();
-        let peer_ids =
-            pks.iter().map(|kp| PublicKey::from(kp.public()).to_peer_id()).collect::<Vec<_>>();
-        let servers = pks.into_iter().map(Keypair::from).enumerate().map(|(i, kp)| {
+        let pks = (0..10).map(|_| crypto::sign::Keypair::new(OsRng)).collect::<Vec<_>>();
+        let public_keys = pks.iter().map(|kp| kp.public_key()).collect::<Vec<_>>();
+        let peer_ids = pks.iter().map(|kp| kp.to_peer_id()).collect::<Vec<_>>();
+        let servers = pks.into_iter().enumerate().map(|(i, kp)| {
             let beh = TestBehatiour::default();
             let transport = libp2p::tcp::tokio::Transport::new(libp2p::tcp::Config::default())
                 .upgrade(libp2p::core::upgrade::Version::V1)
-                .authenticate(libp2p::noise::Config::new(&kp).unwrap())
+                .authenticate(opfusk::Config::new(OsRng, kp))
                 .multiplex(libp2p::yamux::Config::default())
                 .boxed();
             let mut swarm = libp2p::Swarm::new(
                 transport,
                 beh,
-                kp.public().to_peer_id(),
+                kp.to_peer_id(),
                 libp2p::swarm::Config::with_tokio_executor()
                     .with_idle_connection_timeout(Duration::from_secs(10)),
             );
@@ -348,7 +347,7 @@ mod test {
 
             for (j, pk) in public_keys.iter().enumerate() {
                 swarm.behaviour_mut().dht.table.insert(Route::new(
-                    pk.to_bytes(),
+                    pk.identity(),
                     Multiaddr::empty()
                         .with(Protocol::Ip4(Ipv4Addr::LOCALHOST))
                         .with(Protocol::Tcp(3000 + j as u16)),

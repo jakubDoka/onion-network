@@ -149,7 +149,8 @@ impl PacketWriter {
         Self { buffer: Vec::with_capacity(cap), start: 0, end: 0, waker: None }
     }
 
-    pub fn write_packet<'a>(&mut self, message: &impl Codec<'a>) -> Option<()> {
+    #[must_use]
+    pub fn write_packet<'a>(&mut self, message: impl Codec<'a>) -> Option<()> {
         let mut writer = self.guard();
         let reserved = writer.write([0u8; PACKET_LEN_WIDTH])?;
         let len = writer.write(message)?.len();
@@ -208,6 +209,13 @@ impl PacketWriter {
             self.start += n;
             self.start -= self.buffer.len() * usize::from(self.start > self.buffer.len());
         }
+    }
+
+    pub async fn flush(
+        &mut self,
+        dest: &mut (impl futures::AsyncWrite + Unpin),
+    ) -> Result<(), io::Error> {
+        poll_fn(|cx| self.poll(cx, dest)).await
     }
 
     #[must_use]

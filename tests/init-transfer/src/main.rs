@@ -17,8 +17,11 @@ async fn main() -> Result<(), EnvError> {
             .await
             .unwrap();
 
+    let nonce = client.get_nonce().await.unwrap();
+
     for (i, wallet) in test_wallets.0.into_iter().enumerate() {
-        client.transfere(wallet, balance, i as _).await.unwrap();
+        eprintln!("Transferring {} to wallet {}", balance, wallet);
+        client.transfere(wallet, balance, (i as u64) + nonce).await.unwrap();
     }
 
     Ok(())

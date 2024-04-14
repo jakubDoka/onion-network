@@ -5,11 +5,8 @@ use {
     chat_spec::{ChatError, ChatName, Identity, ReplVec, Request, Topic, REPLICATION_FACTOR},
     codec::Codec,
     dht::U256,
-    handlers::{DontRespondReason, FromRequestOwned, IntoResponse, Response},
-    libp2p::{
-        futures::{FutureExt, StreamExt},
-        PeerId, Swarm,
-    },
+    handlers::{FromRequestOwned, IntoResponse, Response},
+    libp2p::{futures::StreamExt, PeerId, Swarm},
     rpc::CallId,
     std::future::Future,
     tokio::sync::OwnedRwLockWriteGuard,
@@ -110,10 +107,6 @@ pub trait Handler<'a, C: handlers::Context, T: FromRequestOwned<C>, R: Codec<'a>
     fn restore(self) -> Restore<Self> {
         Restore { handler: self }
     }
-
-    fn no_resp(self) -> NoResp<Self> {
-        NoResp { handler: self }
-    }
 }
 
 impl<'a, H, C, T, R> Handler<'a, C, T, R> for H
@@ -211,32 +204,5 @@ where
 
             self.handler.call_computed(args, req).await.into_response()
         }
-    }
-}
-
-#[derive(Clone)]
-pub struct NoResp<H> {
-    handler: H,
-}
-
-impl<'a, H, T, R> handlers::Handler<'a, State<'a>, T, R> for NoResp<H>
-where
-    H: Handler<'a, State<'a>, T, R>,
-    T: FromRequestOwned<State<'a>> + Send + 'static,
-    R: Codec<'a>,
-{
-    type Future = impl Future<Output = Response> + Send;
-
-    fn call_computed(self, args: T, req: R) -> Self::Future {
-        self.handler.call_computed(args, req).map(|e| {
-            if let Response::Failure(e) = e {
-                log::warn!(
-                    "no response from {:?} {:?}",
-                    std::any::type_name::<Self>(),
-                    <Result<()>>::decode(&mut e.as_slice())
-                );
-            }
-            Response::DontRespond(DontRespondReason::NoResponse)
-        })
     }
 }

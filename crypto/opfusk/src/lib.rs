@@ -243,14 +243,12 @@ impl<R, T> Output<R, T> {
     {
         let in_progress = &mut self.write_buffer[self.writable_end..];
         let (tag_part, message) = in_progress.split_at_mut(TAG_SIZE);
-        log::debug!("key: {:?}", self.sender_ss);
         let tag = crypto::encrypt(message, self.sender_ss, &mut self.rng);
-        log::debug!("tag: {:?}", tag);
         tag_part[2..].copy_from_slice(&tag);
         let body_len = message.len() as u16;
-        log::debug!("body_len: {}", body_len);
         tag_part[..2].copy_from_slice(&body_len.to_be_bytes());
         self.writable_end = self.write_buffer.len();
+        debug_assert!(self.write_buffer.capacity() - self.write_buffer.len() >= TAG_SIZE);
         self.write_buffer.extend([0; TAG_SIZE]);
     }
 }
@@ -286,8 +284,6 @@ where
                     break 'write_inner;
                 }
 
-                log::debug!("available: {:?}", available);
-
                 let Poll::Ready(n) = Pin::new(&mut s.stream).poll_write(cx, available)? else {
                     break 'write_inner;
                 };
@@ -301,7 +297,7 @@ where
             }
 
             'gc: {
-                if s.write_buffer.len() != s.write_buffer.capacity() {
+                if s.write_buffer.len() < s.write_buffer.capacity() - TAG_SIZE {
                     break 'gc;
                 }
 
@@ -313,7 +309,7 @@ where
 
             'write_buf: {
                 let buffer = get_buffer(&mut s.write_buffer);
-                let to_write = buffer.len().min(buf.len());
+                let to_write = (buffer.len().saturating_sub(TAG_SIZE)).min(buf.len());
                 if to_write == 0 {
                     break 'write_buf;
                 }
@@ -328,7 +324,6 @@ where
         if red == 0 {
             Poll::Pending
         } else {
-            log::debug!("written: {}", red);
             Poll::Ready(Ok(red))
         }
     }
@@ -345,7 +340,6 @@ where
 
         let mut to_write = &s.write_buffer[s.writable_start..s.writable_end];
         while !to_write.is_empty() {
-            log::debug!("to_write: {:?}", to_write);
             let n = futures::ready!(Pin::new(&mut s.stream).poll_write(cx, to_write))?;
             to_write = &to_write[n..];
             s.writable_start += n;
@@ -373,8 +367,6 @@ where
         cx: &mut std::task::Context<'_>,
         mut buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        log::debug!("readd: {}", buf.len());
-
         let s = self.get_mut();
 
         let prev_len = buf.len();
@@ -406,13 +398,9 @@ where
                     return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
                 }
 
-                log::debug!("readed: {}", n);
-
                 updated = true;
 
                 let available = &mut s.read_buffer[s.readable_end..];
-
-                log::debug!("available: {:?}", available);
 
                 let Some((&mut len, rest)) = available.split_first_chunk_mut::<2>() else {
                     break 'read_inner;
@@ -420,13 +408,8 @@ where
 
                 let len = u16::from_be_bytes(len) as usize + crypto::TAG_SIZE;
                 let Some(body) = rest.get_mut(..len) else {
-                    log::debug!("len: {len} {}", rest.len());
                     break 'read_inner;
                 };
-
-                log::debug!("len: {len}");
-                log::debug!("recv key: {:?}", s.receiver_ss);
-                log::debug!("body: {:?}", body);
 
                 let Some((&mut tag, body)) = body.split_first_chunk_mut::<{ crypto::TAG_SIZE }>()
                 else {
@@ -441,12 +424,6 @@ where
 
             'advacne_chunk: {
                 if s.chunk_reminder != 0 || s.readable_start == s.readable_end {
-                    log::debug!(
-                        "chunk_reminder: {} {} {}",
-                        s.chunk_reminder,
-                        s.readable_start,
-                        s.readable_end
-                    );
                     break 'advacne_chunk;
                 }
 
@@ -475,7 +452,6 @@ where
         if red == 0 {
             Poll::Pending
         } else {
-            log::debug!("red: {}", red);
             Poll::Ready(Ok(red))
         }
     }
@@ -520,6 +496,38 @@ fn extend_used_buffer(buffer: &mut Vec<u8>, n: usize) {
     unsafe { buffer.set_len(len + n) }
 }
 
+pub trait ToPeerId {
+    fn to_peer_id(&self) -> PeerId;
+}
+
+impl ToPeerId for sign::PublicKey {
+    fn to_peer_id(&self) -> PeerId {
+        hash_to_peer_id(self.identity())
+    }
+}
+
+impl ToPeerId for sign::Keypair {
+    fn to_peer_id(&self) -> PeerId {
+        hash_to_peer_id(self.identity())
+    }
+}
+
+impl ToPeerId for crypto::Hash {
+    fn to_peer_id(&self) -> PeerId {
+        hash_to_peer_id(*self)
+    }
+}
+
+pub trait PeerIdExt {
+    fn to_hash(&self) -> crypto::Hash;
+}
+
+impl PeerIdExt for PeerId {
+    fn to_hash(&self) -> crypto::Hash {
+        peer_id_to_hash(*self).unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -537,7 +545,10 @@ mod tests {
             .authenticate(super::Config::new(OsRng, kp).with_buffer_size(300))
             .multiplex(libp2p::yamux::Config::default())
             .boxed();
-        let behaviour = libp2p::ping::Behaviour::default();
+        let behaviour = libp2p::ping::Behaviour::new(
+            libp2p::ping::Config::new().with_interval(Duration::from_millis(1)),
+        );
+
         (
             libp2p::Swarm::new(
                 transport,

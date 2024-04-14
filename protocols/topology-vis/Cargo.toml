@@ -15,13 +15,15 @@ description = "little frontend to visualize the topology of a network"
 console_error_panic_hook = "0.1.7"
 console_log = "1"
 wasm-bindgen-futures = "0.4.41"
-libp2p = { workspace = true, features = ["noise", "yamux", "wasm-bindgen", "macros", "websocket-websys"] }
+libp2p = { workspace = true, features = ["yamux", "wasm-bindgen", "macros", "websocket-websys"] }
 log = { workspace = true }
 macroquad = "0.4.4"
 
 component-utils = { workspace = true }
 dht = { workspace = true }
 topology-wrapper = { workspace = true }
+crypto.workspace = true
+opfusk.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
 workspace = true
@@ -38,3 +40,4 @@ building = []
 
 [lints]
 workspace = true
+

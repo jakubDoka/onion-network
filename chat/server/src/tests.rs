@@ -1,10 +1,8 @@
 use {
     super::*,
-    chain_api::NodeData,
     chat_spec::*,
     crypto::proof::Proof,
     libp2p::futures::{stream::FuturesUnordered, FutureExt, TryStreamExt},
-    rand_core::OsRng,
     std::{fmt::Debug, net::IpAddr, usize},
 };
 
@@ -436,13 +434,12 @@ async fn create_nodes(count: usize) -> FuturesUnordered<Server> {
 
     let nodes = node_data
         .iter()
-        .map(|(config, keys)| {
-            let NodeData { id, .. } = keys.to_stored();
-            ChatStake {
-                id,
+        .map(|(config, _)| {
+            let stake = ChatStake {
                 addr: (IpAddr::from(Ipv4Addr::LOCALHOST), config.port).into(),
                 ..ChatStake::fake()
-            }
+            };
+            (NodeIdentity::default(), stake)
         })
         .collect::<Vec<_>>();
 

@@ -1,10 +1,11 @@
 use {
     crate::{
         chain::{chain_node, min_nodes},
-        timeout, RawRequest, RawResponse, RequestInit, RequestStream, Requests, SubscriptionInit,
-        SubscriptionMessage, UserKeys, Vault,
+        timeout, RawOnionRequest, RawResponse, RawStorageRequest, RequestChannel, RequestInit,
+        Requests, SubscriptionInit, SubscriptionMessage, UserKeys, Vault,
     },
     anyhow::Context,
+    chain_api::unpack_socket_addr,
     chat_spec::*,
     codec::{Codec, Reminder},
     component_utils::FindAndRemove,
@@ -23,6 +24,7 @@ use {
         *,
     },
     onion::{EncryptedStream, PathId},
+    opfusk::ToPeerId,
     rand::{rngs::OsRng, seq::IteratorRandom},
     std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -41,7 +43,8 @@ pub struct Node {
     subscriptions: futures::stream::SelectAll<Subscription>,
     pending_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
     pending_topic_search: HashMap<PathId, Vec<RequestInit>>,
-    requests: RequestStream,
+    pending_streams: HashMap<CallId, oneshot::Sender<libp2p::Stream>>,
+    requests: RequestChannel,
 }
 
 impl Node {
@@ -68,28 +71,24 @@ impl Node {
 
         set_state!(InitiateConnection);
 
-        let keypair = identity::Keypair::generate_ed25519();
-        let peer_id = keypair.public().to_peer_id();
-
-        let behaviour = Behaviour {
-            onion: onion::Behaviour::new(
-                onion::Config::new(None, peer_id).keep_alive_interval(Duration::from_secs(100)),
-            ),
-            key_share: onion::key_share::Behaviour::default(),
-            dht: dht::Behaviour::default(),
-        };
-        let transport = websocket_websys::Transport::default()
-            .upgrade(Version::V1)
-            .authenticate(noise::Config::new(&keypair).unwrap())
-            .multiplex(yamux::Config::default())
-            .boxed();
-
-        let mut swarm = swarm::Swarm::new(
-            transport,
-            behaviour,
-            peer_id,
+        let mut swarm = libp2p::Swarm::new(
+            libp2p::websocket_websys::Transport::default()
+                .upgrade(Version::V1)
+                .authenticate(opfusk::Config::new(OsRng, keys.sign))
+                .multiplex(libp2p::yamux::Config::default())
+                .boxed(),
+            Behaviour {
+                onion: onion::Behaviour::new(
+                    onion::Config::new(None, keys.sign.to_peer_id())
+                        .keep_alive_interval(Duration::from_secs(100)),
+                ),
+                key_share: onion::key_share::Behaviour::default(),
+                dht: dht::Behaviour::default(),
+                streaming: streaming::Behaviour::default(),
+            },
+            keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_wasm_executor()
-                .with_idle_connection_timeout(Duration::from_secs(2)),
+                .with_idle_connection_timeout(std::time::Duration::from_secs(10)),
         );
 
         let node_count = node_data.len();
@@ -98,9 +97,9 @@ impl Node {
             node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance
         ));
 
-        let nodes = node_data.into_iter().map(|stake| {
+        let nodes = node_data.into_iter().map(|(id, stake)| {
             let addr = chain_api::unpack_node_addr(stake.addr);
-            Route::new(stake.id, addr.with(multiaddr::Protocol::Ws("/".into())))
+            Route::new(id.sign, addr.with(multiaddr::Protocol::Ws("/".into())))
         });
         swarm.behaviour_mut().dht.table.bulk_insert(nodes);
 
@@ -290,6 +289,7 @@ impl Node {
                 subscriptions,
                 pending_requests: Default::default(),
                 pending_topic_search: Default::default(),
+                pending_streams: Default::default(),
                 requests: commands,
             },
             vault,
@@ -338,13 +338,13 @@ impl Node {
         self.pending_topic_search.insert(pid, vec![command]);
     }
 
-    fn handle_request(&mut self, req: RawRequest) {
+    fn onion_request(&mut self, req: RawOnionRequest) {
         let Some(sub) = self
             .subscriptions
             .iter_mut()
             .find(|s| req.topic.as_ref().map_or(true, |t| s.topics.contains(t)))
         else {
-            self.handle_topic_search(RequestInit::Request(req));
+            self.handle_topic_search(RequestInit::OnionRequest(req));
             return;
         };
 
@@ -356,11 +356,11 @@ impl Node {
         };
 
         sub.stream.write(request).unwrap();
-        self.pending_requests.insert(req.id, req.channel);
+        self.pending_requests.insert(req.id, req.response);
         log::debug!("request sent, {:?}", req.id);
     }
 
-    fn handle_subscription_request(&mut self, sub: SubscriptionInit) {
+    fn subscription_request(&mut self, sub: SubscriptionInit) {
         log::info!("Subscribing to {:?}", sub.topic);
         let Some(subs) = self.subscriptions.iter_mut().find(|s| s.topics.contains(&sub.topic))
         else {
@@ -383,33 +383,44 @@ impl Node {
 
     fn command(&mut self, command: RequestInit) {
         match command {
-            RequestInit::Request(req) => self.handle_request(req),
-            RequestInit::Subscription(sub) => self.handle_subscription_request(sub),
-            RequestInit::EndSubscription(topic) => {
-                let Some(sub) = self.subscriptions.iter_mut().find(|s| s.topics.contains(&topic))
-                else {
-                    log::error!("cannot find subscription to end");
-                    return;
-                };
-
-                let request = chat_spec::Request {
-                    prefix: rpcs::UNSUBSCRIBE,
-                    id: CallId::new(),
-                    topic: Some(topic),
-                    body: Reminder(&[]),
-                };
-
-                sub.stream.write(request).unwrap();
-                self.subscriptions
-                    .iter_mut()
-                    .find_map(|s| {
-                        let index = s.topics.iter().position(|t| t == &topic)?;
-                        s.topics.swap_remove(index);
-                        Some(())
-                    })
-                    .expect("channel to exist");
-            }
+            RequestInit::OnionRequest(req) => self.onion_request(req),
+            RequestInit::Subscription(sub) => self.subscription_request(sub),
+            RequestInit::EndSubscription(topic) => self.subscription_end(topic),
+            RequestInit::StorageRequest(req) => self.storage_request(req),
+            RequestInit::SateliteRequest(_) => todo!(),
         }
+    }
+
+    fn storage_request(&mut self, req: RawStorageRequest) {
+        let addr = unpack_socket_addr(req.addr);
+
+        if let Err(e) = self.swarm.dial(addr) {
+            log::error!("cannot dial to storage node: {e}");
+        }
+    }
+
+    fn subscription_end(&mut self, topic: Topic) {
+        let Some(sub) = self.subscriptions.iter_mut().find(|s| s.topics.contains(&topic)) else {
+            log::error!("cannot find subscription to end");
+            return;
+        };
+
+        let request = chat_spec::Request {
+            prefix: rpcs::UNSUBSCRIBE,
+            id: CallId::new(),
+            topic: Some(topic),
+            body: Reminder(&[]),
+        };
+
+        sub.stream.write(request).unwrap();
+        self.subscriptions
+            .iter_mut()
+            .find_map(|s| {
+                let index = s.topics.iter().position(|t| t == &topic)?;
+                s.topics.swap_remove(index);
+                Some(())
+            })
+            .expect("channel to exist");
     }
 
     fn swarm_event(&mut self, event: SE) {
@@ -536,6 +547,7 @@ struct Behaviour {
     onion: onion::Behaviour,
     key_share: onion::key_share::Behaviour,
     dht: dht::Behaviour,
+    streaming: streaming::Behaviour,
 }
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]

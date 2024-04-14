@@ -156,6 +156,13 @@ pub struct Route {
     pub addr: Multiaddr,
 }
 
+pub fn decompress_peer_id(compressed: U256) -> PeerId {
+    let bytes: [u8; 32] = compressed.into();
+    let pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&bytes).unwrap();
+    let key = libp2p::identity::PublicKey::from(pk);
+    libp2p::PeerId::from(key)
+}
+
 impl Route {
     #[must_use]
     pub fn new(id: [u8; 32], addr: Multiaddr) -> Self {

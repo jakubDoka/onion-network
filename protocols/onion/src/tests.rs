@@ -6,9 +6,10 @@ use {
     futures::{stream::SelectAll, FutureExt, StreamExt},
     libp2p::{
         core::{multiaddr::Protocol, upgrade::Version, Transport},
-        identity::{ed25519, Keypair, PeerId},
+        identity::{PeerId},
         swarm::{NetworkBehaviour, SwarmEvent},
     },
+    opfusk::ToPeerId,
     rand::seq::SliceRandom,
     std::{collections::HashSet, io, net::Ipv4Addr, pin::Pin, time::Duration, usize},
 };
@@ -24,12 +25,12 @@ fn setup_nodes<const COUNT: usize>(
 ) -> [libp2p::swarm::Swarm<crate::Behaviour>; COUNT] {
     init();
     ports.map(|port| {
-        let keypair = Keypair::generate_ed25519();
-        let peer_id = keypair.public().to_peer_id();
+        let keypair = crypto::sign::Keypair::new(OsRng);
+        let peer_id = keypair.to_peer_id();
         let secret = crate::Keypair::new(OsRng);
         let transport = libp2p::tcp::tokio::Transport::default()
             .upgrade(Version::V1)
-            .authenticate(libp2p::noise::Config::new(&keypair).unwrap())
+            .authenticate(opfusk::Config::new(OsRng, keypair))
             .multiplex(libp2p::yamux::Config::default())
             .boxed();
         let mut swarm = libp2p::swarm::Swarm::new(
@@ -216,28 +217,27 @@ async fn settle_down() {
     let spacing = Duration::from_millis(0);
     let keep_alive_interval = Duration::from_secs(5);
 
-    let kps = (0..server_count).map(|_| ed25519::Keypair::generate()).collect::<Vec<_>>();
-    let pks = kps.iter().map(|k| k.public()).collect::<Vec<_>>();
+    let kps = (0..server_count).map(|_| crypto::sign::Keypair::new(OsRng)).collect::<Vec<_>>();
+    let pks = kps.iter().map(|k| k.public_key()).collect::<Vec<_>>();
 
     let mut router = dht::Behaviour::default();
     router.table.bulk_insert(pks.into_iter().enumerate().map(|(i, k)| {
         let addr = libp2p::core::Multiaddr::empty()
             .with(Protocol::Ip4(Ipv4Addr::LOCALHOST))
             .with(Protocol::Tcp(first_port + i as u16));
-        Route::new(k.to_bytes(), addr)
+        Route::new(k.identity(), addr)
     }));
 
     let (swarms, node_data): (Vec<_>, Vec<_>) = kps
         .into_iter()
-        .map(Keypair::from)
         .enumerate()
         .map(|(i, kp)| {
-            let peer_id = kp.public().to_peer_id();
+            let peer_id = kp.to_peer_id();
             let secret = crate::Keypair::new(OsRng);
 
             let transport = libp2p::tcp::tokio::Transport::default()
                 .upgrade(Version::V1)
-                .authenticate(libp2p::noise::Config::new(&kp).unwrap())
+                .authenticate(opfusk::Config::new(OsRng, kp))
                 .multiplex(libp2p::yamux::Config::default())
                 .boxed();
 
@@ -321,12 +321,12 @@ async fn settle_down() {
 
     let clients = (0..client_count)
         .map(|_| {
-            let kp = Keypair::generate_ed25519();
-            let peer_id = kp.public().to_peer_id();
+            let kp = crypto::sign::Keypair::new(OsRng);
+            let peer_id = kp.to_peer_id();
 
             let transport = libp2p::tcp::tokio::Transport::default()
                 .upgrade(Version::V1)
-                .authenticate(libp2p::noise::Config::new(&kp).unwrap())
+                .authenticate(opfusk::Config::new(OsRng, kp))
                 .multiplex(libp2p::yamux::Config::default())
                 .boxed();
 

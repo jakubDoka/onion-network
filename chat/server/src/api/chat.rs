@@ -7,7 +7,7 @@ use {
     },
     codec::{Codec, Reminder},
     crypto::proof::Proof,
-    dht::{try_peer_id_to_ed, U256},
+    dht::{decompress_peer_id, try_peer_id_to_ed, U256},
     libp2p::{futures::StreamExt, PeerId},
     std::{
         collections::{btree_map, BTreeMap, HashMap, HashSet, VecDeque},
@@ -655,13 +655,6 @@ pub fn select_finalizer(
     }
 
     members.into_iter().max_by_key(|&member| member ^ selector).unwrap()
-}
-
-pub fn decompress_peer_id(compressed: U256) -> PeerId {
-    let bytes: [u8; 32] = compressed.into();
-    let pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&bytes).unwrap();
-    let key = libp2p::identity::PublicKey::from(pk);
-    libp2p::PeerId::from(key)
 }
 
 #[derive(Codec)]

@@ -1,10 +1,12 @@
 use {
+    crypto::rand_core::OsRng,
     dht::Route,
     libp2p::{
         core::upgrade::Version, futures::StreamExt, multiaddr, swarm::NetworkBehaviour,
         websocket_websys, PeerId, Transport,
     },
     macroquad::prelude::*,
+    opfusk::ToPeerId as _,
     std::{
         cell::RefCell,
         collections::{BTreeMap, HashSet},
@@ -377,11 +379,11 @@ async fn main() {
     })
     .unwrap();
 
-    let identity = libp2p::identity::Keypair::generate_ed25519();
-    let peer_id = PeerId::from(identity.public());
+    let kp = crypto::sign::Keypair::new(OsRng);
+    let peer_id = kp.to_peer_id();
     let transport = websocket_websys::Transport::default()
         .upgrade(Version::V1)
-        .authenticate(libp2p::noise::Config::new(&identity).unwrap())
+        .authenticate(opfusk::Config::new(OsRng, kp))
         .multiplex(libp2p::yamux::Config::default())
         .boxed();
     let world = WorldRc::default();
@@ -404,11 +406,11 @@ async fn main() {
             .await
             .unwrap();
         log::info!("detected {} nodes", nodes.len());
-        for node in nodes {
+        for (id, node) in nodes {
             let ip = node.addr;
 
             let addr = chain_api::unpack_node_addr(ip).with(multiaddr::Protocol::Ws("/".into()));
-            let route = Route::new(node.id, addr);
+            let route = Route::new(id.sign, addr);
             let peer_id = route.peer_id();
             swarm.behaviour_mut().dht.table.insert(route);
             swarm.behaviour_mut().collector.world_mut().0.borrow_mut().servers.insert(peer_id);

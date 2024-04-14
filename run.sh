@@ -87,12 +87,12 @@ rebuild_native() {
 }
 rebuild_topology() { (cd $TOPOLOGY_ROOT && ./build.sh "$PROFILE" || exit 1); }
 rebuild_chain() { (cd chain/substrate-tests && cargo build --release); }
-rebuild_client() { (cd chat/client && trunk build $WASM_FLAGS || exit 1); }
+rebuild_client() { (cd chat/client && trunk build $WASM_FLAGS --features building || exit 1); }
 
 run_wasm() {
 	killall live-server
-	(cd $TOPOLOGY_ROOT/dist && live-server --host localhost --port $TOPOLOGY_PORT > /dev/null 2>&1 &)
-	(cd $CLIENT_ROOT/dist && live-server --host localhost --port $FRONTEND_PORT > /dev/null 2>&1 &)
+	(cd $TOPOLOGY_ROOT/dist && live-server --host 127.0.0.1 --port $TOPOLOGY_PORT > /dev/null 2>&1 &)
+	(cd $CLIENT_ROOT/dist && live-server --host 127.0.0.1 --port $FRONTEND_PORT > /dev/null 2>&1 &)
 }
 run_nodes() {
 	EXE=$1
@@ -138,8 +138,8 @@ test -d $TOPOLOGY_ROOT/dist     && ! $REBUILD_TOPOLOGY || rebuild_topology
 test -d $CLIENT_ROOT/dist       && ! $REBUILD_CLIENT   || rebuild_client
 
 is_running chat-server      || run_chat_servers
-is_running storage-satelite || run_satelites
-is_running storage-node     || run_storage_nodes
+#is_running storage-satelite || run_satelites
+#is_running storage-node     || run_storage_nodes
 is_running live-server      || run_wasm
 
 echo "begins shell from the scope of this script:"

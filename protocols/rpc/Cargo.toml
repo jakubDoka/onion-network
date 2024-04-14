@@ -21,9 +21,11 @@ codec = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1.36.0", features = ["macros", "rt", "time"] }
-libp2p = { workspace = true, features = ["noise", "yamux", "tcp", "macros", "tokio"]}
+libp2p = { workspace = true, features = ["yamux", "tcp", "macros", "tokio"]}
 env_logger = "0.11.0"
-dht = { path = "../dht" }
+dht = { workspace = true }
+opfusk = { workspace = true }
+crypto.workspace = true
 
 [lints]
 workspace = true

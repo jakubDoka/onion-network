@@ -1,12 +1,13 @@
 use {
     crate::{
         chain::fetch_profile, vault_chat_404, ChatMeta, Encrypted, FriendMeta, RawChatMessage,
-        RawRequest, RequestInit, RequestStream, SubscriptionInit, SubscriptionMessage, UserKeys,
-        Vault, VaultComponentId,
+        RawOnionRequest, RawStorageRequest, RequestChannel, RequestInit, SubscriptionInit,
+        SubscriptionMessage, UserKeys, Vault, VaultComponentId,
     },
     anyhow::Context,
     chat_spec::*,
     codec::{Codec, Reminder},
+    component_utils::{PacketReader, PacketWriter},
     crypto::{
         enc::{ChoosenCiphertext, Ciphertext},
         proof::{Nonce, Proof},
@@ -14,11 +15,12 @@ use {
     double_ratchet::{DoubleRatchet, MessageHeader},
     libp2p::futures::{
         channel::{mpsc, oneshot},
-        SinkExt, StreamExt,
+        AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt,
     },
     onion::EncryptedStream,
     rand::rngs::OsRng,
-    std::{collections::HashSet, convert::identity},
+    std::{collections::HashSet, convert::identity, io, net::SocketAddr},
+    storage_spec::NodeIdentity,
 };
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -32,7 +34,7 @@ pub struct Requests {
 }
 
 impl Requests {
-    pub fn new() -> (Self, RequestStream) {
+    pub fn new() -> (Self, RequestChannel) {
         let (sink, stream) = mpsc::channel(5);
         (Self { buffer: Vec::new(), sink }, stream)
     }
@@ -389,6 +391,39 @@ impl Requests {
             .and_then(|(_, r)| r)
     }
 
+    async fn dispatch_storage_stream(
+        &mut self,
+        identity: NodeIdentity,
+        addr: SocketAddr,
+        prefix: u8,
+        request: impl Codec<'_>,
+    ) -> Result<RequestStream, ChatError> {
+        let id = CallId::new();
+        let (stream, stream_recv) = oneshot::channel();
+        self.sink
+            .send(RequestInit::StorageRequest(RawStorageRequest {
+                id,
+                prefix,
+                payload: request.to_bytes(),
+                response: Ok(stream),
+                identity,
+                addr,
+            }))
+            .await
+            .map_err(|_| ChatError::ChannelClosed)?;
+
+        let stream = crate::timeout(stream_recv, REQUEST_TIMEOUT)
+            .await?
+            .map_err(|_| ChatError::ChannelClosed)?;
+
+        Ok(RequestStream {
+            stream,
+            reader: PacketReader::default(),
+            writer: PacketWriter::new(1 << 13),
+            buffer: Vec::new(),
+        })
+    }
+
     async fn dispatch_low<'a, R: Codec<'a>>(
         &'a mut self,
         prefix: u8,
@@ -398,12 +433,12 @@ impl Requests {
         let id = CallId::new();
         let (tx, rx) = oneshot::channel();
         self.sink
-            .send(RequestInit::Request(RawRequest {
+            .send(RequestInit::OnionRequest(RawOnionRequest {
                 id,
                 topic: topic.into(),
                 prefix,
                 payload: request.to_bytes(),
-                channel: tx,
+                response: tx,
             }))
             .await
             .map_err(|_| ChatError::ChannelClosed)?;
@@ -451,6 +486,33 @@ impl<T: RequestContext> RequestContext for &T {
 
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
         (*self).with_mail_action(action)
+    }
+}
+
+pub struct RequestStream {
+    stream: libp2p::Stream,
+    writer: PacketWriter,
+    reader: PacketReader,
+    buffer: Vec<u8>,
+}
+
+impl RequestStream {
+    pub async fn write_arbitrary(&mut self, message: &[u8]) -> io::Result<()> {
+        self.stream.write_all(message).await
+    }
+
+    pub async fn read_arbitrary(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.stream.read(buffer).await
+    }
+
+    pub async fn write(&mut self, message: impl for<'a> Codec<'a>) -> io::Result<()> {
+        self.writer.write_packet(message).expect("wrath");
+        self.writer.flush(&mut self.stream).await
+    }
+
+    pub async fn read<'a, R: Codec<'a>>(&'a mut self) -> io::Result<R> {
+        self.buffer = self.reader.next_packet(&mut self.stream).await?;
+        R::decode(&mut &self.buffer[..]).ok_or(io::ErrorKind::InvalidData.into())
     }
 }
 

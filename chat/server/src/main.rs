@@ -112,6 +112,7 @@ impl Server {
 
         let (sender, receiver) = topology_wrapper::channel();
 
+        let sender_clone = sender.clone();
         let mut swarm = libp2p::Swarm::new(
             libp2p::tcp::tokio::Transport::default()
                 .upgrade(Version::V1)
@@ -123,9 +124,18 @@ impl Server {
                         .authenticate(opfusk::Config::new(OsRng, keys.sign))
                         .multiplex(libp2p::yamux::Config::default()),
                 )
-                .map(|option, _| match option {
-                    Either::Left((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
-                    Either::Right((peer, stream)) => (peer, StreamMuxerBox::new(stream)),
+                .map(move |option, _| match option {
+                    Either::Left((peer, stream)) => (
+                        peer,
+                        StreamMuxerBox::new(topology_wrapper::muxer::new(
+                            stream,
+                            sender_clone.clone(),
+                        )),
+                    ),
+                    Either::Right((peer, stream)) => (
+                        peer,
+                        StreamMuxerBox::new(topology_wrapper::muxer::new(stream, sender_clone)),
+                    ),
                 })
                 .boxed(),
             Behaviour {
@@ -145,7 +155,7 @@ impl Server {
             },
             keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(Duration::from_micros(idle_timeout)),
+                .with_idle_connection_timeout(Duration::from_millis(idle_timeout)),
         );
 
         swarm

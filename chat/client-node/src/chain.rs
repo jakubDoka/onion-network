@@ -34,7 +34,7 @@ async fn sign_with_wallet(payload: &str) -> Result<Vec<u8>, JsValue> {
 
     let sig = sign(payload).await?;
     let sig = sig.as_string().ok_or("user did something very wrong")?;
-    let sig = sig.trim_start_matches("0x01");
+    let sig = sig.trim_start_matches("0x");
     hex::decode(sig).map_err(|e| e.to_string().into())
 }
 
@@ -104,20 +104,17 @@ impl TransactionHandler for WebSigner {
             .await
             .map_err(|e| chain_api::Error::Other(e.as_string().unwrap_or_default()))?;
 
-        let signature = signature
-            .try_into()
-            .map_err(|_| chain_api::Error::Other("signature has invalid size".into()))
-            .map(chain_api::new_signature)?;
+        let signature = chain_api::new_signature(signature)?;
 
         let tx = inner.client.tx();
 
         tx.validate(&call)?;
         let mut params = Params::default();
         params.2 .0 = Some(nonce);
-        let unsigned_payload = tx.create_partial_signed(&call, &account_id, params).await?;
+        let unsigned_payload = tx.create_partial_signed_offline(&call, params)?;
 
         let progress = unsigned_payload
-            .sign_with_address_and_signature(&account_id.into(), &signature.into())
+            .sign_with_address_and_signature(&account_id.into(), &signature)
             .submit_and_watch()
             .await?;
 

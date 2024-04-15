@@ -89,6 +89,7 @@ rebuild_native() {
 			--exclude chat-client \
 			--exclude chat-client-node \
 			--exclude topology-vis \
+			--exclude websocket-websys \
 			|| exit 1
 }
 rebuild_topology() { (cd $TOPOLOGY_ROOT && ./build.sh "$PROFILE" || exit 1); }

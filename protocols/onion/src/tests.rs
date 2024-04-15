@@ -6,7 +6,7 @@ use {
     futures::{stream::SelectAll, FutureExt, StreamExt},
     libp2p::{
         core::{multiaddr::Protocol, upgrade::Version, Transport},
-        identity::{PeerId},
+        identity::PeerId,
         swarm::{NetworkBehaviour, SwarmEvent},
     },
     opfusk::ToPeerId,

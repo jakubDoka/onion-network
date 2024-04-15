@@ -251,13 +251,13 @@ pub mod collector {
                 };
 
                 let Ok(packet) =
-                    packet.inspect_err(|e| log::info!("Error while reading update: {}", e))
+                    packet.inspect_err(|e| log::error!("Error while reading update: {}", e))
                 else {
                     return std::task::Poll::Pending;
                 };
 
                 let Some(update) = Update::decode(&mut packet.as_slice()) else {
-                    log::info!("Invalid update received, {:?}", packet);
+                    log::error!("Invalid update received, {:?}", packet);
                     return std::task::Poll::Pending;
                 };
 
@@ -553,7 +553,7 @@ pub mod report {
             libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>,
         > {
             if let std::task::Poll::Ready(Some(Err(e))) = self.listeners.poll_next_unpin(cx) {
-                log::info!("Error while writing update: {}", e);
+                log::error!("Error while writing update: {}", e);
             }
 
             while let std::task::Poll::Ready(Some((extra, peer, connection))) =

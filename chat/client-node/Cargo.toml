@@ -28,8 +28,8 @@ crypto = { workspace = true }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
 codec.workspace = true
-double-ratchet = { version = "0.1.0", path = "../../crypto/double-ratchet" }
-merkle-tree = { version = "0.1.0", path = "../../crypto/merkle-tree" }
+double-ratchet = { workspace = true }
+merkle-tree = { workspace = true }
 storage-spec.workspace = true
 streaming.workspace = true
 opfusk = { workspace = true }

@@ -49,6 +49,8 @@ crypto = { path = "crypto/crypto", features = ["codec", "arrayvec"] }
 falcon = { path = "crypto/falcon/falcon" }
 kyber = { path = "crypto/kyber" }
 opfusk = { path = "crypto/opfusk" }
+double-ratchet = { path = "crypto/double-ratchet" }
+merkle-tree = { path = "crypto/merkle-tree" }
 
 codec-derive = { path = "utils/codec-derive" }
 codec = { path = "utils/codec" }

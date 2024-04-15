@@ -107,7 +107,7 @@ impl Node {
             },
             keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(Duration::from_micros(10)),
+                .with_idle_connection_timeout(Duration::from_secs(10)),
         );
 
         swarm

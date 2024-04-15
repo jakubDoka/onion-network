@@ -22,6 +22,7 @@ use {
         config::ParamsFor,
         storage::{address::Yes, StorageAddress},
         tx::TxProgress,
+        utils::MultiSignature,
         OnlineClient,
     },
 };
@@ -83,9 +84,8 @@ pub fn mnemonic_keypair(mnemonic: &str) -> Keypair {
         .unwrap()
 }
 
-#[must_use]
-pub fn new_signature(sig: [u8; 64]) -> Signature {
-    subxt_signer::sr25519::Signature(sig)
+pub fn new_signature(sig: Vec<u8>) -> Result<MultiSignature> {
+    MultiSignature::decode(&mut &sig[..]).map_err(|s| Error::Other(format!("{s}")))
 }
 
 #[allow(async_fn_in_trait)]

@@ -1,6 +1,6 @@
 use {
     crate::requests::Result,
-    chain_api::{Profile, TransactionHandler},
+    chain_api::{Params, Profile, TransactionHandler},
     chat_spec::*,
     std::str::FromStr,
     web_sys::wasm_bindgen::{self, JsValue},
@@ -112,8 +112,9 @@ impl TransactionHandler for WebSigner {
         let tx = inner.client.tx();
 
         tx.validate(&call)?;
-        let unsigned_payload =
-            tx.create_partial_signed_with_nonce(&call, nonce, Default::default())?;
+        let mut params = Params::default();
+        params.2 .0 = Some(nonce);
+        let unsigned_payload = tx.create_partial_signed(&call, &account_id, params).await?;
 
         let progress = unsigned_payload
             .sign_with_address_and_signature(&account_id.into(), &signature.into())

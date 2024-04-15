@@ -9,6 +9,7 @@ use {
     },
     futures::{SinkExt, StreamExt, TryStreamExt},
     libp2p::{multiaddr, Multiaddr, PeerId},
+    parity_scale_codec::Decode,
     rand_chacha::ChaChaRng,
     std::{
         fs, io,
@@ -18,6 +19,7 @@ use {
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
         blocks::Block,
+        config::ParamsFor,
         storage::{address::Yes, StorageAddress},
         tx::TxProgress,
         OnlineClient,
@@ -47,6 +49,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type Nonce = u64;
 pub type RawUserName = [u8; USER_NAME_CAP];
 pub type StakeEvents<E> = futures::channel::mpsc::Receiver<Result<E>>;
+pub type Params = ParamsFor<Config>;
 
 #[must_use]
 pub fn immortal_era() -> String {
@@ -97,12 +100,10 @@ impl TransactionHandler for Keypair {
     }
 
     async fn handle(&self, inner: &InnerClient, call: impl TxPayload, nonce: Nonce) -> Result<()> {
-        let progress = inner
-            .client
-            .tx()
-            .create_signed_with_nonce(&call, self, nonce, Default::default())?
-            .submit_and_watch()
-            .await?;
+        let mut data = ParamsFor::<Config>::default();
+        data.2 .0 = Some(nonce);
+        let progress =
+            inner.client.tx().create_signed(&call, self, data).await?.submit_and_watch().await?;
 
         wait_for_in_block(progress, false).await.map(drop)
     }
@@ -254,16 +255,16 @@ impl<S: TransactionHandler> Client<S> {
         self.list_nodes(chain_types::storage().satelite_staker().stakes_iter()).await
     }
 
-    async fn list_nodes<ID, SA>(&self, tx: SA) -> Result<Vec<(ID, SA::Target)>>
+    async fn list_nodes<SA>(&self, tx: SA) -> Result<Vec<(NodeIdentity, SA::Target)>>
     where
-        ID: parity_scale_codec::Decode + 'static + Default,
         SA: StorageAddress<IsIterable = Yes> + 'static,
     {
         let latest = self.inner.client.storage().at_latest().await?;
         latest
             .iter(tx)
             .await?
-            .map_ok(|(key, v)| (ID::decode(&mut key.as_slice()).unwrap_or_default(), v))
+            // fuck me
+            .map_ok(|kv| (NodeIdentity::decode(&mut &kv.key_bytes[48..]).unwrap(), kv.value))
             .try_collect()
             .await
     }
@@ -327,10 +328,7 @@ impl Default for NodeKeys {
 
 impl NodeKeys {
     pub fn to_identity(&self) -> NodeIdentity {
-        NodeIdentity {
-            sign: crypto::hash::new(self.sign.public_key()),
-            enc: crypto::hash::new(self.enc.public_key()),
-        }
+        NodeIdentity { sign: self.sign.identity(), enc: crypto::hash::new(self.enc.public_key()) }
     }
 
     pub fn from_mnemonic(mnemonic: &Mnemonic) -> Self {
@@ -414,7 +412,7 @@ impl ChainConfig {
                 let Ok(client) = Client::with_signer(&node, account.clone()).await else {
                     continue;
                 };
-                let Ok(node_list) = client.list_nodes::<NodeIdentity, _>(tx.clone()).await else {
+                let Ok(node_list) = client.list_nodes(tx.clone()).await else {
                     continue;
                 };
                 break 'a (node_list, client);

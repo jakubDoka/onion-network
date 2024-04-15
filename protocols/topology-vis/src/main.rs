@@ -407,10 +407,9 @@ async fn main() {
             .unwrap();
         log::info!("detected {} nodes", nodes.len());
         for (id, node) in nodes {
-            let ip = node.addr;
-
-            let addr =
-                chain_api::unpack_node_addr_offset(ip, 1).with(multiaddr::Protocol::Ws("/".into()));
+            let addr = chain_api::unpack_node_addr_offset(node.addr, 1)
+                .with(multiaddr::Protocol::Ws("/".into()));
+            log::info!("dialing node: {:?} at {:?}", id, addr);
             let route = Route::new(id.sign, addr);
             let peer_id = route.peer_id();
             swarm.behaviour_mut().dht.table.insert(route);

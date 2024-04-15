@@ -2,12 +2,7 @@
 #![feature(let_chains)]
 pub use primitive_types::U256;
 use {
-    libp2p::{
-        identity::{ed25519, PublicKey},
-        multihash::Multihash,
-        swarm::NetworkBehaviour,
-        Multiaddr, PeerId,
-    },
+    libp2p::{multihash::Multihash, swarm::NetworkBehaviour, Multiaddr, PeerId},
     std::convert::Infallible,
 };
 
@@ -147,7 +142,7 @@ impl RoutingTable {
 pub fn try_peer_id_to_ed(id: PeerId) -> Option<[u8; 32]> {
     let multihash: &Multihash<64> = id.as_ref();
     let bytes = multihash.digest();
-    bytes[bytes.len() - 32..].try_into().ok()
+    bytes.try_into().ok()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,15 +168,16 @@ impl Route {
     #[must_use]
     pub fn peer_id(&self) -> PeerId {
         let bytes: [u8; 32] = self.id.into();
-        let key = ed25519::PublicKey::try_from_bytes(&bytes).expect("id to always be valid ed key");
-        let key = PublicKey::from(key);
-        PeerId::from(key)
+        PeerId::from_multihash(Multihash::<64>::wrap(0, &bytes).unwrap()).unwrap()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use {super::*, libp2p::identity};
+    use {
+        super::*,
+        libp2p::identity::{self, ed25519},
+    };
 
     #[test]
     fn convert_peer_id() {

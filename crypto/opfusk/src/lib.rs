@@ -100,6 +100,8 @@ where
                 .read_exact(&mut buf[..std::mem::size_of::<InitRequest>()])
                 .await?;
 
+            log::info!("received init request, {}", std::mem::size_of::<InitResponse>());
+
             let sender_sign_pk;
             let sender_ss;
 
@@ -126,9 +128,11 @@ where
             };
 
             Pin::new(&mut socket).write_all(&buf[..std::mem::size_of::<InitResponse>()]).await?;
+            Pin::new(&mut socket).flush().await?;
             Pin::new(&mut socket)
                 .read_exact(&mut buf[..std::mem::size_of::<FinalRequest>()])
                 .await?;
+            log::info!("received final request");
 
             let final_req = unsafe { std::mem::transmute::<_, &FinalRequest>(&buf) };
             sender_sign_pk.verify(&challinge, &final_req.proof)?;
@@ -164,9 +168,12 @@ where
                 };
             }
             Pin::new(&mut socket).write_all(&buf[..std::mem::size_of::<InitRequest>()]).await?;
+            Pin::new(&mut socket).flush().await?;
+            log::info!("sent init request, {}", std::mem::size_of::<InitResponse>());
             Pin::new(&mut socket)
                 .read_exact(&mut buf[..std::mem::size_of::<InitResponse>()])
                 .await?;
+            log::info!("received init response");
 
             let sender_ss;
             let receiver_ss;
@@ -188,8 +195,14 @@ where
             }
 
             Pin::new(&mut socket).write_all(&buf[..std::mem::size_of::<FinalRequest>()]).await?;
+            Pin::new(&mut socket).flush().await?;
+            log::info!("sent final request");
+
+            log::info!("handshake completed {:?}", identity);
 
             let peer_id = hash_to_peer_id(identity);
+
+            log::info!("handshake completed peer id: {}", peer_id);
 
             Ok((peer_id, Output::new(socket, self.rng, sender_ss, receiver_ss, self.buffer_size)))
         }
@@ -288,6 +301,8 @@ where
                     break 'write_inner;
                 };
 
+                log::info!("forwarded: {}", n);
+
                 if n == 0 {
                     return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                 }
@@ -324,6 +339,7 @@ where
         if red == 0 {
             Poll::Pending
         } else {
+            log::info!("written: {}", red);
             Poll::Ready(Ok(red))
         }
     }
@@ -341,6 +357,7 @@ where
         let mut to_write = &s.write_buffer[s.writable_start..s.writable_end];
         while !to_write.is_empty() {
             let n = futures::ready!(Pin::new(&mut s.stream).poll_write(cx, to_write))?;
+            log::info!("flushed: {}", n);
             to_write = &to_write[n..];
             s.writable_start += n;
         }
@@ -435,9 +452,9 @@ where
                     let len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
                     s.readable_start += TAG_SIZE;
                     s.chunk_reminder = len;
+                    log::info!("chunk: {}", len);
                     updated = true;
                 }
-
                 let read_len = s.chunk_reminder.min(buf.len());
                 if read_len == 0 {
                     break 'write_buf;
@@ -455,6 +472,7 @@ where
         if red == 0 {
             Poll::Pending
         } else {
+            log::info!("read: {}", red);
             Poll::Ready(Ok(red))
         }
     }
@@ -479,12 +497,7 @@ pub fn hash_to_peer_id(hash: crypto::Hash) -> PeerId {
 pub fn peer_id_to_hash(peer_id: PeerId) -> Option<crypto::Hash> {
     let multihash = Multihash::from(peer_id);
     let digest = multihash.digest();
-    if digest.len() != 32 {
-        return None;
-    }
-    let mut hash = [0; 32];
-    hash.copy_from_slice(digest);
-    Some(hash)
+    digest.try_into().ok()
 }
 
 fn get_buffer(buffer: &mut Vec<u8>) -> &mut [u8] {

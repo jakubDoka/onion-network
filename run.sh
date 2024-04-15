@@ -95,6 +95,12 @@ rebuild_topology() { (cd $TOPOLOGY_ROOT && ./build.sh "$PROFILE" || exit 1); }
 rebuild_chain() { (cd chain/substrate-tests && cargo build --release); }
 rebuild_client() { (cd chat/client && trunk build $WASM_FLAGS --features building || exit 1); }
 
+rebuild_all() {
+	rebuild_native
+	rebuild_topology
+	rebuild_client
+}
+
 run_wasm() {
 	killall live-server
 	(cd $TOPOLOGY_ROOT/dist && live-server --host 127.0.0.1 --port $TOPOLOGY_PORT > /dev/null 2>&1 &)
@@ -114,6 +120,7 @@ run_nodes() {
 		export WS_PORT=$(alloc_port)
 		export MNEMONIC=$(load_mnemonic $EXE-$i)
 		export NONCE=$(alloc_nonce)
+		echo "PORT=$PORT WS_PORT=$WS_PORT"
 		export STORAGE_DIR="$TMP_DIR/storage/$EXE-$i"
 		$TARGET_DIR/$EXE > "$TMP_DIR/logs/$EXE/$i.log" 2>&1 &
 	done

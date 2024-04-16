@@ -91,7 +91,7 @@ impl Satelites {
         Ok(Self { satelites: HashMap::new() })
     }
 
-    pub fn add_satelite(&mut self, satelite: UserIdentity) -> Result<(), ClientError> {
+    pub fn _add_satelite(&mut self, satelite: UserIdentity) -> Result<(), ClientError> {
         match self.satelites.entry(satelite) {
             hash_map::Entry::Occupied(_) => Err(ClientError::AlreadyRegistered),
             hash_map::Entry::Vacant(entry) => {
@@ -108,10 +108,10 @@ impl Satelites {
         Ok(())
     }
 
-    pub fn advance_our_nonce(&mut self, satelite: UserIdentity) -> Result<u64, ClientError> {
+    pub fn _advance_our_nonce(&mut self, satelite: UserIdentity) -> Result<u64, ClientError> {
         let s = self.satelites.get_mut(&satelite).ok_or(ClientError::NotRegistered)?;
-        s.our_nonce += 1;
-        Ok(s.our_nonce)
+        s._our_nonce += 1;
+        Ok(s._our_nonce)
     }
 
     pub fn is_registered(&self, satelite: UserIdentity) -> bool {
@@ -122,7 +122,7 @@ impl Satelites {
 #[derive(Default)]
 struct SateliteMeta {
     nonce: Nonce,
-    our_nonce: Nonce,
+    _our_nonce: Nonce,
 }
 
 pub struct Storage {

@@ -29,8 +29,8 @@ use {
 pub use {
     chain_types::runtime_types::{
         pallet_node_staker::pallet::{
-            Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, NodeIdentity,
-            Stake as ChatStake, Stake2 as SateliteStake,
+            Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, Stake as ChatStake,
+            Stake2 as SateliteStake,
         },
         pallet_user_manager::pallet::Profile,
     },
@@ -51,6 +51,8 @@ pub type Nonce = u64;
 pub type RawUserName = [u8; USER_NAME_CAP];
 pub type StakeEvents<E> = futures::channel::mpsc::Receiver<Result<E>>;
 pub type Params = ParamsFor<Config>;
+pub type NodeIdentity = crypto::Hash;
+pub type NodeVec = Vec<(NodeIdentity, SocketAddr)>;
 
 #[must_use]
 pub fn immortal_era() -> String {
@@ -242,41 +244,46 @@ impl<S: TransactionHandler> Client<S> {
         self.signer.handle(&self.inner, transaction, nonce).await
     }
 
-    pub async fn join(&self, data: NodeIdentity, addr: NodeAddress, nonce: Nonce) -> Result<()> {
-        let tx = chain_types::tx().chat_staker().join(data, addr);
+    pub async fn join(
+        &self,
+        data: NodeIdentity,
+        enc: crypto::Hash,
+        addr: NodeAddress,
+        nonce: Nonce,
+    ) -> Result<()> {
+        let tx = chain_types::tx().chat_staker().join(data, enc, addr, 0);
         self.signer.handle(&self.inner, tx, nonce).await
     }
 
-    pub async fn list_chat_nodes(&self) -> Result<Vec<(NodeIdentity, ChatStake)>> {
-        self.list_nodes(chain_types::storage().chat_staker().stakes_iter()).await
+    pub async fn list_chat_nodes(&self) -> Result<NodeVec> {
+        self.list_nodes(chain_types::storage().chat_staker().addresses_iter()).await
     }
 
-    pub async fn list_satelite_nodes(&self) -> Result<Vec<(NodeIdentity, SateliteStake)>> {
-        self.list_nodes(chain_types::storage().satelite_staker().stakes_iter()).await
+    pub async fn list_satelite_nodes(&self) -> Result<NodeVec> {
+        self.list_nodes(chain_types::storage().satelite_staker().addresses_iter()).await
     }
 
-    async fn list_nodes<SA>(&self, tx: SA) -> Result<Vec<(NodeIdentity, SA::Target)>>
+    async fn list_nodes<SA>(&self, tx: SA) -> Result<NodeVec>
     where
-        SA: StorageAddress<IsIterable = Yes> + 'static,
+        SA: StorageAddress<IsIterable = Yes, Target = NodeAddress> + 'static,
     {
         let latest = self.inner.client.storage().at_latest().await?;
         latest
             .iter(tx)
             .await?
             // fuck me
-            .map_ok(|kv| (NodeIdentity::decode(&mut &kv.key_bytes[48..]).unwrap(), kv.value))
+            .map_ok(|kv| {
+                (
+                    parity_scale_codec::Decode::decode(&mut &kv.key_bytes[48..]).unwrap(),
+                    kv.value.into(),
+                )
+            })
             .try_collect()
             .await
     }
 
-    pub async fn vote(
-        &self,
-        me: NodeIdentity,
-        target: NodeIdentity,
-        rating: i32,
-        nonce: Nonce,
-    ) -> Result<()> {
-        let tx = chain_types::tx().chat_staker().vote(me, target, rating);
+    pub async fn vote(&self, me: NodeIdentity, target: NodeIdentity, nonce: Nonce) -> Result<()> {
+        let tx = chain_types::tx().chat_staker().vote(me, target);
         self.signer.handle(&self.inner, tx, nonce).await
     }
 
@@ -327,8 +334,8 @@ impl Default for NodeKeys {
 }
 
 impl NodeKeys {
-    pub fn to_identity(&self) -> NodeIdentity {
-        NodeIdentity { sign: self.sign.identity(), enc: crypto::hash::new(self.enc.public_key()) }
+    pub fn identity(&self) -> NodeIdentity {
+        self.sign.identity()
     }
 
     pub fn from_mnemonic(mnemonic: &Mnemonic) -> Self {
@@ -371,8 +378,8 @@ impl ChainConfig {
         self,
         keys: &NodeKeys,
         register: bool,
-    ) -> anyhow::Result<(Vec<(NodeIdentity, SateliteStake)>, StakeEvents<SateliteStakeEvent>)> {
-        let tx = chain_types::storage().satelite_staker().stakes_iter();
+    ) -> anyhow::Result<(NodeVec, StakeEvents<SateliteStakeEvent>)> {
+        let tx = chain_types::storage().satelite_staker().addresses_iter();
         self.connect(keys, tx, "SateliteStaker", unwrap_satelite_staker, register).await
     }
 
@@ -380,8 +387,8 @@ impl ChainConfig {
         self,
         keys: &NodeKeys,
         register: bool,
-    ) -> anyhow::Result<(Vec<(NodeIdentity, ChatStake)>, StakeEvents<ChatStakeEvent>)> {
-        let tx = chain_types::storage().chat_staker().stakes_iter();
+    ) -> anyhow::Result<(NodeVec, StakeEvents<ChatStakeEvent>)> {
+        let tx = chain_types::storage().chat_staker().addresses_iter();
         self.connect(keys, tx, "ChatStaker", unwrap_chat_staker, register).await
     }
 
@@ -392,9 +399,9 @@ impl ChainConfig {
         pallet_name: &'static str,
         unwrap: fn(chain_types::Event) -> Option<E>,
         register: bool,
-    ) -> anyhow::Result<(Vec<(NodeIdentity, SA::Target)>, StakeEvents<E>)>
+    ) -> anyhow::Result<(NodeVec, StakeEvents<E>)>
     where
-        SA: StorageAddress<IsIterable = Yes> + 'static + Clone,
+        SA: StorageAddress<IsIterable = Yes, Target = NodeAddress> + 'static + Clone,
         E: 'static + Send,
     {
         let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
@@ -449,11 +456,16 @@ impl ChainConfig {
         #[cfg(feature = "web")]
         wasm_bindgen_futures::spawn_local(fut);
 
-        if register && node_list.iter().all(|(id, _)| id.sign != keys.sign.identity()) {
+        if register && node_list.iter().all(|(id, _)| *id != keys.sign.identity()) {
             log::info!("registering on chain");
             let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
             client
-                .join(keys.to_identity(), (exposed_address, port).into(), nonce)
+                .join(
+                    keys.identity(),
+                    crypto::hash::new(keys.enc.public_key()),
+                    SocketAddr::new(exposed_address, port).into(),
+                    nonce,
+                )
                 .await
                 .context("registeing to chain")?;
             log::info!("registered on chain");
@@ -470,22 +482,19 @@ pub fn stake_event(s: &mut impl AsMut<dht::Behaviour>, event: impl Into<ChatStak
     match event.into() {
         ChatStakeEvent::Joined { identity, addr }
         | ChatStakeEvent::AddrChanged { identity, addr } => {
-            dht.table.insert(dht::Route::new(identity, unpack_node_addr(addr)));
+            dht.table.insert(dht::Route::new(identity, unpack_addr(addr)));
         }
         ChatStakeEvent::Reclaimed { identity } => _ = dht.table.remove(identity),
+        ChatStakeEvent::Voted { .. } => {}
     }
 }
 
-pub fn unpack_node_addr(addr: NodeAddress) -> Multiaddr {
-    unpack_node_addr_offset(addr, 0)
+pub fn unpack_addr_offset(addr: SocketAddr, port_offset: u16) -> Multiaddr {
+    unpack_addr((addr.ip(), addr.port() + port_offset))
 }
 
-pub fn unpack_node_addr_offset(addr: NodeAddress, port_offset: u16) -> Multiaddr {
-    let (addr, port) = addr.into();
-    unpack_socket_addr(SocketAddr::new(addr, port + port_offset))
-}
-
-pub fn unpack_socket_addr(addr: SocketAddr) -> Multiaddr {
+pub fn unpack_addr(addr: impl Into<SocketAddr>) -> Multiaddr {
+    let addr = addr.into();
     Multiaddr::empty()
         .with(match addr.ip() {
             IpAddr::V4(ip) => multiaddr::Protocol::Ip4(ip),

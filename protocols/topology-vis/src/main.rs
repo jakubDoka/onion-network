@@ -406,11 +406,11 @@ async fn main() {
             .await
             .unwrap();
         log::info!("detected {} nodes", nodes.len());
-        for (id, node) in nodes {
-            let addr = chain_api::unpack_node_addr_offset(node.addr, 1)
-                .with(multiaddr::Protocol::Ws("/".into()));
+        for (id, addr) in nodes {
+            let addr =
+                chain_api::unpack_addr_offset(addr, 1).with(multiaddr::Protocol::Ws("/".into()));
             log::info!("dialing node: {:?} at {:?}", id, addr);
-            let route = Route::new(id.sign, addr);
+            let route = Route::new(id, addr);
             let peer_id = route.peer_id();
             swarm.behaviour_mut().dht.table.insert(route);
             swarm.behaviour_mut().collector.world_mut().0.borrow_mut().servers.insert(peer_id);

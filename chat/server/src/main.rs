@@ -16,9 +16,7 @@ use {
     self::api::{chat::Chat, MissingTopic},
     crate::api::Handler as _,
     anyhow::Context as _,
-    chain_api::{
-        ChainConfig, ChatStake, ChatStakeEvent, Mnemonic, NodeIdentity, NodeKeys, StakeEvents,
-    },
+    chain_api::{ChainConfig, ChatStakeEvent, Mnemonic, NodeKeys, NodeVec, StakeEvents},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::{mapref::entry::Entry, DashMap},
@@ -103,7 +101,7 @@ impl Server {
     async fn new(
         config: NodeConfig,
         keys: NodeKeys,
-        node_list: Vec<(NodeIdentity, ChatStake)>,
+        node_list: NodeVec,
         stake_events: StakeEvents<ChatStakeEvent>,
     ) -> anyhow::Result<Self> {
         use libp2p::core::Transport;
@@ -175,10 +173,8 @@ impl Server {
             )
             .context("starting to isten for clients")?;
 
-        let node_data = node_list.into_iter().map(|(id, stake)| {
-            let addr = chain_api::unpack_node_addr(stake.addr);
-            Route::new(id.sign, addr)
-        });
+        let node_data =
+            node_list.into_iter().map(|(id, addr)| Route::new(id, chain_api::unpack_addr(addr)));
         swarm.behaviour_mut().dht.table.bulk_insert(node_data);
 
         let (request_event_sink, request_events) = mpsc::channel(100);

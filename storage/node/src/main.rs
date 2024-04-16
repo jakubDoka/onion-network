@@ -6,7 +6,7 @@
 
 use {
     anyhow::Context as _,
-    chain_api::{Mnemonic, NodeIdentity, NodeKeys, SateliteStake, SateliteStakeEvent, StakeEvents},
+    chain_api::{Mnemonic, NodeKeys, NodeVec, SateliteStakeEvent, StakeEvents},
     codec::Codec,
     component_utils::PacketReader,
     dht::Route,
@@ -81,7 +81,7 @@ impl Node {
         storage: storage::Storage,
         keys: NodeKeys,
         stake_events: StakeEvents<SateliteStakeEvent>,
-        satelites: Vec<(NodeIdentity, SateliteStake)>,
+        satelites: NodeVec,
     ) -> anyhow::Result<Self> {
         use libp2p::core::Transport;
 
@@ -118,9 +118,8 @@ impl Node {
             )
             .context("oprning listener")?;
 
-        let node_data = satelites
-            .into_iter()
-            .map(|(id, s)| Route::new(id.sign, chain_api::unpack_node_addr(s.addr)));
+        let node_data =
+            satelites.into_iter().map(|(id, s)| Route::new(id, chain_api::unpack_addr(s)));
 
         swarm.behaviour_mut().dht.table.bulk_insert(node_data);
 

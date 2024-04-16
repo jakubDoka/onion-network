@@ -6,7 +6,7 @@ use {
         Vault,
     },
     anyhow::Context,
-    chain_api::unpack_socket_addr,
+    chain_api::unpack_addr,
     chat_spec::*,
     codec::{Codec, Reminder},
     component_utils::{FindAndRemove, PacketWriter},
@@ -102,15 +102,15 @@ impl Node {
             node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance
         ));
 
-        let nodes = node_data.into_iter().map(|(id, stake)| {
-            let addr = chain_api::unpack_node_addr_offset(stake.addr, 1);
-            Route::new(id.sign, addr.with(multiaddr::Protocol::Ws("/".into())))
+        let nodes = node_data.into_iter().map(|(id, addr)| {
+            let addr = chain_api::unpack_addr_offset(addr, 1);
+            Route::new(id, addr.with(multiaddr::Protocol::Ws("/".into())))
         });
         swarm.behaviour_mut().chat_dht.table.bulk_insert(nodes);
 
-        let satelites = satelite_data.into_iter().map(|(id, stake)| {
-            let addr = chain_api::unpack_node_addr_offset(stake.addr, 1);
-            Route::new(id.sign, addr.with(multiaddr::Protocol::Ws("/".into())))
+        let satelites = satelite_data.into_iter().map(|(id, addr)| {
+            let addr = chain_api::unpack_addr_offset(addr, 1);
+            Route::new(id, addr.with(multiaddr::Protocol::Ws("/".into())))
         });
         swarm.behaviour_mut().satelite_dht.table.bulk_insert(satelites);
 
@@ -419,7 +419,7 @@ impl Node {
 
     fn storage_request(&mut self, req: RawStorageRequest) {
         let beh = self.swarm.behaviour_mut();
-        beh.storage_dht.table.insert(Route::new(req.identity, unpack_socket_addr(req.addr)));
+        beh.storage_dht.table.insert(Route::new(req.identity, unpack_addr(req.addr)));
 
         let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
         let ignore_resp = req.response.is_ok();

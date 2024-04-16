@@ -52,7 +52,7 @@ macro_rules! gen_config {
                 pub $required_field: $required_ty,
             )*
             $(
-                $field: $ty,
+                pub $field: $ty,
             )*
         }
 

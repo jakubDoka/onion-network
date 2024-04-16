@@ -18,12 +18,13 @@ use {
         sign::Signature,
     },
     rpc::CallId,
-    std::fmt::Write as _,
+    std::{fmt::Write as _, net::SocketAddr},
 };
 
 pub mod handler;
 pub mod protocol;
 pub mod sorted_compact_vec;
+pub mod uri;
 pub mod rpcs {
     macro_rules! rpcs {
         ($($name:ident;)*) => { $( pub const $name: u8 = ${index(0)}; )* };
@@ -58,15 +59,15 @@ pub const MAX_PIECES: usize = DATA_PIECES + PARITY_PIECES;
 
 pub type ReconstructBundle<'data> = [ReconstructPiece<'data>; DATA_PIECES];
 pub type Piece = [u8; PIECE_SIZE];
-pub type Data = [Piece; DATA_PIECES];
-pub type Parity = [Piece; PARITY_PIECES];
+pub type Data = [u8; DATA_PIECES * PIECE_SIZE];
+pub type Parity = [u8; PARITY_PIECES * PIECE_SIZE];
 pub type NodeIdentity = crypto::Hash;
 pub type UserIdentity = crypto::Hash;
 pub type FileId = crypto::Hash;
 pub type NodeId = u16;
 pub type FreeSpace = u64;
 pub type Holders = [NodeId; MAX_PIECES];
-pub type ExpandedHolders = [NodeIdentity; MAX_PIECES];
+pub type ExpandedHolders = [(NodeIdentity, SocketAddr); MAX_PIECES];
 pub type ClientResult<T, E = ClientError> = Result<T, E>;
 pub type NodeResult<T, E = NodeError> = Result<T, E>;
 
@@ -90,6 +91,12 @@ pub enum ClientError {
     InvalidNonce(Nonce),
     #[error("not registered")]
     NotRegistered,
+    #[error("channel closed")]
+    ChannelClosed,
+    #[error("timeout")]
+    Timeout,
+    #[error("invalid response")]
+    InvalidResponse,
 }
 
 impl From<anyhow::Error> for ClientError {
@@ -210,7 +217,7 @@ impl Default for Encoding {
 
 impl Encoding {
     pub fn encode(&self, data: &Data, parity: &mut Parity) {
-        self.inner.encode(data.flatten(), parity.flatten_mut()).unwrap();
+        self.inner.encode(data, parity).unwrap();
     }
 
     pub fn reconstruct(

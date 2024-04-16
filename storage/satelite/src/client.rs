@@ -3,9 +3,10 @@ use {
     anyhow::Context,
     crypto::proof::Proof,
     rand_core::OsRng,
+    std::net::SocketAddr,
     storage_spec::{
         Address, BandwidthContext, ClientError, ClientResult as Result, ExpandedHolders, File,
-        FileMeta, MAX_PIECES,
+        FileMeta, StoreContext, MAX_PIECES,
     },
 };
 
@@ -23,19 +24,27 @@ pub async fn register(cx: crate::Context, proof: Proof<crypto::Hash>) -> Result<
 pub async fn allocate_file(
     cx: crate::Context,
     (size, proof): (u64, Proof<crypto::Hash>),
-) -> Result<File> {
+) -> Result<(File, [Proof<StoreContext>; MAX_PIECES])> {
     handlers::ensure!(cx.keys.sign.identity() == proof.context, ClientError::InvalidProof);
     handlers::ensure!(proof.verify(), ClientError::InvalidProof);
     let success = handlers::blocking!(cx.store.users.advance_nonce(proof.identity(), proof.nonce))?;
     handlers::ensure!(success, ClientError::InvalidProof);
 
     let dest = cx.store.nodes.write().unwrap().allocate_file(size);
-    handlers::ensure!(let Some((address, holders)) = dest, ClientError::NotEnoughtNodes);
+    handlers::ensure!(let Some((address, holders, nonces)) = dest, ClientError::NotEnoughtNodes);
     let meta = FileMeta { holders, owner: proof.identity() };
     let success = handlers::blocking!(cx.store.files.save(address, meta)).context("saving file")?;
     handlers::ensure!(success, ClientError::YouWonTheLottery);
     let holders = cx.store.nodes.read().unwrap().expand_holders(holders);
-    Ok(File { address, holders })
+    let mut nonces = nonces.into_iter();
+    Ok((
+        File { address, holders },
+        holders.map(|(dest, _)| {
+            let ctx = StoreContext { address, dest };
+            let nonce = Proof::new(&cx.keys.sign, &mut nonces.next().unwrap(), ctx, OsRng).nonce;
+            Proof::new(&cx.keys.sign, &mut { nonce }, ctx, OsRng)
+        }),
+    ))
 }
 
 pub async fn delete_file(cx: crate::Context, proof: Proof<Address>) -> Result<()> {
@@ -61,14 +70,14 @@ pub async fn get_file_holders(cx: crate::Context, address: Address) -> Result<Ex
 pub async fn allocate_bandwidth(
     cx: crate::Context,
     (proof, target, amount): (Proof<crypto::Hash>, ExpandedHolders, u64),
-) -> Result<[Proof<BandwidthContext>; MAX_PIECES]> {
+) -> Result<[(Proof<BandwidthContext>, SocketAddr); MAX_PIECES]> {
     handlers::ensure!(cx.keys.sign.identity() == proof.context, ClientError::InvalidProof);
     handlers::ensure!(proof.verify(), ClientError::InvalidProof);
     let success = handlers::blocking!(cx.store.users.advance_nonce(proof.identity(), proof.nonce))?;
     handlers::ensure!(success, ClientError::InvalidProof);
 
-    Ok(target.map(|dest| {
+    Ok(target.map(|(dest, addr)| {
         let ctx = BandwidthContext { dest, amount, issuer: proof.identity() };
-        Proof::new(&cx.keys.sign, &mut { proof.nonce }, ctx, OsRng)
+        (Proof::new(&cx.keys.sign, &mut { proof.nonce }, ctx, OsRng), addr)
     }))
 }

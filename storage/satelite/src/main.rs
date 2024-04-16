@@ -13,7 +13,7 @@ use {
         swarm::{NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId,
     },
-    opfusk::ToPeerId,
+    opfusk::{PeerIdExt, ToPeerId},
     rand_core::OsRng,
     rpc::CallId,
     std::{future::Future, net::Ipv4Addr, ops::DerefMut, task::Poll, time::Duration},
@@ -110,7 +110,7 @@ impl Satelite {
                 peer_id,
                 endpoint: ConnectedPoint::Listener { send_back_addr, .. },
                 ..
-            } if let Some(pk) = dht::try_peer_id_to_ed(peer_id) => {
+            } if let Some(pk) = peer_id.try_to_hash() => {
                 self.swarm.behaviour_mut().dht.table.insert(dht::Route::new(pk, send_back_addr));
                 return;
             }

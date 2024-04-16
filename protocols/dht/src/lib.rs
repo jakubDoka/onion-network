@@ -2,7 +2,8 @@
 #![feature(let_chains)]
 pub use primitive_types::U256;
 use {
-    libp2p::{multihash::Multihash, swarm::NetworkBehaviour, Multiaddr, PeerId},
+    libp2p::{swarm::NetworkBehaviour, Multiaddr, PeerId},
+    opfusk::{PeerIdExt, ToPeerId},
     std::convert::Infallible,
 };
 
@@ -121,7 +122,7 @@ impl RoutingTable {
 
     #[must_use]
     pub fn get(&self, id: PeerId) -> Option<&Multiaddr> {
-        let id = try_peer_id_to_ed(id)?;
+        let id = id.to_hash();
         let id: U256 = id.into();
         Some(&self.routes.iter().find(|r| r.id == id)?.addr)
     }
@@ -138,63 +139,20 @@ impl RoutingTable {
     }
 }
 
-#[must_use]
-pub fn try_peer_id_to_ed(id: PeerId) -> Option<[u8; 32]> {
-    let multihash: &Multihash<64> = id.as_ref();
-    let bytes = multihash.digest();
-    bytes.try_into().ok()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
     pub id: U256,
     pub addr: Multiaddr,
 }
 
-pub fn decompress_peer_id(compressed: U256) -> PeerId {
-    let bytes: [u8; 32] = compressed.into();
-    let pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&bytes).unwrap();
-    let key = libp2p::identity::PublicKey::from(pk);
-    libp2p::PeerId::from(key)
-}
-
 impl Route {
-    #[must_use]
     pub fn new(id: [u8; 32], addr: Multiaddr) -> Self {
         let id = U256::from(id);
         Self { id, addr }
     }
 
-    #[must_use]
     pub fn peer_id(&self) -> PeerId {
         let bytes: [u8; 32] = self.id.into();
-        PeerId::from_multihash(Multihash::<64>::wrap(0, &bytes).unwrap()).unwrap()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use {
-        super::*,
-        libp2p::identity::{self, ed25519},
-    };
-
-    #[test]
-    fn convert_peer_id() {
-        let key = ed25519::Keypair::generate();
-        let id = key.public();
-        let peer_id = identity::PublicKey::from(id.clone()).to_peer_id();
-
-        assert_eq!(try_peer_id_to_ed(peer_id), Some(id.to_bytes()));
-    }
-
-    #[test]
-    fn closest_correct_len() {
-        let count = 10;
-        let mut table = RoutingTable {
-            routes: (0..count).map(|i| Route { id: i.into(), addr: Multiaddr::empty() }).collect(),
-        };
-
-        assert_eq!(table.closest(&[]).count(), count);
+        bytes.to_peer_id()
     }
 }

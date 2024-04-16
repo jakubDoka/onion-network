@@ -35,11 +35,10 @@ fn setup_nodes<const COUNT: usize>(
             .boxed();
         let mut swarm = libp2p::swarm::Swarm::new(
             transport,
-            crate::Behaviour::new(
-                crate::Config::new(Some(secret), peer_id)
-                    .keep_alive_interval(CONNECTION_TIMEOUT)
-                    .dial(false),
-            ),
+            crate::Config::new(Some(secret), peer_id)
+                .keep_alive_interval(CONNECTION_TIMEOUT)
+                .dial(false)
+                .build(),
             peer_id,
             libp2p::swarm::Config::with_tokio_executor()
                 .with_idle_connection_timeout(CONNECTION_TIMEOUT),

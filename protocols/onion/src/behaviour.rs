@@ -36,6 +36,12 @@ pub struct Behaviour {
     buffer: Arc<spin::Mutex<[u8; 1 << 16]>>,
 }
 
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self::new(Default::default())
+    }
+}
+
 impl Behaviour {
     #[must_use]
     pub fn new(config: Config) -> Self {
@@ -339,6 +345,12 @@ component_utils::gen_config! {
     buffer_cap: usize = 1 << 16,
     /// Dial instead of emmiting a connection request.
     dial: bool = true,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::new(None, PeerId::random())
+    }
 }
 
 impl Config {

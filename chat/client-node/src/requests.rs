@@ -1,8 +1,8 @@
 use {
     crate::{
         chain::fetch_profile, vault_chat_404, ChatMeta, Encrypted, FriendMeta, RawChatMessage,
-        RawOnionRequest, RawStorageRequest, RequestChannel, RequestInit, SubscriptionInit,
-        SubscriptionMessage, UserKeys, Vault, VaultComponentId,
+        RawOnionRequest, RawSateliteRequest, RawStorageRequest, RequestChannel, RequestInit,
+        SubscriptionInit, SubscriptionMessage, UserKeys, Vault, VaultComponentId,
     },
     anyhow::Context,
     chat_spec::*,
@@ -14,13 +14,17 @@ use {
     },
     double_ratchet::{DoubleRatchet, MessageHeader},
     libp2p::futures::{
+        self,
         channel::{mpsc, oneshot},
         AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt,
     },
     onion::EncryptedStream,
     rand::rngs::OsRng,
     std::{collections::HashSet, convert::identity, io, net::SocketAddr},
-    storage_spec::NodeIdentity,
+    storage_spec::{
+        rpcs as srpcs, ClientError, File, NodeIdentity, StoreContext, DATA_PIECES, MAX_PIECES,
+        PARITY_PIECES, PIECE_SIZE,
+    },
 };
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -322,8 +326,9 @@ impl Requests {
             .try_send(RequestInit::Subscription(SubscriptionInit { id, topic, channel: tx }))
             .map_err(|_| ChatError::ChannelClosed)?;
 
-        let init =
-            crate::timeout(rx.next(), REQUEST_TIMEOUT).await?.ok_or(ChatError::ChannelClosed)?;
+        let init = crate::chat_timeout(rx.next(), REQUEST_TIMEOUT)
+            .await?
+            .ok_or(ChatError::ChannelClosed)?;
         Result::<(), ChatError>::decode(&mut &init[..]).ok_or(ChatError::InvalidResponse)??;
 
         Ok(rx)
@@ -381,7 +386,7 @@ impl Requests {
             })
             .ok_or(ChatError::MessageOverload)?;
 
-        self.buffer = crate::timeout(stream.next(), REQUEST_TIMEOUT)
+        self.buffer = crate::chat_timeout(stream.next(), REQUEST_TIMEOUT)
             .await?
             .ok_or(ChatError::ChannelClosed)?
             .map_err(|_| ChatError::ChannelClosed)?;
@@ -391,18 +396,16 @@ impl Requests {
             .and_then(|(_, r)| r)
     }
 
-    async fn dispatch_storage_stream(
+    pub async fn dispatch_storage_stream(
         &mut self,
         identity: NodeIdentity,
         addr: SocketAddr,
         prefix: u8,
         request: impl Codec<'_>,
-    ) -> Result<RequestStream, ChatError> {
-        let id = CallId::new();
+    ) -> Result<libp2p::Stream, ChatError> {
         let (stream, stream_recv) = oneshot::channel();
         self.sink
             .send(RequestInit::StorageRequest(RawStorageRequest {
-                id,
                 prefix,
                 payload: request.to_bytes(),
                 response: Ok(stream),
@@ -412,16 +415,168 @@ impl Requests {
             .await
             .map_err(|_| ChatError::ChannelClosed)?;
 
-        let stream = crate::timeout(stream_recv, REQUEST_TIMEOUT)
+        let stream = crate::chat_timeout(stream_recv, REQUEST_TIMEOUT)
             .await?
             .map_err(|_| ChatError::ChannelClosed)?;
 
-        Ok(RequestStream {
-            stream,
-            reader: PacketReader::default(),
-            writer: PacketWriter::new(1 << 13),
-            buffer: Vec::new(),
-        })
+        Ok(stream)
+    }
+
+    pub async fn upload_file(
+        &mut self,
+        satelite: NodeIdentity,
+        size: u64,
+        blob: impl futures::Stream<Item = Vec<u8>>,
+        context: &impl RequestContext,
+    ) -> Result<()> {
+        let mut blob = std::pin::pin!(blob);
+        let Some(mut chunk) = blob.next().await else {
+            anyhow::bail!("empty file");
+        };
+
+        let (file, proofs) = self.allocate_file(satelite, size, &context).await?;
+
+        let tasks = file.holders.into_iter().zip(proofs).map(|((id, addr), proof)| {
+            let mut s = self.clone();
+            async move { s.file_store_stream(id, addr, proof).await }
+        });
+
+        let mut streams = futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        if streams.len() < DATA_PIECES {
+            return Err(ClientError::NotEnoughtNodes.into());
+        }
+
+        const BUFFER_SIZE: usize = DATA_PIECES * PIECE_SIZE;
+
+        let mut data_buffer = Vec::with_capacity(BUFFER_SIZE);
+        let mut parity_buffer = [0u8; PARITY_PIECES * PIECE_SIZE];
+        let encoding = storage_spec::Encoding::default();
+        let mut last_iter = false;
+
+        // FIXME: the user can purposefully not send file to some nodes so the nodes need to
+        // confirm with the satelite after download is complete
+        loop {
+            let to_drain = chunk.len().min(data_buffer.capacity() - data_buffer.len());
+            data_buffer.extend(chunk.drain(..to_drain));
+
+            if last_iter && !data_buffer.is_empty() {
+                data_buffer.resize(data_buffer.capacity(), 0);
+            }
+
+            if let Ok(data) = <&[u8; BUFFER_SIZE]>::try_from(data_buffer.as_slice()) {
+                encoding.encode(data, &mut parity_buffer);
+                let chunks = data_buffer.chunks(PIECE_SIZE).chain(parity_buffer.chunks(PIECE_SIZE));
+                let tasks = streams.iter_mut().zip(chunks).map(|(s, chunk)| s.write_all(chunk));
+                let results = futures::future::join_all(tasks).await;
+                if results.into_iter().filter_map(Result::ok).count() < DATA_PIECES {
+                    return Err(ClientError::NotEnoughtNodes.into());
+                }
+                data_buffer.clear();
+            }
+
+            if last_iter {
+                break;
+            }
+
+            if !chunk.is_empty() {
+                continue;
+            }
+
+            let Some(next) = blob.next().await else {
+                last_iter = true;
+                continue;
+            };
+            chunk = next;
+        }
+
+        Ok(())
+    }
+
+    async fn file_store_stream(
+        &mut self,
+        identity: NodeIdentity,
+        addr: SocketAddr,
+        proof: Proof<StoreContext>,
+    ) -> Result<libp2p::Stream, ChatError> {
+        self.dispatch_storage_stream(identity, addr, srpcs::STORE_FILE, proof).await
+    }
+
+    async fn allocate_file(
+        &mut self,
+        satelite: NodeIdentity,
+        size: u64,
+        context: impl RequestContext,
+    ) -> Result<(File, [Proof<StoreContext>; MAX_PIECES]), ClientError> {
+        // FIXME: get nonce more efficiently and cache it
+        let proof = context.with_keys(|k| Proof::new(&k.sign, &mut 0, satelite, OsRng))?;
+        let nonce = match self
+            .dispatch_satelite_request(satelite, srpcs::ALLOCATE_FILE, (size, proof))
+            .await
+        {
+            Err(ClientError::InvalidNonce(nonce)) => nonce,
+            e => return e,
+        };
+
+        let proof = context.with_keys(|k| Proof::new(&k.sign, &mut { nonce }, satelite, OsRng))?;
+        self.dispatch_satelite_request(satelite, srpcs::ALLOCATE_FILE, (size, proof)).await
+    }
+
+    pub async fn dispatch_storage_request<'a, R: Codec<'a>>(
+        &'a mut self,
+        identity: NodeIdentity,
+        addr: SocketAddr,
+        prefix: u8,
+        request: impl Codec<'_>,
+    ) -> Result<R, ChatError> {
+        let (tx, rx) = oneshot::channel();
+        self.sink
+            .send(RequestInit::StorageRequest(RawStorageRequest {
+                prefix,
+                payload: request.to_bytes(),
+                response: Err(tx),
+                identity,
+                addr,
+            }))
+            .await
+            .map_err(|_| ChatError::ChannelClosed)?;
+
+        self.buffer = crate::chat_timeout(rx, REQUEST_TIMEOUT)
+            .await?
+            .map_err(|_| ChatError::ChannelClosed)?;
+        Result::<R, ChatError>::decode(&mut &self.buffer[..])
+            .ok_or(ChatError::InvalidResponse)
+            .and_then(std::convert::identity)
+    }
+
+    pub async fn dispatch_satelite_request<'a, R: Codec<'a>>(
+        &'a mut self,
+        identity: NodeIdentity,
+        prefix: u8,
+        request: impl Codec<'_>,
+    ) -> Result<R, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.sink
+            .send(RequestInit::SateliteRequest(RawSateliteRequest {
+                prefix,
+                payload: request.to_bytes(),
+                response: tx,
+                identity,
+            }))
+            .await
+            .map_err(|_| ClientError::ChannelClosed)?;
+
+        self.buffer = crate::timeout(rx, REQUEST_TIMEOUT)
+            .await
+            .ok_or(ClientError::Timeout)?
+            .map_err(|_| ClientError::ChannelClosed)?;
+        Result::<R, _>::decode(&mut &self.buffer[..])
+            .ok_or(ClientError::InvalidResponse)
+            .and_then(std::convert::identity)
     }
 
     async fn dispatch_low<'a, R: Codec<'a>>(
@@ -442,8 +597,9 @@ impl Requests {
             }))
             .await
             .map_err(|_| ChatError::ChannelClosed)?;
-        self.buffer =
-            crate::timeout(rx, REQUEST_TIMEOUT).await?.map_err(|_| ChatError::ChannelClosed)?;
+        self.buffer = crate::chat_timeout(rx, REQUEST_TIMEOUT)
+            .await?
+            .map_err(|_| ChatError::ChannelClosed)?;
         Result::<R, ChatError>::decode(&mut &self.buffer[..])
             .ok_or(ChatError::InvalidResponse)
             .and_then(identity)

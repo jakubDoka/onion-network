@@ -1,4 +1,5 @@
 #![feature(slice_take)]
+#![feature(type_alias_impl_trait)]
 
 use {
     crate::requests::Result,
@@ -11,7 +12,7 @@ use {
     onion::SharedSecret,
     rand::{rngs::OsRng, CryptoRng, RngCore},
     std::{future::Future, marker::PhantomData, net::SocketAddr, pin, task::Poll, time::Duration},
-    storage_spec::NodeIdentity,
+    storage_spec::{ClientError, NodeIdentity},
     web_sys::{
         wasm_bindgen::{closure::Closure, JsCast},
         window,
@@ -85,7 +86,6 @@ pub struct RawOnionRequest {
 }
 
 pub struct RawStorageRequest {
-    pub id: CallId,
     pub prefix: u8,
     pub payload: Vec<u8>,
     pub identity: NodeIdentity,
@@ -94,7 +94,6 @@ pub struct RawStorageRequest {
 }
 
 pub struct RawSateliteRequest {
-    pub id: CallId,
     pub prefix: u8,
     pub payload: Vec<u8>,
     pub identity: NodeIdentity,
@@ -182,7 +181,15 @@ impl<T> Encrypted<T> {
     }
 }
 
-pub async fn timeout<F: Future>(f: F, duration: Duration) -> Result<F::Output, ChatError> {
+pub async fn chat_timeout<F: Future>(f: F, dur: Duration) -> Result<F::Output, ChatError> {
+    timeout(f, dur).await.ok_or(ChatError::Timeout)
+}
+
+pub async fn satelite_timeout<F: Future>(f: F, dur: Duration) -> Result<F::Output, ClientError> {
+    timeout(f, dur).await.ok_or(ClientError::Timeout)
+}
+
+pub async fn timeout<F: Future>(f: F, duration: Duration) -> Option<F::Output> {
     let mut fut = pin::pin!(f);
     let mut callback = None::<(Closure<dyn FnMut()>, i32)>;
     let until = instant::Instant::now() + duration;
@@ -192,11 +199,11 @@ pub async fn timeout<F: Future>(f: F, duration: Duration) -> Result<F::Output, C
                 window().unwrap().clear_timeout_with_handle(handle);
             }
 
-            return Poll::Ready(Ok(v));
+            return Poll::Ready(Some(v));
         }
 
         if until < instant::Instant::now() {
-            return Poll::Ready(Err(ChatError::Timeout));
+            return Poll::Ready(None);
         }
 
         if callback.is_none() {

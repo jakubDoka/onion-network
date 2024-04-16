@@ -1,14 +1,15 @@
 use {
     crate::{
         chain::{chain_node, min_nodes},
-        timeout, RawOnionRequest, RawResponse, RawStorageRequest, RequestChannel, RequestInit,
-        Requests, SubscriptionInit, SubscriptionMessage, UserKeys, Vault,
+        timeout, RawOnionRequest, RawResponse, RawSateliteRequest, RawStorageRequest,
+        RequestChannel, RequestInit, Requests, SubscriptionInit, SubscriptionMessage, UserKeys,
+        Vault,
     },
     anyhow::Context,
     chain_api::unpack_socket_addr,
     chat_spec::*,
     codec::{Codec, Reminder},
-    component_utils::FindAndRemove,
+    component_utils::{FindAndRemove, PacketWriter},
     crypto::{
         enc,
         proof::{Nonce, Proof},
@@ -18,6 +19,7 @@ use {
         core::upgrade::Version,
         futures::{
             channel::{mpsc, oneshot},
+            stream::FuturesUnordered,
             StreamExt,
         },
         swarm::{NetworkBehaviour, SwarmEvent},
@@ -27,7 +29,7 @@ use {
     opfusk::ToPeerId,
     rand::{rngs::OsRng, seq::IteratorRandom},
     std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashMap, HashSet, VecDeque},
         convert::Infallible,
         future::Future,
         io,
@@ -38,12 +40,16 @@ use {
     },
 };
 
+type StreamNegotiation = impl Future<Output = io::Result<()>>;
+
 pub struct Node {
     swarm: Swarm<Behaviour>,
     subscriptions: futures::stream::SelectAll<Subscription>,
-    pending_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
+    pending_chat_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
+    pending_rpc_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
     pending_topic_search: HashMap<PathId, Vec<RequestInit>>,
-    pending_streams: HashMap<CallId, oneshot::Sender<libp2p::Stream>>,
+    pending_streams: VecDeque<(PeerId, CallId, oneshot::Sender<libp2p::Stream>)>,
+    negotiated_streams: FuturesUnordered<StreamNegotiation>,
     requests: RequestChannel,
 }
 
@@ -59,8 +65,10 @@ impl Node {
         let (mut request_dispatch, commands) = Requests::new();
         let chain_api = chain_node(keys.name).await?;
         let node_request = chain_api.list_chat_nodes();
+        let satelite_request = chain_api.list_satelite_nodes();
         let profile_request = chain_api.get_profile_by_name(username_to_raw(keys.name));
-        let (node_data, profile_hash) = futures::try_join!(node_request, profile_request)?;
+        let (node_data, satelite_data, profile_hash) =
+            futures::try_join!(node_request, satelite_request, profile_request)?;
         let profile_hash = profile_hash.context("profile not found")?;
         let profile = keys.to_identity();
 
@@ -78,13 +86,10 @@ impl Node {
                 .multiplex(libp2p::yamux::Config::default())
                 .boxed(),
             Behaviour {
-                onion: onion::Behaviour::new(
-                    onion::Config::new(None, keys.sign.to_peer_id())
-                        .keep_alive_interval(Duration::from_secs(100)),
-                ),
-                key_share: onion::key_share::Behaviour::default(),
-                dht: dht::Behaviour::default(),
-                streaming: streaming::Behaviour::default(),
+                onion: onion::Config::default()
+                    .keep_alive_interval(Duration::from_secs(100))
+                    .build(),
+                ..Default::default()
             },
             keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_wasm_executor()
@@ -101,9 +106,16 @@ impl Node {
             let addr = chain_api::unpack_node_addr_offset(stake.addr, 1);
             Route::new(id.sign, addr.with(multiaddr::Protocol::Ws("/".into())))
         });
-        swarm.behaviour_mut().dht.table.bulk_insert(nodes);
+        swarm.behaviour_mut().chat_dht.table.bulk_insert(nodes);
 
-        let routes = swarm.behaviour_mut().dht.table.iter().map(Route::peer_id).collect::<Vec<_>>();
+        let satelites = satelite_data.into_iter().map(|(id, stake)| {
+            let addr = chain_api::unpack_node_addr_offset(stake.addr, 1);
+            Route::new(id.sign, addr.with(multiaddr::Protocol::Ws("/".into())))
+        });
+        swarm.behaviour_mut().satelite_dht.table.bulk_insert(satelites);
+
+        let routes =
+            swarm.behaviour_mut().chat_dht.table.iter().map(Route::peer_id).collect::<Vec<_>>();
         for route in routes {
             _ = swarm.dial(route);
         }
@@ -138,7 +150,7 @@ impl Node {
 
         let members = swarm
             .behaviour_mut()
-            .dht
+            .chat_dht
             .table
             .closest(profile_hash.sign.as_ref())
             .take(REPLICATION_FACTOR.get() + 1);
@@ -209,7 +221,7 @@ impl Node {
         let iter = vault.chats.keys().copied().flat_map(|c| {
             swarm
                 .behaviour_mut()
-                .dht
+                .chat_dht
                 .table
                 .closest(c.as_bytes())
                 .take(REPLICATION_FACTOR.get() + 1)
@@ -287,9 +299,11 @@ impl Node {
             Self {
                 swarm,
                 subscriptions,
-                pending_requests: Default::default(),
+                pending_chat_requests: Default::default(),
                 pending_topic_search: Default::default(),
+                pending_rpc_requests: Default::default(),
                 pending_streams: Default::default(),
+                negotiated_streams: Default::default(),
                 requests: commands,
             },
             vault,
@@ -314,7 +328,7 @@ impl Node {
         let peers = self
             .swarm
             .behaviour_mut()
-            .dht
+            .chat_dht
             .table
             .closest(search_key.as_bytes())
             .take(REPLICATION_FACTOR.get() + 1)
@@ -356,7 +370,7 @@ impl Node {
         };
 
         sub.stream.write(request).unwrap();
-        self.pending_requests.insert(req.id, req.response);
+        self.pending_chat_requests.insert(req.id, req.response);
         log::debug!("request sent, {:?}", req.id);
     }
 
@@ -387,15 +401,41 @@ impl Node {
             RequestInit::Subscription(sub) => self.subscription_request(sub),
             RequestInit::EndSubscription(topic) => self.subscription_end(topic),
             RequestInit::StorageRequest(req) => self.storage_request(req),
-            RequestInit::SateliteRequest(_) => todo!(),
+            RequestInit::SateliteRequest(req) => self.satelite_request(req),
         }
     }
 
-    fn storage_request(&mut self, req: RawStorageRequest) {
-        let addr = unpack_socket_addr(req.addr);
+    fn satelite_request(&mut self, req: RawSateliteRequest) {
+        let beh = self.swarm.behaviour_mut();
 
-        if let Err(e) = self.swarm.dial(addr) {
-            log::error!("cannot dial to storage node: {e}");
+        let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
+        let res = beh.rpc.request(req.identity.to_peer_id(), request.to_bytes(), false);
+        let Ok(id) = res.inspect_err(|e| log::error!("cannot send storage request: {e}")) else {
+            return;
+        };
+
+        self.pending_rpc_requests.insert(id, req.response);
+    }
+
+    fn storage_request(&mut self, req: RawStorageRequest) {
+        let beh = self.swarm.behaviour_mut();
+        beh.storage_dht.table.insert(Route::new(req.identity, unpack_socket_addr(req.addr)));
+
+        let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
+        let ignore_resp = req.response.is_ok();
+        let peer = req.identity.to_peer_id();
+        let res = beh.rpc.request(peer, request.to_bytes(), ignore_resp);
+        let Ok(id) = res.inspect_err(|e| log::error!("cannot send storage request: {e}")) else {
+            return;
+        };
+
+        if req.response.is_ok() {
+            beh.streaming.create_stream(peer);
+        }
+
+        match req.response {
+            Ok(resp) => _ = self.pending_streams.push_front((peer, id, resp)),
+            Err(resp) => _ = self.pending_rpc_requests.insert(id, resp),
         }
     }
 
@@ -442,6 +482,41 @@ impl Node {
                     req.into_iter().for_each(|r| self.command(r));
                 }
             }
+            SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Response(_, cid, body))) => {
+                let Ok(body) = body.inspect_err(|e| log::error!("rpc response error: {e}")) else {
+                    return;
+                };
+
+                if let Some(sender) = self.pending_rpc_requests.remove(&cid) {
+                    if let Err(e) = sender.send(body) {
+                        log::error!("cannot send satelite response (no longer expected): {e:?}");
+                    }
+                }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Streaming(streaming::Event::OutgoingStream(
+                peer,
+                stream,
+            ))) => {
+                let Ok(mut stream) = stream.inspect_err(|e| log::error!("stream error: {e}"))
+                else {
+                    return;
+                };
+
+                let Some(pos) = self.pending_streams.iter().rposition(|(p, ..)| *p == peer) else {
+                    log::error!("stream response not expected form {:?}", peer);
+                    return;
+                };
+
+                let (_, id, sender) = self.pending_streams.remove(pos).unwrap();
+                self.negotiated_streams.push(async move {
+                    let mut writer = PacketWriter::new(10);
+                    writer.write_packet(id).unwrap();
+                    writer.flush(&mut stream).await?;
+                    let map = |_| io::Error::other("we no longer expect the tream");
+                    sender.send(stream).map_err(map)?;
+                    Ok(())
+                });
+            }
             e => log::debug!("{:?}", e),
         }
     }
@@ -456,7 +531,7 @@ impl Node {
             return;
         };
 
-        if let Some(channel) = self.pending_requests.remove(&cid) {
+        if let Some(channel) = self.pending_chat_requests.remove(&cid) {
             log::debug!("response recieved, {:?}", cid);
             _ = channel.send(content.to_owned());
             return;
@@ -494,10 +569,13 @@ impl Future for Node {
     ) -> Poll<Result<Infallible, ()>> {
         use component_utils::field as f;
 
+        let negot_fail = |_: &mut _, e| log::error!("stream negotiation failed: {e}");
+
         while component_utils::Selector::new(self.deref_mut(), cx)
             .stream(f!(mut requests), Self::command)
             .stream(f!(mut subscriptions), Self::subscription_response)
             .stream(f!(mut swarm), Self::swarm_event)
+            .try_stream(f!(mut negotiated_streams), |_, _| {}, negot_fail)
             .done()
         {}
 
@@ -542,12 +620,15 @@ impl futures::Stream for Subscription {
     }
 }
 
-#[derive(libp2p::swarm::NetworkBehaviour)]
+#[derive(libp2p::swarm::NetworkBehaviour, Default)]
 struct Behaviour {
     onion: onion::Behaviour,
     key_share: onion::key_share::Behaviour,
-    dht: dht::Behaviour,
+    chat_dht: dht::Behaviour,
+    satelite_dht: dht::Behaviour,
+    storage_dht: dht::Behaviour,
     streaming: streaming::Behaviour,
+    rpc: rpc::Behaviour,
 }
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]

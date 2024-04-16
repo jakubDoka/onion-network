@@ -29,6 +29,7 @@ use {
 
 mod chat;
 mod db;
+mod file_upload;
 mod login;
 mod profile;
 

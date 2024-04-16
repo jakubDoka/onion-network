@@ -474,11 +474,11 @@ pub enum Error {
     Decapsulation(#[from] enc::DecapsulationError),
 }
 
-pub fn hash_to_peer_id(hash: crypto::Hash) -> PeerId {
+fn hash_to_peer_id(hash: crypto::Hash) -> PeerId {
     PeerId::from_multihash(Multihash::<64>::wrap(0, &hash).unwrap()).unwrap()
 }
 
-pub fn peer_id_to_hash(peer_id: PeerId) -> Option<crypto::Hash> {
+fn peer_id_to_hash(peer_id: PeerId) -> Option<crypto::Hash> {
     let multihash = Multihash::from(peer_id);
     let digest = multihash.digest();
     digest.try_into().ok()
@@ -520,11 +520,16 @@ impl ToPeerId for crypto::Hash {
 
 pub trait PeerIdExt {
     fn to_hash(&self) -> crypto::Hash;
+    fn try_to_hash(&self) -> Option<crypto::Hash>;
 }
 
 impl PeerIdExt for PeerId {
     fn to_hash(&self) -> crypto::Hash {
-        peer_id_to_hash(*self).unwrap_or_default()
+        self.try_to_hash().unwrap_or_default()
+    }
+
+    fn try_to_hash(&self) -> Option<crypto::Hash> {
+        peer_id_to_hash(*self)
     }
 }
 

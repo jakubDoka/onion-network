@@ -6,9 +6,10 @@ use {
         Cursor, Identity, Member, Message, Permissions, ReplVec, REPLICATION_FACTOR,
     },
     codec::{Codec, Reminder},
-    crypto::proof::Proof,
-    dht::{decompress_peer_id, try_peer_id_to_ed, U256},
+    crypto::proof::{NonceInt, Proof},
+    dht::U256,
     libp2p::{futures::StreamExt, PeerId},
+    opfusk::{PeerIdExt, ToPeerId},
     std::{
         collections::{btree_map, BTreeMap, HashMap, HashSet, VecDeque},
         ops::DerefMut,
@@ -31,10 +32,9 @@ fn default<T: Default>() -> T {
 }
 
 fn advance_nonce(nonce: &mut Nonce, new_nonce: Nonce) -> Result<()> {
-    if new_nonce != *nonce + 1 {
-        return Err(ChatError::InvalidChatAction(*nonce));
+    if !nonce.advance_to(new_nonce) {
+        return Err(ChatError::InvalidChatAction(*nonce + 1));
     }
-    *nonce += 1;
     Ok(())
 }
 
@@ -218,8 +218,7 @@ pub async fn vote(
         return Err(ChatError::NoReplicator);
     }
 
-    let compressed =
-        dht::try_peer_id_to_ed(origin).map(U256::from).ok_or(ChatError::NoReplicator)?;
+    let compressed = origin.try_to_hash().ok_or(ChatError::NoReplicator)?;
     let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
     let mut chat = chat.write().await;
     let chat = chat.deref_mut();
@@ -279,7 +278,7 @@ pub async fn handle_message_block(
         }
     }
 
-    let compressed_origin = dht::try_peer_id_to_ed(origin).map(U256::from).ok_or(NoReplicator)?;
+    let compressed_origin = origin.try_to_hash().ok_or(NoReplicator)?;
     let chat = cx.chats.get(&name).ok_or(NotFound)?.clone();
 
     let block = Block::new(block, base_hash);
@@ -315,7 +314,7 @@ pub async fn handle_message_block(
             "not selected to finalize block: us: {} them: {} expected: {} block_len: {}",
             cx.local_peer_id,
             origin,
-            decompress_peer_id(finalizer),
+            finalizer.to_peer_id(),
             chat.buffer.len()
         );
         apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
@@ -493,7 +492,7 @@ pub struct BlockVote {
     pub yes: usize,
     pub no: usize,
     pub block: Block,
-    pub votes: ReplVec<U256>,
+    pub votes: ReplVec<crypto::Hash>,
 }
 
 impl BlockVote {
@@ -532,7 +531,7 @@ impl Chat {
     ) {
         let selected =
             self.select_finalizer(group.clone(), self.number, self.buffer.len() - BLOCK_SIZE);
-        let us = try_peer_id_to_ed(cx.local_peer_id).map(U256::from).expect("we can trust us");
+        let us = cx.local_peer_id.try_to_hash().expect("we can trust us");
         if selected != us {
             return;
         }
@@ -599,7 +598,7 @@ impl Chat {
         members: super::FullReplGroup,
         number: BlockNumber,
         buffer_len: usize,
-    ) -> U256 {
+    ) -> crypto::Hash {
         let Some(last_block) = self.get_latest_block(number) else {
             return select_finalizer(members, crypto::Hash::default(), 0);
         };
@@ -643,7 +642,7 @@ pub fn select_finalizer(
     mut members: super::FullReplGroup,
     selector: crypto::Hash,
     block_len: usize,
-) -> U256 {
+) -> crypto::Hash {
     let selector = U256::from(selector);
     let round_count = block_len / BLOCK_SIZE;
 
@@ -654,7 +653,7 @@ pub fn select_finalizer(
         members.swap_remove(index);
     }
 
-    members.into_iter().max_by_key(|&member| member ^ selector).unwrap()
+    members.into_iter().max_by_key(|&member| member ^ selector).unwrap().into()
 }
 
 #[derive(Codec)]

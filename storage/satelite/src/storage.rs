@@ -1,7 +1,7 @@
 use {
     anyhow::Context,
     codec::Codec,
-    crypto::proof::Nonce,
+    crypto::proof::{Nonce, NonceInt},
     lmdb_zero::{
         open, put, traits::LmdbRaw, Cursor, CursorIter, DatabaseOptions, LmdbResultExt, MaybeOwned,
         ReadTransaction, WriteTransaction,
@@ -92,7 +92,7 @@ impl NodeProfiles {
         Some(id)
     }
 
-    pub fn allocate_file(&mut self, size: u64) -> Option<(Address, Holders)> {
+    pub fn allocate_file(&mut self, size: u64) -> Option<(Address, Holders, [Nonce; MAX_PIECES])> {
         let alloc_size = size.div_ceil(DATA_PIECES as _);
 
         let (_, most_free) = self.free_space_index.split_last_chunk_mut::<MAX_PIECES>()?;
@@ -104,11 +104,12 @@ impl NodeProfiles {
 
         let id = crypto::new_secret(OsRng);
         let holders = most_free.map(|(_, id)| id);
-        Some((Address { id, size }, holders))
+        let nonces = most_free.map(|(_, id)| self.records[id as usize].our_nonce.next());
+        Some((Address { id, size }, holders, nonces))
     }
 
-    pub fn expand_holders(&self, holders: [NodeId; MAX_PIECES]) -> [NodeIdentity; MAX_PIECES] {
-        holders.map(|id| self.records[id as usize].identity)
+    pub fn expand_holders(&self, holders: [NodeId; MAX_PIECES]) -> ExpandedHolders {
+        holders.map(|id| &self.records[id as usize]).map(|n| (n.identity, n.addr))
     }
 
     pub fn update_addr(&mut self, identity: NodeIdentity, nonce: Nonce, addr: SocketAddr) -> bool {
@@ -117,7 +118,7 @@ impl NodeProfiles {
         };
         let profile = &mut self.records[id as usize];
 
-        if profile.nonce + 1 != nonce {
+        if profile.nonce.advance_to(nonce) {
             return false;
         }
 

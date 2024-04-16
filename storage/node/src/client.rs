@@ -31,7 +31,7 @@ pub async fn store_file(
     cx.storage.satelites.write().unwrap().advance_nonce(proof.context.dest, proof.nonce)?;
 
     let mut stream = cx.establish_stream(origin, cid).await?;
-    handlers::async_blocking(async move {
+    let task = async move {
         let mut file = fs::File::open(proof.context.address.to_file_name())?;
         let mut len = proof.context.address.size;
 
@@ -45,9 +45,8 @@ pub async fn store_file(
         }
 
         Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .context("downloading file")?;
+    };
+    handlers::async_blocking(task).await.context("downloading file")?;
 
     Ok(())
 }

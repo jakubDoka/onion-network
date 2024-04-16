@@ -2,6 +2,28 @@ use {codec::Codec, rand_core::CryptoRngCore};
 
 pub type Nonce = u64;
 
+pub trait NonceInt {
+    fn next(&mut self) -> Self;
+    fn advance_to(&mut self, to: Self) -> bool;
+}
+
+impl NonceInt for Nonce {
+    fn next(&mut self) -> Self {
+        let old = *self;
+        *self += 1;
+        old
+    }
+
+    fn advance_to(&mut self, to: Self) -> bool {
+        if *self + 1 == to {
+            *self = to;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, codec::Codec)]
 pub struct Proof<T> {
     pub pk: crate::sign::PublicKey,
@@ -21,8 +43,7 @@ impl<T> Proof<T> {
         T: Codec<'a>,
     {
         let signature = kp.sign(&Self::pack_payload(*nonce, &context), rng);
-        *nonce += 1;
-        Self { pk: kp.public_key(), nonce: *nonce - 1, signature, context }
+        Self { pk: kp.public_key(), nonce: nonce.next(), signature, context }
     }
 
     fn pack_payload<'a>(nonce: Nonce, context: &T) -> crate::Hash

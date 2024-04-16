@@ -1,6 +1,6 @@
 use {
     crypto::{
-        proof::{Nonce, Proof},
+        proof::{Nonce, NonceInt, Proof},
         sign,
     },
     std::{
@@ -103,9 +103,8 @@ impl Satelites {
 
     pub fn advance_nonce(&mut self, satelite: UserIdentity, nonce: u64) -> Result<(), ClientError> {
         let satelite = self.satelites.get_mut(&satelite).ok_or(ClientError::InvalidProof)?;
-        let is_valid = nonce == satelite.nonce + 1;
+        let is_valid = satelite.nonce.advance_to(nonce);
         handlers::ensure!(is_valid, ClientError::InvalidNonce(satelite.nonce + 1));
-        satelite.nonce = nonce;
         Ok(())
     }
 

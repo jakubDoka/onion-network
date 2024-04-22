@@ -6,6 +6,7 @@ use std::str::FromStr;
 macro_rules! env_config {
     (
        struct $name:ident {$(
+            #[doc = $doc:expr]
             $field:ident: $ty:ty,
        )*}
     ) => {
@@ -18,7 +19,7 @@ macro_rules! env_config {
                 let mut errors = Vec::new();
 
                 $(
-                    let $field = $crate::get_env(stringify!($field))
+                    let $field = $crate::get_env(stringify!($field), $doc)
                         .map_err(|e| errors.push(e));
                 )*
 
@@ -33,21 +34,21 @@ macro_rules! env_config {
 }
 
 #[must_use]
-pub fn get_env<T: std::str::FromStr>(key: &'static str) -> Result<T, EnvError>
+pub fn get_env<T: std::str::FromStr>(key: &'static str, doc: &'static str) -> Result<T, EnvError>
 where
     T::Err: std::fmt::Display,
 {
     let key = key.to_uppercase();
     std::env::var(&key)
-        .map_err(|_| EnvError::KeyNotFound(key.clone()))?
+        .map_err(|_| EnvError::KeyNotFound(key.clone(), doc))?
         .parse::<T>()
-        .map_err(|e| EnvError::ParseError(key, std::any::type_name::<T>(), e.to_string()))
+        .map_err(|e| EnvError::ParseError(key, std::any::type_name::<T>(), e.to_string(), doc))
 }
 
 #[derive(Debug)]
 pub enum EnvError {
-    KeyNotFound(String),
-    ParseError(String, &'static str, String),
+    KeyNotFound(String, &'static str),
+    ParseError(String, &'static str, String, &'static str),
     Multiple(Vec<EnvError>),
 }
 
@@ -72,8 +73,8 @@ pub fn combine_errors<A, B>(
             };
 
             let key = |e: &EnvError| match e {
-                EnvError::KeyNotFound(key) => key.clone(),
-                EnvError::ParseError(key, _, _) => key.clone(),
+                EnvError::KeyNotFound(key, _) => key.clone(),
+                EnvError::ParseError(key, ..) => key.clone(),
                 EnvError::Multiple(_) => unreachable!(),
             };
 
@@ -87,8 +88,10 @@ pub fn combine_errors<A, B>(
 impl std::fmt::Display for EnvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::KeyNotFound(key) => write!(f, "key not found: {key}"),
-            Self::ParseError(key, ty, value) => write!(f, "failed to parse {key} as {ty}: {value}"),
+            Self::KeyNotFound(key, doc) => write!(f, "key not found: {key} // {doc}"),
+            Self::ParseError(key, ty, value, doc) => {
+                write!(f, "failed to parse {key} as {ty}: {value} // {doc}")
+            }
             Self::Multiple(errors) => {
                 write!(f, "multiple env errors:")?;
                 for error in errors {

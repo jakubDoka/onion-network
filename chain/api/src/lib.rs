@@ -386,10 +386,15 @@ impl NodeKeys {
 
 config::env_config! {
     struct EnvConfig {
+        /// public ip adress to be uploaded to chain
         exposed_address: IpAddr,
+        /// exposed port to be uploaded to chain
         port: u16,
+        /// if this is done trhough one account assign increasing nonce from 0
         nonce: u64,
+        /// chain nodes to connect to, its a comma separated list for redundancy
         chain_nodes: config::List<String>,
+        /// accound whitch pays the stake for the node
         node_account: String,
     }
 }

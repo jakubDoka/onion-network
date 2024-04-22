@@ -68,10 +68,15 @@ async fn main() -> anyhow::Result<()> {
 
 config::env_config! {
     struct NodeConfig {
+        /// The port to listen on and publish to chain
         port: u16,
+        /// The port to listen on for websocket connections, clients expect `port + 1`
         ws_port: u16,
+        /// The mnemonic to use for the node
         mnemonic: Mnemonic,
+        /// Idle connection is dropped after ms of inactivity
         idle_timeout: u64,
+        /// Rpc request is dropped after ms of delay
         rpc_timeout: u64,
     }
 }

@@ -28,8 +28,11 @@ type Context = &'static OwnedContext;
 
 config::env_config! {
     struct Config {
+        /// Port to listen on and publish to chain
         port: u16,
+        /// where metadata is stored
         metabase_root: String,
+        /// mnemonic to derive keys from
         mnemonic: Mnemonic,
     }
 }

@@ -45,10 +45,15 @@ type Context = &'static OwnedContext;
 
 config::env_config! {
     struct Config {
+        /// Port to listen on
         port: u16,
+        /// List of satelites to register at
         satelites: config::List<config::Hex>,
+        /// Mnemonic to derive keys from
         mnemonic: Mnemonic,
+        /// Directory to store data in
         storage_dir: String,
+        /// Maximum disk usage in GB
         disk_limit_gb: u64,
     }
 }

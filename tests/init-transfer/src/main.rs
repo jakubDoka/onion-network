@@ -4,8 +4,11 @@ use config::EnvError;
 async fn main() -> Result<(), EnvError> {
     config::env_config! {
         struct Config {
+            /// comma separated list of test wallets to transfere funds to
             test_wallets: config::List<chain_api::AccountId>,
+            /// amount to transfere to each wallet
             balance: u128,
+            /// comma separated list of chain nodes for redundancy
             chain_nodes: String,
         }
     }

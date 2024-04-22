@@ -25,7 +25,7 @@ macro_rules! env_config {
                 match errors.len() {
                     0 => Ok(Self { $( $field: $field.unwrap(),)* }),
                     1 => Err(errors.pop().unwrap()),
-                    _ => Err($crate::EnvError::MultipleErrors(errors)),
+                    _ => Err($crate::EnvError::Multiple(errors)),
                 }
             }
         }
@@ -48,7 +48,40 @@ where
 pub enum EnvError {
     KeyNotFound(String),
     ParseError(String, &'static str, String),
-    MultipleErrors(Vec<EnvError>),
+    Multiple(Vec<EnvError>),
+}
+
+pub fn combine_errors<A, B>(
+    a: Result<A, EnvError>,
+    b: Result<B, EnvError>,
+) -> Result<(A, B), EnvError> {
+    match (a, b) {
+        (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(b), Ok(_)) | (Ok(_), Err(b)) => Err(b),
+        (Err(a), Err(b)) => {
+            let mut err = match (a, b) {
+                (EnvError::Multiple(mut errors), EnvError::Multiple(mut new_errors)) => {
+                    errors.append(&mut new_errors);
+                    errors
+                }
+                (EnvError::Multiple(mut errors), b) | (b, EnvError::Multiple(mut errors)) => {
+                    errors.push(b);
+                    errors
+                }
+                (a, b) => vec![a, b],
+            };
+
+            let key = |e: &EnvError| match e {
+                EnvError::KeyNotFound(key) => key.clone(),
+                EnvError::ParseError(key, _, _) => key.clone(),
+                EnvError::Multiple(_) => unreachable!(),
+            };
+
+            err.sort_by_key(key);
+            err.dedup_by_key(|e| key(e));
+            Err(EnvError::Multiple(err))
+        }
+    }
 }
 
 impl std::fmt::Display for EnvError {
@@ -56,7 +89,7 @@ impl std::fmt::Display for EnvError {
         match self {
             Self::KeyNotFound(key) => write!(f, "key not found: {key}"),
             Self::ParseError(key, ty, value) => write!(f, "failed to parse {key} as {ty}: {value}"),
-            Self::MultipleErrors(errors) => {
+            Self::Multiple(errors) => {
                 write!(f, "multiple env errors:")?;
                 for error in errors {
                     write!(f, "\n  {error}")?;

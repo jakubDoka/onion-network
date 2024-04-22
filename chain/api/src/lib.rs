@@ -453,10 +453,17 @@ impl EnvConfig {
 
         let (node_list, client) = 'a: {
             for node in others.by_ref() {
-                let Ok(client) = Client::with_signer(&node, account.clone()).await else {
+                let Ok(client) = Client::with_signer(&node, account.clone())
+                    .await
+                    .inspect_err(|e| log::warn!("connecting chain client: {e:#}"))
+                else {
                     continue;
                 };
-                let Ok(node_list) = client.list_nodes(tx.clone()).await else {
+                let Ok(node_list) = client
+                    .list_nodes(tx.clone())
+                    .await
+                    .inspect_err(|e| log::warn!("getting chat list: {e:#}"))
+                else {
                     continue;
                 };
                 break 'a (node_list, client);

@@ -55,9 +55,10 @@ type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let node_config = NodeConfig::from_env()?;
+    let (node_config, chain_config) =
+        config::combine_errors(NodeConfig::from_env(), EnvConfig::from_env())?;
     let keys = NodeKeys::from_mnemonic(&node_config.mnemonic);
-    let (node_list, stake_events) = EnvConfig::from_env()?.connect_chat(&keys, true).await?;
+    let (node_list, stake_events) = chain_config.connect_chat(&keys, true).await?;
     reputation::Rep::report_at_background(keys.identity());
 
     Server::new(node_config, keys, node_list, stake_events).await?.await;

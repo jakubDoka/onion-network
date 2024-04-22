@@ -500,6 +500,13 @@ impl Server {
             handlers::Response::DontRespond(_) => {}
         }
     }
+
+    fn stake_event(&mut self, event: ChatStakeEvent) {
+        match event {
+            ChatStakeEvent::Voted { source, target } => reputation::Rep::get().vote(source, target),
+            ev => chain_api::stake_event(self, ev),
+        }
+    }
 }
 
 impl Future for Server {
@@ -517,7 +524,7 @@ impl Future for Server {
         while component_utils::Selector::new(self.deref_mut(), cx)
             .try_stream(f!(mut clients), Self::client_message, log_message)
             .stream(f!(mut swarm), Self::swarm_event)
-            .try_stream(f!(mut stake_events), chain_api::stake_event, log_stake)
+            .try_stream(f!(mut stake_events), Self::stake_event, log_stake)
             .stream(f!(mut client_router), Self::client_router_response)
             .stream(f!(mut server_router), Self::server_router_response)
             .stream(f!(mut request_events), |s, event| match event {

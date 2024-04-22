@@ -72,6 +72,8 @@ pub struct Rep {
 }
 
 impl Rep {
+    const VOTE_DOWN_TRASHOLD: u64 = 1_000;
+
     pub fn get() -> &'static Self {
         static REP: LazyLock<Rep> = LazyLock::new(|| Rep {
             ratings: dashmap::DashMap::new(),
@@ -82,12 +84,10 @@ impl Rep {
     }
 
     pub fn rate(&self, identity: NodeIdentity, severity: i64) {
-        const VOTE_DOWN_TRASHOLD: u64 = 1_000;
-
         let mut rat = self.ratings.entry(identity).or_default();
         *rat = rat.saturating_add_signed(severity);
 
-        if *rat > VOTE_DOWN_TRASHOLD {
+        if *rat > Self::VOTE_DOWN_TRASHOLD {
             *rat = 0;
             self.to_punish.lock().unwrap().push(identity);
             self.waker.wake();
@@ -119,5 +119,17 @@ impl Rep {
                 log::error!("in vote_if_possible: {:?}", e);
             }
         }
+    }
+
+    pub fn vote(&self, source: NodeIdentity, target: NodeIdentity) {
+        if self.ratings.get(&source).is_some_and(|r| *r.value() > Self::VOTE_DOWN_TRASHOLD / 2) {
+            return;
+        }
+
+        if self.ratings.get(&target).is_some_and(|r| *r.value() < Self::VOTE_DOWN_TRASHOLD / 2) {
+            return;
+        }
+
+        self.rate(target, 100);
     }
 }

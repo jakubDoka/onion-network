@@ -88,7 +88,7 @@ pub fn combine_errors<A, B>(
 impl std::fmt::Display for EnvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::KeyNotFound(key, doc) => write!(f, "key not found: {key} // {doc}"),
+            Self::KeyNotFound(key, doc) => write!(f, "key not found: {key}= # {doc}"),
             Self::ParseError(key, ty, value, doc) => {
                 write!(f, "failed to parse {key} as {ty}: {value} // {doc}")
             }

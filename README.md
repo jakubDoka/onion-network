@@ -5,6 +5,12 @@
 ```sh
 git clone --recursive '<this-repo>'
 cd orion-network
-sh serve.sh
+./run.sh
 ```
 
+## Build Chat Server
+
+```sh
+cargo build --release --bin chat-server
+mv target/release/chat-server .
+```

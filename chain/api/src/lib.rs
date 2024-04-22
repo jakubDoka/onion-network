@@ -72,20 +72,6 @@ pub fn encode_tip(value: u128) -> String {
     encode_then_hex(&parity_scale_codec::Compact(value))
 }
 
-#[track_caller]
-#[must_use]
-pub fn dev_keypair(name: &str) -> Keypair {
-    subxt_signer::sr25519::Keypair::from_uri(&subxt_signer::SecretUri::from_str(name).unwrap())
-        .unwrap()
-}
-
-#[track_caller]
-#[must_use]
-pub fn mnemonic_keypair(mnemonic: &str) -> Keypair {
-    subxt_signer::sr25519::Keypair::from_phrase(&Mnemonic::from_str(mnemonic).unwrap(), None)
-        .unwrap()
-}
-
 pub fn new_signature(sig: Vec<u8>) -> Result<MultiSignature> {
     MultiSignature::decode(&mut &sig[..]).map_err(|s| Error::Other(format!("{s}")))
 }
@@ -394,18 +380,14 @@ config::env_config! {
         nonce: u64,
         /// chain nodes to connect to, its a comma separated list for redundancy
         chain_nodes: config::List<String>,
-        /// accound whitch pays the stake for the node
-        node_account: String,
+        /// account which pays the stake for the node
+        node_account: subxt_signer::SecretUri,
     }
 }
 
 impl EnvConfig {
     pub async fn client(&self) -> anyhow::Result<Client<Keypair>> {
-        let account = if self.node_account.starts_with("//") {
-            dev_keypair(&self.node_account)
-        } else {
-            mnemonic_keypair(&self.node_account)
-        };
+        let account = Keypair::from_uri(&self.node_account)?;
 
         for node in self.chain_nodes.0.iter() {
             let Ok(client) = Client::with_signer(&node, account.clone()).await else {
@@ -448,11 +430,7 @@ impl EnvConfig {
     {
         let EnvConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
         let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
-        let account = if node_account.starts_with("//") {
-            dev_keypair(&node_account)
-        } else {
-            mnemonic_keypair(&node_account)
-        };
+        let account = Keypair::from_uri(&node_account)?;
 
         let mut others = chain_nodes.0.into_iter();
 

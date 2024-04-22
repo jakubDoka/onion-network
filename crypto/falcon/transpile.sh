@@ -15,7 +15,7 @@ patch_shake() {
 }
 export -f patch_shake
 
-[ -x "$(command -v $2)" ] || cargo install --git https://github.com/immunant/c2rust c2rust
+[ -x "$(command -v c2rust)" ] || cargo install --git https://github.com/immunant/c2rust c2rust
 creq ripgrep rg
 
 RESOURCES=$(pwd)

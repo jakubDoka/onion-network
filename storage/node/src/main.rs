@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let storage = storage::Storage::new(&config.storage_dir)?;
     let keys = NodeKeys::from_mnemonic(&config.mnemonic);
     let (satelites, events) =
-        chain_api::ChainConfig::from_env()?.connect_satelite(&keys, false).await?;
+        chain_api::EnvConfig::from_env()?.connect_satelite(&keys, false).await?;
     let satelite = Node::new(config, storage, keys, events, satelites)?;
     satelite.await?
 }

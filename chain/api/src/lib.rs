@@ -318,6 +318,27 @@ impl<S: TransactionHandler> Client<S> {
         let id = self.signer.account_id_async().await?;
         self.inner.get_nonce(&id).await
     }
+
+    pub async fn vote_if_possible(&self, source: NodeIdentity, target: NodeIdentity) -> Result<()> {
+        let latest = self.inner.client.storage().at_latest().await?;
+
+        let vote_q = chain_types::storage().chat_staker().votes(target);
+        if latest.fetch(&vote_q).await?.is_some_and(|v| v.contains(&source)) {
+            return Ok(());
+        }
+
+        let block_num = self.inner.client.blocks().at_latest().await?.number();
+        let stake_q = chain_types::storage().chat_staker().stakes(target);
+        let Some(stake) = latest.fetch(&stake_q).await? else {
+            return Ok(());
+        };
+        if stake.protected_until > block_num {
+            return Ok(());
+        }
+
+        let nonce = self.get_nonce().await?;
+        self.vote(source, target, nonce).await
+    }
 }
 
 // TODO: transition to generating keys from mnemonic
@@ -364,7 +385,7 @@ impl NodeKeys {
 }
 
 config::env_config! {
-    struct ChainConfig {
+    struct EnvConfig {
         exposed_address: IpAddr,
         port: u16,
         nonce: u64,
@@ -373,7 +394,23 @@ config::env_config! {
     }
 }
 
-impl ChainConfig {
+impl EnvConfig {
+    pub async fn client(&self) -> anyhow::Result<Client<Keypair>> {
+        let account = if self.node_account.starts_with("//") {
+            dev_keypair(&self.node_account)
+        } else {
+            mnemonic_keypair(&self.node_account)
+        };
+
+        for node in self.chain_nodes.0.iter() {
+            let Ok(client) = Client::with_signer(&node, account.clone()).await else {
+                continue;
+            };
+            return Ok(client);
+        }
+        anyhow::bail!("failed to fetch node list");
+    }
+
     pub async fn connect_satelite(
         self,
         keys: &NodeKeys,
@@ -404,7 +441,7 @@ impl ChainConfig {
         SA: StorageAddress<IsIterable = Yes, Target = NodeAddress> + 'static + Clone,
         E: 'static + Send,
     {
-        let ChainConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
+        let EnvConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
         let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
         let account = if node_account.starts_with("//") {
             dev_keypair(&node_account)

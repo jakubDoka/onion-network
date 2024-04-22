@@ -1,5 +1,6 @@
 #![feature(iter_advance_by)]
 #![feature(never_type)]
+#![feature(lazy_cell)]
 #![feature(trait_alias)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(array_windows)]
@@ -16,7 +17,7 @@ use {
     self::api::{chat::Chat, MissingTopic},
     crate::api::Handler as _,
     anyhow::Context as _,
-    chain_api::{ChainConfig, ChatStakeEvent, Mnemonic, NodeKeys, NodeVec, StakeEvents},
+    chain_api::{ChatStakeEvent, EnvConfig, Mnemonic, NodeKeys, NodeVec, StakeEvents},
     chat_spec::{rpcs, ChatError, ChatName, Identity, Profile, Request, Topic, REPLICATION_FACTOR},
     codec::{Codec, Reminder, ReminderOwned},
     dashmap::{mapref::entry::Entry, DashMap},
@@ -43,6 +44,7 @@ use {
 
 mod api;
 mod db;
+mod reputation;
 #[cfg(test)]
 mod tests;
 
@@ -55,7 +57,8 @@ async fn main() -> anyhow::Result<()> {
 
     let node_config = NodeConfig::from_env()?;
     let keys = NodeKeys::from_mnemonic(&node_config.mnemonic);
-    let (node_list, stake_events) = ChainConfig::from_env()?.connect_chat(&keys, true).await?;
+    let (node_list, stake_events) = EnvConfig::from_env()?.connect_chat(&keys, true).await?;
+    reputation::Rep::report_at_background(keys.identity());
 
     Server::new(node_config, keys, node_list, stake_events).await?.await;
 
@@ -216,10 +219,14 @@ impl Server {
                     rpcs::CREATE_CHAT => create;
                     rpcs::ADD_MEMBER => add_member.restore();
                     rpcs::KICK_MEMBER => kick_member.restore();
-                    rpcs::SEND_BLOCK => handle_message_block.restore().no_resp();
-                    rpcs::FETCH_CHAT_DATA => fetch_chat_data;
+                    rpcs::SEND_BLOCK => handle_message_block
+                        .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
+                        .restore().no_resp();
+                    rpcs::FETCH_CHAT_DATA => fetch_chat_data.rated(rate_map!(20));
                     rpcs::SEND_MESSAGE => send_message.restore();
-                    rpcs::VOTE_BLOCK => vote.restore().no_resp();
+                    rpcs::VOTE_BLOCK => vote
+                        .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 })
+                        .restore().no_resp();
                 };
                 api::profile => {
                     rpcs::CREATE_PROFILE => create;
@@ -227,7 +234,7 @@ impl Server {
                     rpcs::READ_MAIL => read_mail.restore();
                     rpcs::INSERT_TO_VAULT => insert_to_vault.restore();
                     rpcs::REMOVE_FROM_VAULT => remove_from_vault.restore();
-                    rpcs::FETCH_PROFILE_FULL => fetch_full;
+                    rpcs::FETCH_PROFILE_FULL => fetch_full.rated(rate_map!(20));
                 };
             ),
             pending_rpcs: Default::default(),

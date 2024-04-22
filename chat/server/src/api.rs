@@ -1,12 +1,13 @@
 use {
     self::chat::Chat,
-    crate::{Context, OnlineLocation},
+    crate::{reputation::Rated, Context, OnlineLocation},
     arrayvec::ArrayVec,
-    chat_spec::{ChatError, ChatName, Identity, ReplVec, Request, Topic, REPLICATION_FACTOR},
+    chat_spec::{ChatError, ChatName, Identity, Request, Topic, REPLICATION_FACTOR},
     codec::Codec,
     dht::U256,
     handlers::{FromRequestOwned, IntoResponse, Response},
     libp2p::{futures::StreamExt, PeerId, Swarm},
+    opfusk::PeerIdExt,
     rpc::CallId,
     std::future::Future,
     tokio::sync::OwnedRwLockWriteGuard,
@@ -107,6 +108,13 @@ pub trait Handler<'a, C: handlers::Context, T: FromRequestOwned<C>, R: Codec<'a>
     fn restore(self) -> Restore<Self> {
         Restore { handler: self }
     }
+
+    fn rated<F>(self, rater: F) -> Rated<Self, F>
+    where
+        F: Fn(&<Self::Future as Future>::Output) -> i64 + Send + Sync + 'static + Clone,
+    {
+        Rated::new(self, rater)
+    }
 }
 
 impl<'a, H, C, T, R> Handler<'a, C, T, R> for H
@@ -142,34 +150,43 @@ where
             };
 
             let mut repl = cx.repl_rpc(topic, prefix, req).await;
-            let mut counter = ReplVec::<(crypto::Hash, u8)>::new();
+            let mut responses =
+                ArrayVec::<(Vec<u8>, PeerId), { REPLICATION_FACTOR.get() + 1 }>::new();
 
-            counter.push((crypto::hash::new(&bytes), 1));
+            responses.push((bytes, cx.local_peer_id));
 
-            while let Some((peer, Ok(resp))) = repl.next().await {
-                let hash = crypto::hash::new(&resp);
+            while let Some((peer, resp)) = repl.next().await {
+                responses.push((resp.unwrap_or_default(), peer));
+            }
 
-                let Some((_, count)) = counter.iter_mut().find(|(h, _)| h == &hash) else {
-                    log::warn!(
-                        "unexpected response from {:?} {:?} {:?} {} {}",
-                        std::any::type_name::<<H::Future as Future>::Output>(),
-                        Result::<(), ChatError>::decode(&mut resp.as_slice()),
-                        resp,
-                        peer,
-                        cx.local_peer_id,
-                    );
-                    counter.push((hash, 1));
+            responses.sort_unstable();
+
+            let Some(winning_response) = responses
+                .chunk_by_mut(|(a, _), (b, _)| a == b)
+                .find(|group| group.len() > REPLICATION_FACTOR.get() / 2)
+                .map(|wr| std::mem::take(&mut wr[0].0))
+            else {
+                return Err::<(), _>(ChatError::NoMajority).into_response();
+            };
+
+            for group in responses.chunk_by(|(a, _), (b, _)| a == b) {
+                if group.len() > REPLICATION_FACTOR.get() {
                     continue;
-                };
+                }
 
-                *count += 1;
-                if *count as usize > REPLICATION_FACTOR.get() / 2 {
-                    while repl.next().await.is_some() {}
-                    return Response::Success(resp);
+                for (resp, peer) in group {
+                    log::warn!(
+                        "peer {:?} disagrees with majority. call: {}, resp bytes: {:?}, possible error: {:?}",
+                        peer,
+                        std::any::type_name::<H>(),
+                        resp.as_slice(),
+                        Result::<(), ChatError>::decode(&mut resp.as_slice()),
+                    );
+                    crate::reputation::Rep::get().rate(peer.to_hash(), 10);
                 }
             }
 
-            Err::<(), _>(ChatError::NoMajority).into_response()
+            Response::Success(winning_response)
         }
     }
 }

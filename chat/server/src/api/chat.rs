@@ -262,7 +262,7 @@ pub async fn handle_message_block(
     name: ChatName,
     (number, base_hash, Reminder(block)): (BlockNumber, crypto::Hash, Reminder<'_>),
 ) -> Result<()> {
-    use {chat_spec::InvalidBlockReason::*, ChatError::*};
+    use ChatError::*;
 
     async fn apply_vote(chat: &mut Chat, cx: crate::Context, name: ChatName, vote: BlockVote) {
         cx.repl_rpc_no_resp(name, rpcs::VOTE_BLOCK, (vote.block.hash, vote.number, vote.no == 0))
@@ -294,14 +294,14 @@ pub async fn handle_message_block(
     let chat = chat.deref_mut();
 
     if number < chat.number {
-        return Err(ChatError::Outdated);
+        return Err(Outdated);
     }
 
     let latest_hash = chat.get_latest_base_hash(number);
     if base_hash != latest_hash {
         log::warn!("block not based on latest hash: us:\ne: {:?}\ng: {:?}", latest_hash, base_hash,);
         apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
-        return Err(ChatError::Outdated);
+        return Err(Outdated);
     }
 
     'a: {
@@ -318,7 +318,7 @@ pub async fn handle_message_block(
             chat.buffer.len()
         );
         apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
-        return Err(InvalidBlock(NotExpected));
+        return Err(BlockNotExpected);
     }
 
     let proposed = unpack_messages_ref(&vote.block.data).collect::<HashSet<_>>();
@@ -334,7 +334,7 @@ pub async fn handle_message_block(
             origin,
         );
         apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
-        return Err(InvalidBlock(ExtraMessages));
+        return Err(BlockUnexpectedMessages);
     }
 
     apply_vote(chat, cx, name, BlockVote { yes: 2, ..vote }).await;

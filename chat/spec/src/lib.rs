@@ -88,8 +88,10 @@ pub enum ChatError {
     NoBlocks,
     #[error("The sending node is not among replicators")]
     NoReplicator,
-    #[error("invalid block: {0}")]
-    InvalidBlock(InvalidBlockReason),
+    #[error("block contains unexpected messages")]
+    BlockUnexpectedMessages,
+    #[error("block is not expected")]
+    BlockNotExpected,
     #[error("no majority to confirm the request")]
     NoMajority,
     #[error("already voted")]
@@ -119,16 +121,6 @@ impl ChatError {
             e => Err(e),
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
-pub enum InvalidBlockReason {
-    #[error("does not match majority")]
-    ExtraMessages,
-    #[error("is uotdated for us")]
-    Outdated,
-    #[error("not expected at this point")]
-    NotExpected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Codec)]

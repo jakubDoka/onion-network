@@ -15,8 +15,7 @@ patch_shake() {
 }
 export -f patch_shake
 
-
-creq c2rust c2rust
+[ -x "$(command -v $2)" ] || cargo install --git https://github.com/immunant/c2rust c2rust
 creq ripgrep rg
 
 RESOURCES=$(pwd)
@@ -37,6 +36,7 @@ test -d PQClean || git clone https://github.com/PQClean/PQClean.git
 	|  sed "s/}{/},{/g" | sed "s/^{/[{/" | sed "s/}$/}]/" > $CDB \
 	&& c2rust transpile -e --emit-no-std -o $PROOT $CDB -- -I/usr/lib/clang/16/include \
 	|| rm $CDB && exit 1)
+
 rm rust-toolchain.toml $CDB build.rs
 
 echo -e "#![allow(clippy::all)]#![allow(warnings)]#![no_std]$(cat lib.rs)" > lib.rs

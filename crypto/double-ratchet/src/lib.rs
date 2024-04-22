@@ -1,11 +1,12 @@
 #![feature(slice_take)]
 #![feature(let_chains)]
+
 pub use kyber::PublicKey;
 use {
     arrayvec::ArrayVec,
     codec::Codec,
     hkdf::Hkdf,
-    kyber::{CIPHERTEXTBYTES, KEY_SEEDBYTES},
+    kyber::{CryptoRng, RngCore},
     rand_core::CryptoRngCore,
     sha2::Sha256,
     std::array,
@@ -17,8 +18,8 @@ const KYBER_PERIOD: u32 = 35;
 const SUB_CONSTANT: SharedSecret = [0u8; 32];
 
 type SharedSecret = [u8; 32];
-type Ciphertext = [u8; CIPHERTEXTBYTES];
-type KyberSeed = [u8; KEY_SEEDBYTES];
+type Ciphertext = [u8; kyber::KYBER_CIPHERTEXTBYTES];
+type KyberSeed = [u8; 64];
 type Hash = [u8; 32];
 
 pub struct InitiatiorKey {
@@ -59,7 +60,7 @@ impl DoubleRatchet {
         let receiver_hash = dbg!(blake3::hash(&receiver.root)).into();
 
         let dh = x25519.diffie_hellman(&init.x25519).to_bytes();
-        let (cp, ss) = init.kyber.enc(&random_array(&mut rng));
+        let (cp, ss) = kyber::encapsulate(&init.kyber, &mut rng).unwrap();
 
         let sender: Chain = root.next_rk(dh).into();
 
@@ -91,7 +92,7 @@ impl DoubleRatchet {
         let sender_hash = dbg!(blake3::hash(&sender.root)).into();
         let key = InitiatiorKey {
             x25519: (&x25519).into(),
-            kyber: kyber::Keypair::new(&kyber).publickey(),
+            kyber: kyber::Keypair::generate(&mut SliceRng(&kyber)).unwrap().public,
         };
         let s = Self {
             sender,
@@ -134,12 +135,15 @@ impl DoubleRatchet {
             if let Some(kyb) = message.kyber {
                 receiver_input = xor(
                     receiver_input,
-                    kyber::Keypair::new(&self.kyber)
-                        .dec(&kyb.cp)
-                        .ok_or(RecvError::Decapsulation)?,
+                    kyber::decapsulate(
+                        &kyber::Keypair::generate(&mut SliceRng(&kyb.cp)).unwrap().secret,
+                        &kyb.cp,
+                    )
+                    .ok()
+                    .ok_or(RecvError::Decapsulation)?,
                 );
                 self.kyber = random_array(&mut rng);
-                let (cp, ss) = kyb.public.enc(&random_array(&mut rng));
+                let (cp, ss) = kyber::encapsulate(&kyb.public, &mut rng).unwrap();
                 self.cp = cp;
                 self.ss = ss;
             }
@@ -173,7 +177,7 @@ impl DoubleRatchet {
             prev_sub_count: self.prev_sub_count,
             // odd number to make participants alternate
             kyber: (self.root.step % KYBER_PERIOD == 0).then(|| Kyber {
-                public: kyber::Keypair::new(&self.kyber).publickey(),
+                public: kyber::Keypair::generate(&mut SliceRng(&self.kyber)).unwrap().public,
                 cp: self.cp,
             }),
             x25519: (&self.x25519).into(),
@@ -313,6 +317,29 @@ fn random_array<const N: usize>(rng: &mut impl CryptoRngCore) -> [u8; N] {
     rng.fill_bytes(&mut array);
     array
 }
+
+struct SliceRng<'a>(&'a [u8]);
+
+impl RngCore for SliceRng<'_> {
+    fn next_u32(&mut self) -> u32 {
+        unimplemented!()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        unimplemented!()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        dest.copy_from_slice(self.0.take(..dest.len()).unwrap());
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl CryptoRng for SliceRng<'_> {}
 
 #[cfg(test)]
 mod test {

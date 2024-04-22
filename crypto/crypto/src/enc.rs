@@ -3,7 +3,7 @@ use {crate::SharedSecret, core::array, rand_core::CryptoRngCore};
 #[derive(Clone)]
 #[cfg_attr(feature = "codec", derive(codec::Codec))]
 pub struct Ciphertext {
-    pl: [u8; kyber::CIPHERTEXTBYTES],
+    pl: [u8; kyber::KYBER_CIPHERTEXTBYTES],
     #[cfg_attr(feature = "codec", codec(with = codec::unsafe_as_raw_bytes))]
     x: x25519_dalek::PublicKey,
 }
@@ -19,7 +19,7 @@ pub struct ChoosenCiphertext {
 #[cfg_attr(feature = "codec", derive(codec::Codec))]
 pub struct Keypair {
     #[cfg_attr(feature = "codec", codec(with = codec::unsafe_as_raw_bytes))]
-    post: kyber::Keypair,
+    post: [u8; kyber::KYBER_SECRETKEYBYTES],
     #[allow(dead_code)]
     #[cfg_attr(feature = "codec", codec(with = codec::unsafe_as_raw_bytes))]
     pre: x25519_dalek::StaticSecret,
@@ -27,7 +27,7 @@ pub struct Keypair {
 
 impl PartialEq for Keypair {
     fn eq(&self, other: &Self) -> bool {
-        self.post.publickey() == other.post.publickey()
+        kyber::public(&self.post) == kyber::public(&other.post)
             && self.pre.to_bytes() == other.pre.to_bytes()
     }
 }
@@ -36,16 +36,14 @@ impl Eq for Keypair {}
 
 impl Keypair {
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
-        let mut seed = [0; kyber::KEY_SEEDBYTES];
-        rng.fill_bytes(&mut seed);
-        let post = kyber::Keypair::new(&seed);
+        let post = kyber::Keypair::generate(&mut rng).unwrap().secret;
         let pre = x25519_dalek::StaticSecret::random_from_rng(rng);
         Self { post, pre }
     }
 
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
-        PublicKey { post: self.post.publickey(), pre: x25519_dalek::PublicKey::from(&self.pre) }
+        PublicKey { post: kyber::public(&self.post), pre: x25519_dalek::PublicKey::from(&self.pre) }
     }
 
     pub fn encapsulate(
@@ -53,9 +51,7 @@ impl Keypair {
         public_key: &PublicKey,
         mut rng: impl CryptoRngCore,
     ) -> (Ciphertext, SharedSecret) {
-        let mut seed = [0; kyber::ENC_SEEDBYTES];
-        rng.fill_bytes(&mut seed);
-        let (data, k_secret) = public_key.post.enc(&seed);
+        let (data, k_secret) = kyber::encapsulate(&public_key.post, &mut rng).unwrap();
         let x_secret = self.pre.diffie_hellman(&public_key.pre).to_bytes();
         let secret = array::from_fn(|i| k_secret[i] ^ x_secret[i]);
         (Ciphertext { pl: data, x: x25519_dalek::PublicKey::from(&self.pre) }, secret)
@@ -73,7 +69,8 @@ impl Keypair {
 
     pub fn decapsulate(&self, ciphertext: &Ciphertext) -> Result<SharedSecret, DecapsulationError> {
         let x_secret = self.pre.diffie_hellman(&ciphertext.x).to_bytes();
-        let k_secret = self.post.dec(&ciphertext.pl).ok_or(DecapsulationError::Kyber)?;
+        let k_secret =
+            kyber::decapsulate(&self.post, &ciphertext.pl).ok().ok_or(DecapsulationError::Kyber)?;
         Ok(array::from_fn(|i| k_secret[i] ^ x_secret[i]))
     }
 

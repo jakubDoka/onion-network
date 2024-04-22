@@ -37,6 +37,7 @@ anyhow = "1.0.80"
 thiserror = "1.0.58"
 arrayvec = "0.7.4"
 divan = "0.1.14"
+kyber = { package = "pqc_kyber", version = "0.7.1" }
 
 dht = { path = "protocols/dht" }
 onion = { path = "protocols/onion" }
@@ -48,7 +49,6 @@ chat-client-node = { path = "chat/client-node", default-features = false }
 chat-spec = { path = "chat/spec" }
 crypto = { path = "crypto/crypto", features = ["codec", "arrayvec"] }
 falcon = { path = "crypto/falcon/falcon" }
-kyber = { path = "crypto/kyber" }
 opfusk = { path = "crypto/opfusk" }
 double-ratchet = { path = "crypto/double-ratchet" }
 merkle-tree = { path = "crypto/merkle-tree" }

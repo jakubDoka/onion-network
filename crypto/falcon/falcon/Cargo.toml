@@ -1,0 +1,18 @@
+
+
+
+[package]
+name = "falcon"
+authors = ["C2Rust"]
+version = "0.0.0"
+publish = false
+edition = "2021"
+autobins = false
+
+[lib]
+name = "falcon"
+path = "lib.rs"
+
+[dependencies]
+rand_core = { version = "0.6.4", default-features = false }
+sha3 = { version = "0.10.8", default-features = false }

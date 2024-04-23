@@ -6,7 +6,7 @@ use std::str::FromStr;
 macro_rules! env_config {
     (
        struct $name:ident {$(
-            #[doc = $doc:expr]
+            $(#[doc = $doc:expr])*
             $field:ident: $ty:ty,
        )*}
     ) => {
@@ -19,7 +19,7 @@ macro_rules! env_config {
                 let mut errors = Vec::new();
 
                 $(
-                    let $field = $crate::get_env(stringify!($field), $doc)
+                    let $field = $crate::get_env(stringify!($field), concat!($($doc),*))
                         .map_err(|e| errors.push(e));
                 )*
 

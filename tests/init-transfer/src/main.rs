@@ -15,10 +15,12 @@ async fn main() -> Result<(), EnvError> {
 
     let Config { test_wallets, balance, chain_nodes } = Config::from_env()?;
 
-    let client =
-        chain_api::Client::with_signer(chain_nodes.as_str(), chain_api::dev_keypair("//Bob"))
-            .await
-            .unwrap();
+    let client = chain_api::Client::with_signer(
+        chain_nodes.as_str(),
+        chain_api::SecretUri::from_str("//Bob").unwrap(),
+    )
+    .await
+    .unwrap();
 
     let nonce = client.get_nonce().await.unwrap();
 

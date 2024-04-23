@@ -72,7 +72,7 @@ config::env_config! {
         port: u16,
         /// The port to listen on for websocket connections, clients expect `port + 1`
         ws_port: u16,
-        /// The mnemonic to derive keys from
+        /// The mnemonic to derive keys from, this is secret to the node
         mnemonic: Mnemonic,
         /// Idle connection is dropped after ms of inactivity
         idle_timeout: u64,

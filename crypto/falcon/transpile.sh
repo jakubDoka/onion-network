@@ -1,3 +1,5 @@
+#!/bin/bash
+
 creq() { [ -x "$(command -v $2)" ] || cargo install $1; }
 
 compiledb() {

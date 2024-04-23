@@ -14,7 +14,6 @@ use {
     std::{
         fs, io,
         net::{IpAddr, SocketAddr},
-        str::FromStr,
     },
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
@@ -372,13 +371,15 @@ impl NodeKeys {
 
 config::env_config! {
     struct EnvConfig {
-        /// public ip adress to be uploaded to chain
+        /// public ip adress to be uploaded to chain, clients shoud be able to connect trougr this
+        /// to the node
         exposed_address: IpAddr,
-        /// exposed port to be uploaded to chain
+        /// exposed port to be uploaded to chain, node should be listening on his port
         port: u16,
         /// if this is done trhough one account assign increasing nonce from 0
         nonce: u64,
-        /// chain nodes to connect to, its a comma separated list for redundancy
+        /// chain nodes to connect to, its a comma separated list for redundancy, this a rpc url
+        /// like `wss://polkadot.api.onfinality.io/public-ws`
         chain_nodes: config::List<String>,
         /// account which pays the stake for the node
         node_account: subxt_signer::SecretUri,

@@ -1,4 +1,4 @@
-use config::EnvError;
+use {config::EnvError, std::str::FromStr};
 
 #[tokio::main]
 async fn main() -> Result<(), EnvError> {
@@ -17,7 +17,7 @@ async fn main() -> Result<(), EnvError> {
 
     let client = chain_api::Client::with_signer(
         chain_nodes.as_str(),
-        chain_api::SecretUri::from_str("//Bob").unwrap(),
+        chain_api::Keypair::from_uri(&chain_api::SecretUri::from_str("//Bob").unwrap()).unwrap(),
     )
     .await
     .unwrap();

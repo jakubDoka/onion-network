@@ -52,6 +52,7 @@ pub type StakeEvents<E> = futures::channel::mpsc::Receiver<Result<E>>;
 pub type Params = ParamsFor<Config>;
 pub type NodeIdentity = crypto::Hash;
 pub type NodeVec = Vec<(NodeIdentity, SocketAddr)>;
+pub type SecretUri = subxt_signer::SecretUri;
 
 #[must_use]
 pub fn immortal_era() -> String {

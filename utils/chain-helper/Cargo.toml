@@ -1,0 +1,18 @@
+[package]
+name = "chain-helper"
+version = "0.1.0"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chain-api = { workspace = true, features = ["native"] }
+clap = { version = "4.5.4", features = ["derive"] }
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

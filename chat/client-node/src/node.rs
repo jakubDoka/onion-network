@@ -127,7 +127,7 @@ impl Node {
                             let remining =
                                 node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance;
                             set_state!(CollecringKeys(remining));
-                            if remining == 0 {
+                            if remining == 0 || swarm.behaviour_mut().key_share.keys.len() >= 8 {
                                 break;
                             }
                         }
@@ -147,15 +147,19 @@ impl Node {
             nodes.len(),
         );
 
-        let members = swarm
-            .behaviour_mut()
+        let beh = swarm.behaviour_mut();
+        let members = beh
             .chat_dht
             .table
             .closest(profile_hash.sign.as_ref())
             .take(REPLICATION_FACTOR.get() + 1);
 
         set_state!(ProfileOpen);
-        let pick = members.choose(&mut rand::thread_rng()).unwrap().peer_id();
+        let pick = members
+            .filter(|v| beh.key_share.keys.contains_key(&v.peer_id()))
+            .choose(&mut rand::thread_rng())
+            .unwrap()
+            .peer_id();
         let route = pick_route(&swarm.behaviour_mut().key_share.keys, pick);
         let pid = swarm.behaviour_mut().onion.open_path(route);
         let ((mut profile_stream, ..), profile_stream_id, profile_stream_peer) = loop {
@@ -164,6 +168,22 @@ impl Node {
                     stream,
                     id,
                 ))) if id == pid => break (stream.context("opening profile route")?, id, pick),
+                SwarmEvent::ConnectionClosed {
+                    peer_id,
+                    connection_id,
+                    endpoint,
+                    num_established,
+                    cause,
+                } => {
+                    log::debug!(
+                        "connection closed: {:?} {:?} {:?} {:?} {}",
+                        peer_id,
+                        connection_id,
+                        endpoint,
+                        num_established,
+                        cause.unwrap()
+                    );
+                }
                 e => log::debug!("{:?}", e),
             }
         };
@@ -217,14 +237,14 @@ impl Node {
         };
 
         let mut topology = HashMap::<PeerId, HashSet<ChatName>>::new();
+        let beh = swarm.behaviour_mut();
         let iter = vault.chats.keys().copied().flat_map(|c| {
-            swarm
-                .behaviour_mut()
-                .chat_dht
+            beh.chat_dht
                 .table
                 .closest(c.as_bytes())
                 .take(REPLICATION_FACTOR.get() + 1)
                 .map(move |peer| (peer.peer_id(), c))
+                .filter(|(peer, _)| beh.key_share.keys.contains_key(peer))
                 .collect::<Vec<_>>()
         });
         for (peer, chat) in iter {

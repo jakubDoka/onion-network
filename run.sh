@@ -166,8 +166,12 @@ case $1 in
 		#is_running storage-node     || run_storage_nodes
 		is_running live-server      || run_wasm
 
-		echo "begins shell from the scope of this script:"
-		while read -p '$ ' -r line; do $line; done
 		;;
+	"born")
+		export CHAIN_NODES=wss://rpc-1.born.orionmessenger.io
+		rebuild_client
+		is_running live-server      || run_wasm
 esac
 
+echo "begins shell from the scope of this script:"
+while read -p '$ ' -r line; do $line; done

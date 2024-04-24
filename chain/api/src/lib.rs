@@ -187,13 +187,13 @@ impl<S: TransactionHandler> Client<S> {
     pub async fn chat_event_stream(
         &self,
     ) -> Result<impl futures::Stream<Item = Result<ChatStakeEvent>>> {
-        self.node_event_stream("ChatStaker", unwrap_chat_staker).await
+        self.node_event_stream("chatStaker", unwrap_chat_staker).await
     }
 
     pub async fn satelite_event_stream(
         &self,
     ) -> Result<impl futures::Stream<Item = Result<SateliteStakeEvent>>> {
-        self.node_event_stream("SateliteStaker", unwrap_satelite_staker).await
+        self.node_event_stream("sateliteStaker", unwrap_satelite_staker).await
     }
 
     async fn node_event_stream<E: 'static>(

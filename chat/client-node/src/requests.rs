@@ -80,7 +80,17 @@ impl Requests {
                 ctx.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, msg, OsRng))?;
             Ok(proof)
         })?;
-        self.send_message(proof, name).await
+        let nonce = match self.send_message(proof, name).await {
+            Err(ChatError::InvalidChatAction(nonce)) => nonce,
+            e => return Ok(e?),
+        };
+        log::info!("foo bar {nonce} {}", proof.nonce);
+        let proof = ctx.with_keys(|k| Proof::new(&k.sign, &mut { nonce }, proof.context, OsRng))?;
+        ctx.try_with_vault(|v| {
+            v.chats.get_mut(&name).with_context(vault_chat_404(name))?.action_no = nonce + 1;
+            Ok(())
+        })?;
+        self.send_message(proof, name).await.map_err(Into::into)
     }
 
     pub async fn fetch_and_decrypt_messages(
@@ -347,8 +357,8 @@ impl Requests {
         &'a mut self,
         proof: Proof<Reminder<'_>>,
         name: ChatName,
-    ) -> Result<()> {
-        self.dispatch(rpcs::SEND_MESSAGE, Topic::Chat(name), proof).await
+    ) -> Result<(), ChatError> {
+        self.dispatch_low(rpcs::SEND_MESSAGE, Topic::Chat(name), proof).await
     }
 
     pub async fn save_vault_components(

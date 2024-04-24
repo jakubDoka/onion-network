@@ -113,7 +113,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             Cursor::Normal(mut cursor) => {
                 for message in requests.fetch_and_decrypt_messages(chat, &mut cursor, state).await?
                 {
-                    append_message(message.sender, message.content);
+                    prepend_message(message.sender, message.content);
                 }
                 set_red_all_messages(cursor == chat_spec::Cursor::INIT);
                 set_cursor(Cursor::Normal(cursor));

@@ -45,7 +45,7 @@ topology-wrapper = { path = "protocols/topology-wrapper" }
 
 chat-client-node = { path = "chat/client-node", default-features = false }
 chat-spec = { path = "chat/spec" }
-crypto = { path = "crypto/crypto", features = ["codec", "arrayvec"] }
+crypto = { path = "crypto/crypto", features = ["codec"] }
 falcon = { path = "crypto/falcon/falcon" }
 opfusk = { path = "crypto/opfusk" }
 double-ratchet = { path = "crypto/double-ratchet" }

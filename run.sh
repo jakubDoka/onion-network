@@ -143,6 +143,8 @@ run_chain() {
 	$TARGET_DIR/chain-helper bulk-transfer $BALANCE $CHAIN_NODES //Bob $TEST_WALLETS || exit 1 &
 }
 
+test -d $WALLET_INTEGRATION/node_modules || init_npm
+
 case $1 in
 	"just")
 		shift
@@ -153,7 +155,6 @@ case $1 in
 		test -e $CHAIN_PATH && ! $REBUILD_CHAIN || rebuild_chain
 
 		test -d $FALCON_ROOT/falcon              || generate_falcon
-		test -d $WALLET_INTEGRATION/node_modules || init_npm
 
 		is_running $CHAIN_NAME || run_chain
 
@@ -170,6 +171,7 @@ case $1 in
 	"born")
 		export CHAIN_NODES=wss://rpc-1.born.orionmessenger.io
 		rebuild_client
+		rebuild_topology
 		is_running live-server      || run_wasm
 esac
 

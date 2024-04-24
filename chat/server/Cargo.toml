@@ -25,7 +25,6 @@ topology-wrapper = { workspace = true }
 chain-api = { workspace = true, features = ["native"] }
 chat-spec = { workspace = true }
 config = { workspace = true }
-rpc = { workspace = true }
 crypto = { workspace = true }
 dht = { workspace = true }
 onion = { workspace = true }

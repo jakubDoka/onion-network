@@ -29,8 +29,8 @@ pub struct Behaviour {
     error_streams: FuturesUnordered<component_utils::ClosingStream<libp2p::swarm::Stream>>,
     inbound: FuturesUnordered<IUpgrade>,
     outbound: FuturesUnordered<OUpgrade>,
-    streams: streaming::Behaviour,
-    events: VecDeque<TS<Event, ()>>,
+    streaming: streaming::Behaviour,
+    events: VecDeque<TS<Event, usize>>,
     pending_connections: Vec<IncomingStream>,
     pending_requests: Vec<StreamRequest>,
     buffer: Arc<spin::Mutex<[u8; 1 << 16]>>,
@@ -47,7 +47,7 @@ impl Behaviour {
     pub fn new(config: Config) -> Self {
         Self {
             router: Default::default(),
-            streams: streaming::Behaviour::new(!config.dial),
+            streaming: streaming::Behaviour::new(),
             inbound: Default::default(),
             outbound: Default::default(),
 
@@ -99,7 +99,7 @@ impl Behaviour {
             return;
         }
 
-        self.streams.create_stream(sr.to);
+        self.streaming.create_stream(sr.to);
         self.pending_requests.push(sr);
     }
 
@@ -131,7 +131,7 @@ impl Behaviour {
             match res {
                 IncomingOrResponse::Incoming(is) => {
                     log::debug!("creating new stream for route continuation");
-                    self.streams.create_stream(is.meta.to);
+                    self.streaming.create_stream(is.meta.to);
                     self.pending_connections.push(is);
                     self.poll_streams(cx);
                 }
@@ -191,7 +191,7 @@ impl Behaviour {
     }
 
     fn poll_streams(&mut self, cx: &mut std::task::Context<'_>) {
-        while let Poll::Ready(event) = self.streams.poll(cx) {
+        while let Poll::Ready(event) = self.streaming.poll(cx) {
             let e = match event {
                 TS::GenerateEvent(e) => e,
                 e => {
@@ -254,9 +254,6 @@ impl Behaviour {
                         request.path_id,
                     )));
                 }
-                streaming::Event::SearchRequest(peer) => {
-                    self.events.push_back(TS::GenerateEvent(Event::SearchRequest(peer)));
-                }
                 _ => {}
             }
         }
@@ -269,26 +266,26 @@ impl NetworkBehaviour for Behaviour {
 
     fn handle_established_inbound_connection(
         &mut self,
-        _connection_id: ConnectionId,
-        _peer: libp2p::identity::PeerId,
-        _local_addr: &libp2p::core::Multiaddr,
-        _remote_addr: &libp2p::core::Multiaddr,
+        _: ConnectionId,
+        peer_id: PeerId,
+        _: &libp2p::Multiaddr,
+        _: &libp2p::Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(streaming::Handler::new(|| crate::ROUTING_PROTOCOL))
+        Ok(self.streaming.new_handler(peer_id, || ROUTING_PROTOCOL))
     }
 
     fn handle_established_outbound_connection(
         &mut self,
-        _connection_id: ConnectionId,
-        _peer: libp2p::identity::PeerId,
-        _addr: &libp2p::core::Multiaddr,
-        _role_override: libp2p::core::Endpoint,
+        _: ConnectionId,
+        peer_id: PeerId,
+        _: &libp2p::Multiaddr,
+        _: libp2p::core::Endpoint,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(streaming::Handler::new(|| crate::ROUTING_PROTOCOL))
+        Ok(self.streaming.new_handler(peer_id, || ROUTING_PROTOCOL))
     }
 
     fn on_swarm_event(&mut self, se: libp2p::swarm::FromSwarm) {
-        self.streams.on_swarm_event(se);
+        self.streaming.on_swarm_event(se);
     }
 
     fn on_connection_handler_event(
@@ -297,7 +294,7 @@ impl NetworkBehaviour for Behaviour {
         connection_id: ConnectionId,
         event: libp2p::swarm::THandlerOutEvent<Self>,
     ) {
-        self.streams.on_connection_handler_event(peer_id, connection_id, event);
+        self.streaming.on_connection_handler_event(peer_id, connection_id, event);
     }
 
     fn poll(
@@ -343,8 +340,6 @@ component_utils::gen_config! {
     keep_alive_interval: std::time::Duration = std::time::Duration::from_secs(30),
     /// size of the buffer for forwarding packets.
     buffer_cap: usize = 1 << 16,
-    /// Dial instead of emmiting a connection request.
-    dial: bool = true,
 }
 
 impl Default for Config {

@@ -37,7 +37,6 @@ fn setup_nodes<const COUNT: usize>(
             transport,
             crate::Config::new(Some(secret), peer_id)
                 .keep_alive_interval(CONNECTION_TIMEOUT)
-                .dial(false)
                 .build(),
             peer_id,
             libp2p::swarm::Config::with_tokio_executor()

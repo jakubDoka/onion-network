@@ -39,7 +39,6 @@ kyber = { package = "pqc_kyber", version = "0.7.1" }
 
 dht = { path = "protocols/dht" }
 onion = { path = "protocols/onion" }
-rpc = { path = "protocols/rpc" }
 streaming = { path = "protocols/streaming" }
 topology-wrapper = { path = "protocols/topology-wrapper" }
 

@@ -72,7 +72,6 @@ impl<T: SortedElement> SortedCompactVec<T> {
     }
 
     pub fn lowest_active(&self) -> Option<T> {
-        // this may panic but at that point we are fucked anyway
         self.data.first().map(|r| r.end())
     }
 

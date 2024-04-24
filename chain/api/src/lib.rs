@@ -258,7 +258,6 @@ impl<S: TransactionHandler> Client<S> {
         latest
             .iter(tx)
             .await?
-            // fuck me
             .map_ok(|kv| {
                 (
                     parity_scale_codec::Decode::decode(&mut &kv.key_bytes[48..]).unwrap(),

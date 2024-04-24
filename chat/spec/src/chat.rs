@@ -68,8 +68,7 @@ impl FromStr for Permissions {
 
         for (i, (c, s)) in s.chars().zip(Self::FULL.chars()).enumerate() {
             if c == s {
-                permissions |=
-                    Self::from_bits(1 << i).expect("valid bit unless we really fucked up");
+                permissions |= Self::from_bits(1 << i).unwrap();
             } else if c != '-' {
                 return Err(PermissionsParseError::InvalidChar(i, s));
             }

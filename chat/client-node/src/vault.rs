@@ -128,7 +128,6 @@ impl Vault {
             }
         };
 
-        // we explicitly not encrypt for hadrer fuck ups
         let value = match id {
             VCI::Theme => value,
             _ => encrypt(value, key),

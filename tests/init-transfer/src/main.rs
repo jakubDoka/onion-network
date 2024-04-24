@@ -10,14 +10,16 @@ async fn main() -> Result<(), EnvError> {
             balance: u128,
             /// comma separated list of chain nodes for redundancy
             chain_nodes: String,
+            /// wallet from which to transfere funds
+            signer: chain_api::SecretUri,
         }
     }
 
-    let Config { test_wallets, balance, chain_nodes } = Config::from_env()?;
+    let Config { test_wallets, balance, chain_nodes, signer } = Config::from_env()?;
 
     let client = chain_api::Client::with_signer(
         chain_nodes.as_str(),
-        chain_api::Keypair::from_uri(&chain_api::SecretUri::from_str("//Bob").unwrap()).unwrap(),
+        chain_api::Keypair::from_uri(&signer).unwrap(),
     )
     .await
     .unwrap();

@@ -191,3 +191,32 @@ impl std::fmt::Display for SecretKeyError {
 }
 
 impl std::error::Error for SecretKeyError {}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Optional<T> {
+    Some(T),
+    None,
+}
+
+impl<T> Optional<T> {
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Self::Some(t) => t,
+            Self::None => default,
+        }
+    }
+}
+
+impl<T> Default for Optional<T> {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl<T: FromStr> FromStr for Optional<T> {
+    type Err = <T as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(s.parse().map(Self::Some).unwrap_or(Self::None))
+    }
+}

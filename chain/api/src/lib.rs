@@ -383,13 +383,13 @@ config::env_config! {
         /// like `wss://polkadot.api.onfinality.io/public-ws`
         chain_nodes: config::List<String>,
         /// account which pays the stake for the node
-        node_account: subxt_signer::SecretUri,
+        mnemonic: Mnemonic,
     }
 }
 
 impl EnvConfig {
     pub async fn client(&self) -> anyhow::Result<Client<Keypair>> {
-        let account = Keypair::from_uri(&self.node_account)?;
+        let account = Keypair::from_phrase(&self.mnemonic, None)?;
 
         for node in self.chain_nodes.0.iter() {
             let Ok(client) = Client::with_signer(&node, account.clone())
@@ -433,9 +433,9 @@ impl EnvConfig {
         SA: StorageAddress<IsIterable = Yes, Target = NodeAddress> + 'static + Clone,
         E: 'static + Send,
     {
-        let EnvConfig { chain_nodes, node_account, port, exposed_address, nonce } = self;
+        let EnvConfig { chain_nodes, mnemonic, port, exposed_address, nonce } = self;
         let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
-        let account = Keypair::from_uri(&node_account)?;
+        let account = Keypair::from_phrase(&mnemonic, None)?;
 
         let mut others = chain_nodes.0.into_iter();
 

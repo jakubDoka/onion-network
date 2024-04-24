@@ -406,37 +406,37 @@ impl Node {
     }
 
     fn satelite_request(&mut self, req: RawSateliteRequest) {
-        let beh = self.swarm.behaviour_mut();
+        // let beh = self.swarm.behaviour_mut();
 
-        let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
-        let res = beh.rpc.request(req.identity.to_peer_id(), request.to_bytes(), false);
-        let Ok(id) = res.inspect_err(|e| log::error!("cannot send storage request: {e}")) else {
-            return;
-        };
+        // let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
+        // let res = beh.rpc.request(req.identity.to_peer_id(), request.to_bytes(), false);
+        // let Ok(id) = res.inspect_err(|e| log::error!("cannot send storage request: {e}")) else {
+        //     return;
+        // };
 
-        self.pending_rpc_requests.insert(id, req.response);
+        // self.pending_rpc_requests.insert(id, req.response);
     }
 
     fn storage_request(&mut self, req: RawStorageRequest) {
-        let beh = self.swarm.behaviour_mut();
-        beh.storage_dht.table.insert(Route::new(req.identity, unpack_addr(req.addr)));
+        // let beh = self.swarm.behaviour_mut();
+        // beh.storage_dht.table.insert(Route::new(req.identity, unpack_addr(req.addr)));
 
-        let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
-        let ignore_resp = req.response.is_ok();
-        let peer = req.identity.to_peer_id();
-        let res = beh.rpc.request(peer, request.to_bytes(), ignore_resp);
-        let Ok(id) = res.inspect_err(|e| log::error!("cannot send storage request: {e}")) else {
-            return;
-        };
+        // let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
+        // let ignore_resp = req.response.is_ok();
+        // let peer = req.identity.to_peer_id();
+        // let res = beh.rpc.request(peer, request.to_bytes(), ignore_resp);
+        // let Ok(id) = res.inspect_err(|e| log::error!("cannot send storage request: {e}")) else {
+        //     return;
+        // };
 
-        if req.response.is_ok() {
-            beh.streaming.create_stream(peer);
-        }
+        // if req.response.is_ok() {
+        //     beh.streaming.create_stream(peer);
+        // }
 
-        match req.response {
-            Ok(resp) => _ = self.pending_streams.push_front((peer, id, resp)),
-            Err(resp) => _ = self.pending_rpc_requests.insert(id, resp),
-        }
+        // match req.response {
+        //     Ok(resp) => _ = self.pending_streams.push_front((peer, id, resp)),
+        //     Err(resp) => _ = self.pending_rpc_requests.insert(id, resp),
+        // }
     }
 
     fn subscription_end(&mut self, topic: Topic) {
@@ -482,17 +482,17 @@ impl Node {
                     req.into_iter().for_each(|r| self.command(r));
                 }
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Response(_, cid, body))) => {
-                let Ok(body) = body.inspect_err(|e| log::error!("rpc response error: {e}")) else {
-                    return;
-                };
+            // SwarmEvent::Behaviour(BehaviourEvent::Rpc(rpc::Event::Response(_, cid, body))) => {
+            //     let Ok(body) = body.inspect_err(|e| log::error!("rpc response error: {e}")) else {
+            //         return;
+            //     };
 
-                if let Some(sender) = self.pending_rpc_requests.remove(&cid) {
-                    if let Err(e) = sender.send(body) {
-                        log::error!("cannot send satelite response (no longer expected): {e:?}");
-                    }
-                }
-            }
+            //     if let Some(sender) = self.pending_rpc_requests.remove(&cid) {
+            //         if let Err(e) = sender.send(body) {
+            //             log::error!("cannot send satelite response (no longer expected): {e:?}");
+            //         }
+            //     }
+            // }
             SwarmEvent::Behaviour(BehaviourEvent::Streaming(streaming::Event::OutgoingStream(
                 peer,
                 stream,
@@ -628,7 +628,6 @@ struct Behaviour {
     satelite_dht: dht::Behaviour,
     storage_dht: dht::Behaviour,
     streaming: streaming::Behaviour,
-    rpc: rpc::Behaviour,
 }
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]

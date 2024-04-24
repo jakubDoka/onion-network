@@ -126,8 +126,9 @@ impl UserKeys {
                 dest.copy_from_slice(data);
             }
 
-            fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
-                unimplemented!()
+            fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand::Error> {
+                self.fill_bytes(bytes);
+                Ok(())
             }
         }
 

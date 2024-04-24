@@ -145,13 +145,13 @@ test -e $CHAIN_PATH && ! $REBUILD_CHAIN || rebuild_chain
 test -d $FALCON_ROOT/falcon              || generate_falcon
 test -d $WALLET_INTEGRATION/node_modules || init_npm
 
-is_running $CHAIN_NAME || run_chain
+#is_running $CHAIN_NAME || run_chain
 
 test -e $TARGET_DIR/chat-server && ! $REBUILD_NATIVE   || rebuild_native
 test -d $TOPOLOGY_ROOT/dist     && ! $REBUILD_TOPOLOGY || rebuild_topology
 test -d $CLIENT_ROOT/dist       && ! $REBUILD_CLIENT   || rebuild_client
 
-is_running chat-server      || run_chat_servers
+#is_running chat-server      || run_chat_servers
 #is_running storage-satelite || run_satelites
 #is_running storage-node     || run_storage_nodes
 is_running live-server      || run_wasm

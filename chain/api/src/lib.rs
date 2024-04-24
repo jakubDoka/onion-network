@@ -392,12 +392,15 @@ impl EnvConfig {
         let account = Keypair::from_uri(&self.node_account)?;
 
         for node in self.chain_nodes.0.iter() {
-            let Ok(client) = Client::with_signer(&node, account.clone()).await else {
+            let Ok(client) = Client::with_signer(&node, account.clone())
+                .await
+                .inspect_err(|e| log::warn!("connecting chain client: {e:#}"))
+            else {
                 continue;
             };
             return Ok(client);
         }
-        anyhow::bail!("failed to fetch node list");
+        anyhow::bail!("no nodes were valid for connection");
     }
 
     pub async fn connect_satelite(

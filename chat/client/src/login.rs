@@ -64,8 +64,9 @@ pub fn Register(state: State) -> impl IntoView {
             anyhow::bail!("user with this name already exists");
         }
 
+        let nonce = client.get_nonce().await.context("failed to fetch nonce")?;
         client
-            .register(username_to_raw(username_content), key.to_identity(), 0)
+            .register(username_to_raw(username_content), key.to_identity(), nonce)
             .await
             .context("failed to create user")?;
 

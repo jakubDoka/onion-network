@@ -24,11 +24,11 @@ instant = "0.1.12"
   
 dht = { workspace = true }
 onion = { workspace = true }
-crypto = { workspace = true }
+crypto = { workspace = true, features = ["wasm"] }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
 codec.workspace = true
-double-ratchet = { workspace = true }
+double-ratchet = { workspace = true, features = ["wasm"] }
 merkle-tree = { workspace = true }
 storage-spec.workspace = true
 streaming.workspace = true

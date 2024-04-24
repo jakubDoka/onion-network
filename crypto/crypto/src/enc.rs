@@ -70,7 +70,7 @@ impl Keypair {
     pub fn decapsulate(&self, ciphertext: &Ciphertext) -> Result<SharedSecret, DecapsulationError> {
         let x_secret = self.pre.diffie_hellman(&ciphertext.x).to_bytes();
         let k_secret =
-            kyber::decapsulate(&self.post, &ciphertext.pl).ok().ok_or(DecapsulationError::Kyber)?;
+            kyber::decapsulate(&ciphertext.pl, &self.post).ok().ok_or(DecapsulationError::Kyber)?;
         Ok(array::from_fn(|i| k_secret[i] ^ x_secret[i]))
     }
 

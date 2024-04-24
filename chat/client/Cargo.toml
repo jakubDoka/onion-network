@@ -25,7 +25,7 @@ wasm-bindgen-futures = "0.4.38"
 libp2p = { workspace = true, features = ["macros", "yamux", "wasm-bindgen"] }
 anyhow = { workspace = true }
 
-crypto = { workspace = true }
+crypto = { workspace = true, features = ["wasm"] }
 chat-spec = { workspace = true }
 component-utils = { workspace = true }
 chat-client-node = { workspace = true }

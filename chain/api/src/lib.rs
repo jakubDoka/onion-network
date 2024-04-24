@@ -1,5 +1,19 @@
+pub use {
+    chain_types::runtime_types::{
+        pallet_node_staker::pallet::{
+            Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, Stake as ChatStake,
+            Stake2 as SateliteStake,
+        },
+        pallet_user_manager::pallet::Profile,
+    },
+    serde_json::json,
+    subxt::{tx::TxPayload, Error, PolkadotConfig as Config},
+    subxt_signer::{
+        bip39::Mnemonic,
+        sr25519::{Keypair, Signature},
+    },
+};
 use {
-    anyhow::Context,
     chain_types::{polkadot, Hash},
     codec::Codec,
     crypto::{
@@ -14,6 +28,8 @@ use {
     std::{
         fs, io,
         net::{IpAddr, SocketAddr},
+        str::FromStr,
+        sync::Arc,
     },
     subxt::{
         backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
@@ -23,21 +39,6 @@ use {
         tx::TxProgress,
         utils::MultiSignature,
         OnlineClient,
-    },
-};
-pub use {
-    chain_types::runtime_types::{
-        pallet_node_staker::pallet::{
-            Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, Stake as ChatStake,
-            Stake2 as SateliteStake,
-        },
-        pallet_user_manager::pallet::Profile,
-    },
-    serde_json::json,
-    subxt::{tx::TxPayload, Error, PolkadotConfig as Config},
-    subxt_signer::{
-        bip39::Mnemonic,
-        sr25519::{Keypair, Signature},
     },
 };
 
@@ -345,6 +346,10 @@ impl NodeKeys {
         self.sign.identity()
     }
 
+    pub fn enc_hash(&self) -> crypto::Hash {
+        crypto::hash::new(self.enc.public_key())
+    }
+
     pub fn from_mnemonic(mnemonic: &Mnemonic) -> Self {
         let seed = crypto::hash::new(mnemonic.to_seed(""));
         let mut rng = ChaChaRng::from_seed(seed);
@@ -372,13 +377,6 @@ impl NodeKeys {
 
 config::env_config! {
     struct EnvConfig {
-        /// public ip adress to be uploaded to chain, clients shoud be able to connect trougr this
-        /// to the node
-        exposed_address: IpAddr,
-        /// exposed port to be uploaded to chain, node should be listening on his port
-        port: u16,
-        /// if this is done trhough one account assign increasing nonce from 0
-        nonce: u64,
         /// chain nodes to connect to, its a comma separated list for redundancy, this a rpc url
         /// like `wss://polkadot.api.onfinality.io/public-ws`
         chain_nodes: config::List<String>,
@@ -405,35 +403,27 @@ impl EnvConfig {
 
     pub async fn connect_satelite(
         self,
-        keys: &NodeKeys,
-        register: bool,
     ) -> anyhow::Result<(NodeVec, StakeEvents<SateliteStakeEvent>)> {
         let tx = chain_types::storage().satelite_staker().addresses_iter();
-        self.connect(keys, tx, "SateliteStaker", unwrap_satelite_staker, register).await
+        self.connect(tx, "SateliteStaker", unwrap_satelite_staker).await
     }
 
-    pub async fn connect_chat(
-        self,
-        keys: &NodeKeys,
-        register: bool,
-    ) -> anyhow::Result<(NodeVec, StakeEvents<ChatStakeEvent>)> {
+    pub async fn connect_chat(self) -> anyhow::Result<(NodeVec, StakeEvents<ChatStakeEvent>)> {
         let tx = chain_types::storage().chat_staker().addresses_iter();
-        self.connect(keys, tx, "ChatStaker", unwrap_chat_staker, register).await
+        self.connect(tx, "ChatStaker", unwrap_chat_staker).await
     }
 
     async fn connect<SA, E>(
         self,
-        keys: &NodeKeys,
         tx: SA,
         pallet_name: &'static str,
         unwrap: fn(chain_types::Event) -> Option<E>,
-        register: bool,
     ) -> anyhow::Result<(NodeVec, StakeEvents<E>)>
     where
         SA: StorageAddress<IsIterable = Yes, Target = NodeAddress> + 'static + Clone,
         E: 'static + Send,
     {
-        let EnvConfig { chain_nodes, mnemonic, port, exposed_address, nonce } = self;
+        let EnvConfig { chain_nodes, mnemonic } = self;
         let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
         let account = Keypair::from_phrase(&mnemonic, None)?;
 
@@ -488,21 +478,6 @@ impl EnvConfig {
         #[cfg(feature = "web")]
         wasm_bindgen_futures::spawn_local(fut);
 
-        if register && node_list.iter().all(|(id, _)| *id != keys.sign.identity()) {
-            log::info!("registering on chain");
-            let nonce = client.get_nonce().await.context("fetching nonce")? + nonce;
-            client
-                .join(
-                    keys.identity(),
-                    crypto::hash::new(keys.enc.public_key()),
-                    SocketAddr::new(exposed_address, port).into(),
-                    nonce,
-                )
-                .await
-                .context("registeing to chain")?;
-            log::info!("registered on chain");
-        }
-
         log::info!("entered the network with {} nodes", node_list.len());
 
         Ok((node_list, stake_events))
@@ -550,4 +525,34 @@ pub fn filter_incoming(
     }
 
     Err(libp2p::swarm::ConnectionDenied::new("not registered as a node"))
+}
+
+#[derive(Clone)]
+pub struct ClapSecretUri(pub Arc<SecretUri>);
+
+impl FromStr for ClapSecretUri {
+    type Err = <SecretUri as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Arc::new(s.parse()?)))
+    }
+}
+
+#[derive(Clone)]
+pub struct ClapNodeIdentity(pub NodeIdentity);
+
+impl FromStr for ClapNodeIdentity {
+    type Err = hex::FromHexError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut arr = NodeIdentity::default();
+        hex::decode_to_slice(s, &mut arr)?;
+        Ok(Self(arr))
+    }
+}
+
+impl std::fmt::Display for ClapNodeIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(&self.0))
+    }
 }

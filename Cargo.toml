@@ -2,13 +2,12 @@
 resolver = "2"
 members = [
 	"utils/*",
-	"tests/*",
 	"protocols/*",
 	"crypto/falcon/falcon",
 	"crypto/*",
 	"chat/*",
 	"chain/*",
-	"storage/*",
+	#"storage/*",
 ]
 
 exclude = [

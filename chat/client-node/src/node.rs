@@ -6,7 +6,6 @@ use {
         Vault,
     },
     anyhow::Context,
-    chain_api::unpack_addr,
     chat_spec::*,
     codec::{Codec, Reminder},
     component_utils::{FindAndRemove, PacketWriter},
@@ -46,7 +45,7 @@ pub struct Node {
     swarm: Swarm<Behaviour>,
     subscriptions: futures::stream::SelectAll<Subscription>,
     pending_chat_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
-    pending_rpc_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
+    _pending_rpc_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
     pending_topic_search: HashMap<PathId, Vec<RequestInit>>,
     pending_streams: VecDeque<(PeerId, CallId, oneshot::Sender<libp2p::Stream>)>,
     negotiated_streams: FuturesUnordered<StreamNegotiation>,
@@ -301,7 +300,7 @@ impl Node {
                 subscriptions,
                 pending_chat_requests: Default::default(),
                 pending_topic_search: Default::default(),
-                pending_rpc_requests: Default::default(),
+                _pending_rpc_requests: Default::default(),
                 pending_streams: Default::default(),
                 negotiated_streams: Default::default(),
                 requests: commands,
@@ -405,7 +404,7 @@ impl Node {
         }
     }
 
-    fn satelite_request(&mut self, req: RawSateliteRequest) {
+    fn satelite_request(&mut self, _req: RawSateliteRequest) {
         // let beh = self.swarm.behaviour_mut();
 
         // let request = storage_spec::Request { prefix: req.prefix, body: Reminder(&req.payload) };
@@ -417,7 +416,7 @@ impl Node {
         // self.pending_rpc_requests.insert(id, req.response);
     }
 
-    fn storage_request(&mut self, req: RawStorageRequest) {
+    fn storage_request(&mut self, _req: RawStorageRequest) {
         // let beh = self.swarm.behaviour_mut();
         // beh.storage_dht.table.insert(Route::new(req.identity, unpack_addr(req.addr)));
 

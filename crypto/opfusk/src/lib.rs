@@ -135,8 +135,9 @@ where
             sender_sign_pk.verify(&challinge, &final_req.proof)?;
             let receiver_ss = temp_key.decapsulate(&final_req.cp)?;
             let peer_id = hash_to_peer_id(sender_sign_pk.identity());
+            let secret = crypto::xor_secrets(sender_ss, receiver_ss);
 
-            Ok((peer_id, Output::new(socket, self.rng, sender_ss, receiver_ss, self.buffer_size)))
+            Ok((peer_id, Output::new(socket, self.rng, secret, self.buffer_size)))
         }
     }
 }
@@ -193,8 +194,9 @@ where
             Pin::new(&mut socket).flush().await?;
 
             let peer_id = hash_to_peer_id(identity);
+            let secret = crypto::xor_secrets(sender_ss, receiver_ss);
 
-            Ok((peer_id, Output::new(socket, self.rng, sender_ss, receiver_ss, self.buffer_size)))
+            Ok((peer_id, Output::new(socket, self.rng, secret, self.buffer_size)))
         }
     }
 }
@@ -202,8 +204,7 @@ where
 pub struct Output<R, T> {
     stream: T,
     rng: R,
-    sender_ss: SharedSecret,
-    receiver_ss: SharedSecret,
+    secret: SharedSecret,
     read_buffer: Vec<u8>,
     readable_end: usize,
     readable_start: usize,
@@ -213,25 +214,24 @@ pub struct Output<R, T> {
     writable_start: usize,
 }
 
+impl<R, T> std::fmt::Debug for Output<R, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Output").finish()
+    }
+}
+
 impl<R, T> Output<R, T> {
-    pub fn new(
-        stream: T,
-        rng: R,
-        sender_ss: SharedSecret,
-        receiver_ss: SharedSecret,
-        _buffer_cap: usize,
-    ) -> Self {
+    pub fn new(stream: T, rng: R, secret: SharedSecret, buffer_cap: usize) -> Self {
         Self {
             stream,
             rng,
-            sender_ss,
-            receiver_ss,
-            read_buffer: Vec::with_capacity(_buffer_cap),
+            secret,
+            read_buffer: Vec::with_capacity(buffer_cap),
             chunk_reminder: 0,
             readable_end: 0,
             readable_start: 0,
             write_buffer: {
-                let mut vec = Vec::with_capacity(_buffer_cap);
+                let mut vec = Vec::with_capacity(buffer_cap);
                 vec.extend([0; TAG_SIZE]);
                 vec
             },
@@ -246,7 +246,7 @@ impl<R, T> Output<R, T> {
     {
         let in_progress = &mut self.write_buffer[self.writable_end..];
         let (tag_part, message) = in_progress.split_at_mut(TAG_SIZE);
-        let tag = crypto::encrypt(message, self.sender_ss, &mut self.rng);
+        let tag = crypto::encrypt(message, self.secret, &mut self.rng);
         tag_part[2..].copy_from_slice(&tag);
         let body_len = message.len() as u16;
         tag_part[..2].copy_from_slice(&body_len.to_be_bytes());
@@ -421,7 +421,7 @@ where
                     break 'decyrpt;
                 };
 
-                if !crypto::decrypt_separate_tag(body, s.receiver_ss, tag) {
+                if !crypto::decrypt_separate_tag(body, s.secret, tag) {
                     return Poll::Ready(Err(io::ErrorKind::PermissionDenied.into()));
                 }
                 s.readable_end += len + 2;

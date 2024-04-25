@@ -10,9 +10,9 @@
 
 use {
     arrayvec::ArrayVec,
-    codec::{Codec, Reminder},
+    codec::Codec,
     crypto::proof::{Nonce, Proof},
-    std::num::NonZeroUsize,
+    std::{io, num::NonZeroUsize},
 };
 
 pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
@@ -20,6 +20,7 @@ pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecke
 pub type BlockNumber = u64;
 pub type Identity = crypto::Hash;
 pub type ReplVec<T> = ArrayVec<T, { REPLICATION_FACTOR.get() }>;
+pub type GroupVec<T> = ArrayVec<T, { REPLICATION_FACTOR.get() + 1 }>;
 
 mod chat;
 mod profile;
@@ -54,7 +55,7 @@ pub mod rpcs {
     }
 }
 
-pub use {chat::*, profile::*, rpc::CallId};
+pub use {chat::*, profile::*};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
 pub enum ChatError {
@@ -114,6 +115,16 @@ pub enum ChatError {
     OppositePartyFirst,
 }
 
+impl From<io::Error> for ChatError {
+    fn from(e: io::Error) -> Self {
+        match e.kind() {
+            io::ErrorKind::TimedOut => Self::Timeout,
+            io::ErrorKind::ConnectionReset => Self::ChannelClosed,
+            _ => Self::InvalidResponse,
+        }
+    }
+}
+
 impl ChatError {
     pub fn recover(self) -> Result<(), Self> {
         match self {
@@ -136,6 +147,23 @@ impl Topic {
             Self::Profile(i) => i.as_ref(),
             Self::Chat(c) => c.as_bytes(),
         }
+    }
+
+    pub fn decompress(bytes: [u8; 32]) -> Self {
+        let len = 32 - bytes.iter().rev().take_while(|&&b| b == 0xff).count();
+        let bts = &bytes[..len];
+        std::str::from_utf8(bts)
+            .ok()
+            .and_then(|s| ChatName::from(s).ok())
+            .map(Self::Chat)
+            .unwrap_or(Self::Profile(bytes))
+    }
+
+    pub fn compress(&self) -> [u8; 32] {
+        let mut bytes = [0xff; 32];
+        let bts = self.as_bytes();
+        bytes[..bts.len()].copy_from_slice(bts);
+        bytes
     }
 }
 
@@ -169,12 +197,33 @@ pub fn advance_nonce(current: &mut Nonce, new: Nonce) -> bool {
     valid
 }
 
-#[derive(Codec, Clone, Copy)]
-pub struct Request<'a> {
+#[repr(packed)]
+#[derive(Clone, Copy)]
+pub struct RequestHeader {
     pub prefix: u8,
-    pub id: CallId,
-    pub topic: Option<Topic>,
-    pub body: Reminder<'a>,
+    pub call_id: [u8; 4],
+    pub topic: [u8; 32],
+    pub len: [u8; 4],
+}
+
+impl RequestHeader {
+    pub fn as_bytes(&self) -> &[u8; std::mem::size_of::<Self>()] {
+        unsafe { std::mem::transmute(self) }
+    }
+
+    pub fn from_array(arr: [u8; std::mem::size_of::<Self>()]) -> Self {
+        unsafe { std::mem::transmute(arr) }
+    }
+
+    pub fn get_len(&self) -> usize {
+        u32::from_be_bytes(self.len) as usize
+    }
+}
+
+#[repr(packed)]
+pub struct InternalRequestHeader {
+    pub prefix: u8,
+    pub topic: [u8; 32],
 }
 
 #[derive(Clone, Copy, Codec, Debug)]

@@ -332,7 +332,7 @@ mod test {
 
             for (j, pk) in public_keys.iter().enumerate() {
                 let j = j + 1;
-                swarm.behaviour_mut().dht.table.insert(Route::new(
+                swarm.behaviour_mut().dht.table.write().insert(Route::new(
                     pk.identity(),
                     Multiaddr::empty().with(Protocol::Memory(j as u64)),
                 ));

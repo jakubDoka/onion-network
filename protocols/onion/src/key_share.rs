@@ -1,5 +1,5 @@
 use {
-    codec::Codec,
+    codec::Decode,
     crypto::enc,
     futures::{AsyncReadExt, AsyncWriteExt, Future},
     libp2p::{

@@ -3,7 +3,10 @@ pub use crypto::{
     SharedSecret,
 };
 use {
-    aes_gcm::aead::OsRng, arrayvec::ArrayVec, codec::Codec, crypto::enc::Ciphertext,
+    aes_gcm::aead::OsRng,
+    arrayvec::ArrayVec,
+    codec::{Codec, Decode, Encode},
+    crypto::enc::Ciphertext,
     libp2p::identity::PeerId,
 };
 

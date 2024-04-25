@@ -23,21 +23,27 @@ pub fn derive_codec(input: TokenStream) -> TokenStream {
         syn::Data::Enum(e) => derive_codec_enum(e, &crate_name),
         syn::Data::Union(_) => unimplemented!("Unions are not supported"),
     };
-    let (generics, lt) = modify_generics(&crate_name, input.generics.clone());
+    let (encode_generics, _) =
+        modify_generics(input.generics.clone(), false, syn::parse_quote!(#crate_name::Encode));
+    let (decode_generics, lt) =
+        modify_generics(input.generics, true, syn::parse_quote!(#crate_name::Decode<'a>));
 
-    let ident = input.ident;
-    let (impl_generics, ..) = generics.split_for_impl();
-    let (.., ty_generics, where_clause) = input.generics.split_for_impl();
+    let (impl_encode_generics, ty_generics, where_clause) = encode_generics.split_for_impl();
+    let lt = lt.unwrap();
+    let (impl_decode_generics, ..) = decode_generics.split_for_impl();
+    let ident = &input.ident;
 
     quote! {
-        impl #impl_generics #crate_name::Codec<#lt> for #ident #ty_generics #where_clause {
+        impl #impl_decode_generics #crate_name::Decode<#lt> for #ident #ty_generics #where_clause {
+            fn decode(buffer: &mut &#lt [u8]) -> Option<Self> {
+                #decode
+            }
+        }
+
+        impl #impl_encode_generics #crate_name::Encode for #ident #ty_generics #where_clause {
             fn encode(&self, buffer: &mut impl #crate_name::Buffer) -> Option<()> {
                 #encode
                 Some(())
-            }
-
-            fn decode(buffer: &mut &#lt [u8]) -> Option<Self> {
-                #decode
             }
         }
     }
@@ -45,23 +51,24 @@ pub fn derive_codec(input: TokenStream) -> TokenStream {
 }
 
 fn modify_generics(
-    crate_name: &syn::Ident,
     mut generics: syn::Generics,
-) -> (syn::Generics, syn::Lifetime) {
-    if generics.lifetimes().next().is_none() {
+    add_lifetime: bool,
+    trait_path: syn::TypeParamBound,
+) -> (syn::Generics, Option<syn::Lifetime>) {
+    if generics.lifetimes().next().is_none() && add_lifetime {
         let default_lt =
             syn::LifetimeParam::new(syn::Lifetime::new("'a", proc_macro2::Span::call_site()));
         generics.params.insert(0, syn::GenericParam::Lifetime(default_lt));
     }
+
     let mut lts = generics.lifetimes();
-    let lt = lts.next().unwrap().clone();
-    assert!(lts.next().is_none(), "Only one lifetime is supported");
+    let lt = lts.next().cloned().map(|lt| lt.lifetime);
 
     for gen in generics.type_params_mut() {
-        gen.bounds.push(syn::parse_quote!(#crate_name::Codec<#lt>));
+        gen.bounds.push(trait_path.clone());
     }
 
-    (generics, lt.lifetime)
+    (generics, lt)
 }
 
 fn derive_codec_enum(e: syn::DataEnum, crate_name: &syn::Ident) -> [proc_macro2::TokenStream; 2] {
@@ -209,7 +216,7 @@ impl FieldMeta {
         } else if let Some(with) = &self.with_wrapper {
             quote! { #with::decode(buffer)? }
         } else {
-            quote! { #crate_name::Codec::decode(buffer)? }
+            quote! { #crate_name::Decode::<'a>::decode(buffer)? }
         };
 
         match &self.name {
@@ -236,7 +243,7 @@ impl FieldMeta {
         if let Some(with) = &self.with_wrapper {
             quote! { #with::encode(#name, buffer)?; }
         } else {
-            quote! { #crate_name::Codec::<'a>::encode(#name, buffer)?; }
+            quote! { #crate_name::Encode::encode(#name, buffer)?; }
         }
     }
 

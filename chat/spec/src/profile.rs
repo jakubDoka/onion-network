@@ -2,7 +2,7 @@ use {
     crate::{Identity, Nonce},
     arrayvec::ArrayString,
     chain_api::{RawUserName, USER_NAME_CAP},
-    codec::Codec,
+    codec::{Codec, DecodeOwned},
     crypto::{enc, hash, proof::Proof, sign, SharedSecret},
     merkle_tree::MerkleTree,
     std::{collections::BTreeMap, iter},
@@ -128,7 +128,7 @@ impl Vault {
         self.try_insert_bulk(vec![(key, value)], proof)
     }
 
-    pub fn get_ecrypted<T: for<'a> Codec<'a>>(
+    pub fn get_ecrypted<T: DecodeOwned>(
         &self,
         key: crypto::Hash,
         encryption_key: SharedSecret,
@@ -138,7 +138,7 @@ impl Vault {
         T::decode(&mut &*value)
     }
 
-    pub fn get_plaintext<T: for<'a> Codec<'a>>(&self, key: crypto::Hash) -> Option<T> {
+    pub fn get_plaintext<T: DecodeOwned>(&self, key: crypto::Hash) -> Option<T> {
         let value = self.values.get(&key)?;
         T::decode(&mut value.as_slice())
     }

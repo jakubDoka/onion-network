@@ -32,6 +32,7 @@ codec.workspace = true
 handlers.workspace = true
 component-utils.workspace = true
 opfusk = { workspace = true }
+streaming.workspace = true
 
 [lints]
 workspace = true

@@ -15,7 +15,7 @@ pub use {
 };
 use {
     chain_types::{polkadot, Hash},
-    codec::Codec,
+    codec::{Codec, Decode, Encode},
     crypto::{
         enc,
         rand_core::{OsRng, SeedableRng},
@@ -23,7 +23,7 @@ use {
     },
     futures::{SinkExt, StreamExt, TryStreamExt},
     libp2p::{multiaddr, Multiaddr, PeerId},
-    parity_scale_codec::Decode,
+    parity_scale_codec::Decode as _,
     rand_chacha::ChaChaRng,
     std::{
         fs, io,
@@ -488,9 +488,9 @@ pub fn stake_event(s: &mut impl AsMut<dht::Behaviour>, event: impl Into<ChatStak
     match event.into() {
         ChatStakeEvent::Joined { identity, addr }
         | ChatStakeEvent::AddrChanged { identity, addr } => {
-            dht.table.insert(dht::Route::new(identity, unpack_addr(addr)));
+            dht.table.write().insert(dht::Route::new(identity, unpack_addr(addr)));
         }
-        ChatStakeEvent::Reclaimed { identity } => _ = dht.table.remove(identity),
+        ChatStakeEvent::Reclaimed { identity } => _ = dht.table.write().remove(identity),
         ChatStakeEvent::Voted { .. } => {}
     }
 }

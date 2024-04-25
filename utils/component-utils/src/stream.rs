@@ -1,34 +1,10 @@
 use {
-    codec::{Buffer, Codec, Reminder},
+    codec::{Buffer, DecodeOwned, Encode, Reminder},
     futures::Future,
-    std::{future::poll_fn, io, pin::Pin, task::Poll, usize},
+    std::{future::poll_fn, io, pin::Pin, task::Poll},
 };
 
 const PACKET_LEN_WIDTH: usize = 2;
-
-pub struct AsocStream<A, S> {
-    pub inner: S,
-    pub assoc: A,
-}
-
-impl<A, S> AsocStream<A, S> {
-    pub const fn new(inner: S, assoc: A) -> Self {
-        Self { inner, assoc }
-    }
-}
-
-impl<A: Clone, S: futures::Stream> futures::Stream for AsocStream<A, S> {
-    type Item = (A, S::Item);
-
-    fn poll_next(
-        mut self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Option<Self::Item>> {
-        unsafe { self.as_mut().map_unchecked_mut(|s| &mut s.inner) }
-            .poll_next(cx)
-            .map(|opt| opt.map(|item| (self.assoc.clone(), item)))
-    }
-}
 
 #[derive(Debug, Default)]
 pub struct PacketReader {
@@ -87,7 +63,7 @@ impl PacketReader {
         poll_fn(|cx| self.poll_packet(cx, stream).map_ok(|v| v.to_vec())).await
     }
 
-    pub async fn next_packet_as<T: for<'a> Codec<'a>>(
+    pub async fn next_packet_as<T: DecodeOwned>(
         &mut self,
         stream: &mut (impl futures::AsyncRead + Unpin),
     ) -> Result<T, io::Error> {
@@ -150,7 +126,7 @@ impl PacketWriter {
     }
 
     #[must_use]
-    pub fn write_packet<'a>(&mut self, message: impl Codec<'a>) -> Option<()> {
+    pub fn write_packet(&mut self, message: impl Encode) -> Option<()> {
         let mut writer = self.guard();
         let reserved = writer.write([0u8; PACKET_LEN_WIDTH])?;
         let len = writer.write(message)?.len();
@@ -242,7 +218,7 @@ pub enum PacketWriterGuard<'a> {
 }
 
 impl<'a> PacketWriterGuard<'a> {
-    pub fn write<'b>(&mut self, value: impl Codec<'b>) -> Option<&'a mut [u8]> {
+    pub fn write(&mut self, value: impl Encode) -> Option<&'a mut [u8]> {
         struct RawSliceBuffer {
             start: *mut u8,
             end: *mut u8,

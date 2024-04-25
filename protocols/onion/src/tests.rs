@@ -1,17 +1,14 @@
 use {
-    crate::{EncryptedStream, PathId},
+    crate::EncryptedStream,
     aes_gcm::aead::OsRng,
-    component_utils::AsocStream,
-    dht::Route,
-    futures::{stream::SelectAll, FutureExt, StreamExt},
+    futures::{AsyncReadExt, AsyncWriteExt, FutureExt, StreamExt},
     libp2p::{
         core::{multiaddr::Protocol, upgrade::Version, Transport},
         identity::PeerId,
-        swarm::{NetworkBehaviour, SwarmEvent},
+        swarm::SwarmEvent,
     },
     opfusk::ToPeerId,
-    rand::seq::SliceRandom,
-    std::{collections::HashSet, io, net::Ipv4Addr, pin::Pin, time::Duration, usize},
+    std::time::Duration,
 };
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -114,18 +111,19 @@ async fn test_routing() {
     let mut swarms = setup_nodes([8800, 8801, 8802, 8803]);
     let (mut input, mut output) = open_path(&mut swarms).await;
 
-    input.write_bytes(b"hello").unwrap();
-    let r = loop {
+    input.write_all(b"hello").await.unwrap();
+    let mut buf = [0; 5];
+    _ = loop {
         let events = futures::future::select_all(swarms.iter_mut().map(|s| s.next()));
         let e = futures::select! {
             (e, ..) = events.fuse() => e,
-            _ = input.select_next_some() => continue,
-            r = output.select_next_some() => break r,
+            _ = input.flush().fuse() => continue,
+            r = output.read_exact(&mut buf).fuse() => break r.unwrap(),
         };
         log::debug!("{:?}", e.unwrap());
     };
 
-    assert_eq!(&r.unwrap(), b"hello");
+    assert_eq!(&buf, b"hello");
 }
 
 #[tokio::test]
@@ -137,19 +135,21 @@ async fn test_timeout() {
 
     let (mut input, mut output) = open_path(&mut swarms).await;
 
-    input.write(b"hello").unwrap();
+    input.write_all(b"hello").await.unwrap();
+    input.flush().await.unwrap();
 
     let mut disconnected = 0;
-    let mut timeout = Box::pin(tokio::time::sleep(CONNECTION_TIMEOUT * 1));
+    let mut timeout = std::pin::pin!(tokio::time::sleep(CONNECTION_TIMEOUT * 1));
 
+    let mut buff = [0; 5];
     while disconnected != 6 {
         let events = futures::future::select_all(swarms.iter_mut().map(|s| s.next()));
         let (e, i) = futures::select! {
             (e, i, ..) = events.fuse() => (e, i),
-            _ = Pin::new(&mut timeout).fuse() => panic!("{disconnected} nodes disconnected"),
-            r = output.select_next_some() => {
-                let msg = r.unwrap();
-                input.write(&msg).unwrap();
+            _ = (&mut timeout).fuse() => panic!("{disconnected} nodes disconnected"),
+            r = output.read_exact(&mut buff).fuse() => {
+                _ = r.unwrap();
+                input.write_all(&buff).await.unwrap();
                 continue;
             },
         };
@@ -202,203 +202,203 @@ async fn test_missing_route() {
     futures::future::join_all((0..3).map(perform)).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
-async fn settle_down() {
-    init();
-    let server_count = 10;
-    let client_count = 20;
-    let max_open_streams_server = 100;
-    let concurrent_routes = 4;
-    let max_open_streams_client = 4;
-    let first_port = 8900;
-    let spacing = Duration::from_millis(0);
-    let keep_alive_interval = Duration::from_secs(5);
+//#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+//#[ignore]
+//async fn settle_down() {
+//    init();
+//    let server_count = 10;
+//    let client_count = 20;
+//    let max_open_streams_server = 100;
+//    let concurrent_routes = 4;
+//    let max_open_streams_client = 4;
+//    let first_port = 8900;
+//    let spacing = Duration::from_millis(0);
+//    let keep_alive_interval = Duration::from_secs(5);
+//
+//    let kps = (0..server_count).map(|_| crypto::sign::Keypair::new(OsRng)).collect::<Vec<_>>();
+//    let pks = kps.iter().map(|k| k.public_key()).collect::<Vec<_>>();
+//
+//    let mut router = dht::Behaviour::default();
+//    router.table.bulk_insert(pks.into_iter().enumerate().map(|(i, k)| {
+//        let addr = libp2p::core::Multiaddr::empty()
+//            .with(Protocol::Ip4(Ipv4Addr::LOCALHOST))
+//            .with(Protocol::Tcp(first_port + i as u16));
+//        Route::new(k.identity(), addr)
+//    }));
+//
+//    let (swarms, node_data): (Vec<_>, Vec<_>) = kps
+//        .into_iter()
+//        .enumerate()
+//        .map(|(i, kp)| {
+//            let peer_id = kp.to_peer_id();
+//            let secret = crate::Keypair::new(OsRng);
+//
+//            let transport = libp2p::tcp::tokio::Transport::default()
+//                .upgrade(Version::V1)
+//                .authenticate(opfusk::Config::new(OsRng, kp))
+//                .multiplex(libp2p::yamux::Config::default())
+//                .boxed();
+//
+//            let beh = SDBehaviour {
+//                onion: crate::Behaviour::new(
+//                    crate::Config::new(Some(secret.clone()), peer_id)
+//                        .keep_alive_interval(keep_alive_interval),
+//                ),
+//                dht: router.clone(),
+//            };
+//
+//            let mut swarm = libp2p::swarm::Swarm::new(
+//                transport,
+//                beh,
+//                peer_id,
+//                libp2p::swarm::Config::with_tokio_executor()
+//                    .with_idle_connection_timeout(keep_alive_interval),
+//            );
+//
+//            swarm
+//                .listen_on(
+//                    libp2p::core::Multiaddr::empty()
+//                        .with(Protocol::Ip4([0, 0, 0, 0].into()))
+//                        .with(Protocol::Tcp(first_port + i as u16)),
+//                )
+//                .unwrap();
+//
+//            (swarm, (peer_id, secret.public_key()))
+//        })
+//        .unzip();
+//
+//    fn handle_packet(
+//        id: PathId,
+//        packet: io::Result<Vec<u8>>,
+//        streams: &mut FuturesUnordered<AsocStream<PathId, EncryptedStream>>,
+//        counter: &mut usize,
+//    ) {
+//        let Ok(packet) = packet.inspect_err(|e| log::error!("closing stream with error: {e}"))
+//        else {
+//            return;
+//        };
+//
+//        *counter += 1;
+//        if *counter % 1000 == 0 {
+//            log::info!("received {counter} packets");
+//        }
+//
+//        let stream = streams.iter_mut().find(|s| s.assoc == id).unwrap();
+//        stream.inner.write_bytes(&packet).unwrap();
+//    }
+//
+//    tokio::spawn(async move {
+//        for mut swarm in swarms {
+//            tokio::time::sleep(spacing).await;
+//            tokio::spawn(async move {
+//                use {crate::Event as OE, SDBehaviourEvent as BE, SwarmEvent as SE};
+//
+//                let mut streams = SelectAll::<AsocStream<PathId, EncryptedStream>>::new();
+//                let mut counter = 0;
+//                loop {
+//                    let ev = futures::select! {
+//                        ev = swarm.select_next_some() => ev,
+//                        (id, packet) = streams.select_next_some() => { handle_packet(id, packet, &mut streams, &mut counter); continue; },
+//                    };
+//
+//                    match ev {
+//                        SE::Behaviour(BE::Onion(OE::InboundStream(stream, pid))) => {
+//                            if streams.len() > max_open_streams_server {
+//                                log::info!("too many open streams");
+//                                continue;
+//                            }
+//
+//                            streams.push(AsocStream::new(stream, pid));
+//                        }
+//                        e => log::debug!("{e:?}"),
+//                    }
+//                }
+//            });
+//        }
+//    });
+//
+//    let clients = (0..client_count)
+//        .map(|_| {
+//            let kp = crypto::sign::Keypair::new(OsRng);
+//            let peer_id = kp.to_peer_id();
+//
+//            let transport = libp2p::tcp::tokio::Transport::default()
+//                .upgrade(Version::V1)
+//                .authenticate(opfusk::Config::new(OsRng, kp))
+//                .multiplex(libp2p::yamux::Config::default())
+//                .boxed();
+//
+//            let beh = SDBehaviour {
+//                onion: crate::Behaviour::new(
+//                    crate::Config::new(None, peer_id).keep_alive_interval(Duration::from_secs(5)),
+//                ),
+//                dht: router.clone(),
+//            };
+//
+//            libp2p::swarm::Swarm::new(
+//                transport,
+//                beh,
+//                peer_id,
+//                libp2p::swarm::Config::with_tokio_executor()
+//                    .with_idle_connection_timeout(keep_alive_interval),
+//            )
+//        })
+//        .collect::<SelectAll<_>>();
+//
+//    for mut swarm in clients {
+//        tokio::time::sleep(spacing).await;
+//        let node_data = node_data.clone();
+//        tokio::spawn(async move {
+//            use {crate::Event as OE, SDBehaviourEvent as BE, SwarmEvent as SE};
+//
+//            let mut streams = SelectAll::<AsocStream<PathId, EncryptedStream>>::new();
+//            let mut pending_routes = HashSet::new();
+//            let mut counter = 0;
+//            loop {
+//                if pending_routes.len() < concurrent_routes
+//                    && streams.len() < max_open_streams_client
+//                {
+//                    let mut rng = &mut rand::thread_rng();
+//                    let to_dail: [_; 3] = node_data
+//                        .choose_multiple(&mut rng, node_data.len())
+//                        .map(|(id, pk)| (*pk, *id))
+//                        .take(3)
+//                        .collect::<Vec<_>>()
+//                        .try_into()
+//                        .unwrap();
+//                    let id = swarm.behaviour_mut().onion.open_path(to_dail);
+//                    pending_routes.insert(id);
+//                }
+//
+//                let ev = futures::select! {
+//                    (id, packet) = streams.select_next_some() => {
+//                        handle_packet(id, packet, &mut streams, &mut counter);
+//                        continue;
+//                    },
+//                    ev = swarm.select_next_some() => ev,
+//                };
+//
+//                match ev {
+//                    SE::Behaviour(BE::Onion(OE::OutboundStream(stream, id, ..))) => {
+//                        if let Ok((mut stream, ..)) = stream {
+//                            stream.write_bytes(b"hello").unwrap();
+//                            streams.push(AsocStream::new(stream, id));
+//                        } else {
+//                            log::error!("failed to open stream {}", stream.unwrap_err());
+//                        }
+//                        pending_routes.remove(&id);
+//                    }
+//                    e => log::debug!("{e:?}"),
+//                }
+//            }
+//        });
+//    }
+//
+//    std::future::pending().await
+//}
 
-    let kps = (0..server_count).map(|_| crypto::sign::Keypair::new(OsRng)).collect::<Vec<_>>();
-    let pks = kps.iter().map(|k| k.public_key()).collect::<Vec<_>>();
-
-    let mut router = dht::Behaviour::default();
-    router.table.bulk_insert(pks.into_iter().enumerate().map(|(i, k)| {
-        let addr = libp2p::core::Multiaddr::empty()
-            .with(Protocol::Ip4(Ipv4Addr::LOCALHOST))
-            .with(Protocol::Tcp(first_port + i as u16));
-        Route::new(k.identity(), addr)
-    }));
-
-    let (swarms, node_data): (Vec<_>, Vec<_>) = kps
-        .into_iter()
-        .enumerate()
-        .map(|(i, kp)| {
-            let peer_id = kp.to_peer_id();
-            let secret = crate::Keypair::new(OsRng);
-
-            let transport = libp2p::tcp::tokio::Transport::default()
-                .upgrade(Version::V1)
-                .authenticate(opfusk::Config::new(OsRng, kp))
-                .multiplex(libp2p::yamux::Config::default())
-                .boxed();
-
-            let beh = SDBehaviour {
-                onion: crate::Behaviour::new(
-                    crate::Config::new(Some(secret.clone()), peer_id)
-                        .keep_alive_interval(keep_alive_interval),
-                ),
-                dht: router.clone(),
-            };
-
-            let mut swarm = libp2p::swarm::Swarm::new(
-                transport,
-                beh,
-                peer_id,
-                libp2p::swarm::Config::with_tokio_executor()
-                    .with_idle_connection_timeout(keep_alive_interval),
-            );
-
-            swarm
-                .listen_on(
-                    libp2p::core::Multiaddr::empty()
-                        .with(Protocol::Ip4([0, 0, 0, 0].into()))
-                        .with(Protocol::Tcp(first_port + i as u16)),
-                )
-                .unwrap();
-
-            (swarm, (peer_id, secret.public_key()))
-        })
-        .unzip();
-
-    fn handle_packet(
-        id: PathId,
-        packet: io::Result<Vec<u8>>,
-        streams: &mut SelectAll<AsocStream<PathId, EncryptedStream>>,
-        counter: &mut usize,
-    ) {
-        let Ok(packet) = packet.inspect_err(|e| log::error!("closing stream with error: {e}"))
-        else {
-            return;
-        };
-
-        *counter += 1;
-        if *counter % 1000 == 0 {
-            log::info!("received {counter} packets");
-        }
-
-        let stream = streams.iter_mut().find(|s| s.assoc == id).unwrap();
-        stream.inner.write_bytes(&packet).unwrap();
-    }
-
-    tokio::spawn(async move {
-        for mut swarm in swarms {
-            tokio::time::sleep(spacing).await;
-            tokio::spawn(async move {
-                use {crate::Event as OE, SDBehaviourEvent as BE, SwarmEvent as SE};
-
-                let mut streams = SelectAll::<AsocStream<PathId, EncryptedStream>>::new();
-                let mut counter = 0;
-                loop {
-                    let ev = futures::select! {
-                        ev = swarm.select_next_some() => ev,
-                        (id, packet) = streams.select_next_some() => { handle_packet(id, packet, &mut streams, &mut counter); continue; },
-                    };
-
-                    match ev {
-                        SE::Behaviour(BE::Onion(OE::InboundStream(stream, pid))) => {
-                            if streams.len() > max_open_streams_server {
-                                log::info!("too many open streams");
-                                continue;
-                            }
-
-                            streams.push(AsocStream::new(stream, pid));
-                        }
-                        e => log::debug!("{e:?}"),
-                    }
-                }
-            });
-        }
-    });
-
-    let clients = (0..client_count)
-        .map(|_| {
-            let kp = crypto::sign::Keypair::new(OsRng);
-            let peer_id = kp.to_peer_id();
-
-            let transport = libp2p::tcp::tokio::Transport::default()
-                .upgrade(Version::V1)
-                .authenticate(opfusk::Config::new(OsRng, kp))
-                .multiplex(libp2p::yamux::Config::default())
-                .boxed();
-
-            let beh = SDBehaviour {
-                onion: crate::Behaviour::new(
-                    crate::Config::new(None, peer_id).keep_alive_interval(Duration::from_secs(5)),
-                ),
-                dht: router.clone(),
-            };
-
-            libp2p::swarm::Swarm::new(
-                transport,
-                beh,
-                peer_id,
-                libp2p::swarm::Config::with_tokio_executor()
-                    .with_idle_connection_timeout(keep_alive_interval),
-            )
-        })
-        .collect::<SelectAll<_>>();
-
-    for mut swarm in clients {
-        tokio::time::sleep(spacing).await;
-        let node_data = node_data.clone();
-        tokio::spawn(async move {
-            use {crate::Event as OE, SDBehaviourEvent as BE, SwarmEvent as SE};
-
-            let mut streams = SelectAll::<AsocStream<PathId, EncryptedStream>>::new();
-            let mut pending_routes = HashSet::new();
-            let mut counter = 0;
-            loop {
-                if pending_routes.len() < concurrent_routes
-                    && streams.len() < max_open_streams_client
-                {
-                    let mut rng = &mut rand::thread_rng();
-                    let to_dail: [_; 3] = node_data
-                        .choose_multiple(&mut rng, node_data.len())
-                        .map(|(id, pk)| (*pk, *id))
-                        .take(3)
-                        .collect::<Vec<_>>()
-                        .try_into()
-                        .unwrap();
-                    let id = swarm.behaviour_mut().onion.open_path(to_dail);
-                    pending_routes.insert(id);
-                }
-
-                let ev = futures::select! {
-                    (id, packet) = streams.select_next_some() => {
-                        handle_packet(id, packet, &mut streams, &mut counter);
-                        continue;
-                    },
-                    ev = swarm.select_next_some() => ev,
-                };
-
-                match ev {
-                    SE::Behaviour(BE::Onion(OE::OutboundStream(stream, id, ..))) => {
-                        if let Ok((mut stream, ..)) = stream {
-                            stream.write_bytes(b"hello").unwrap();
-                            streams.push(AsocStream::new(stream, id));
-                        } else {
-                            log::error!("failed to open stream {}", stream.unwrap_err());
-                        }
-                        pending_routes.remove(&id);
-                    }
-                    e => log::debug!("{e:?}"),
-                }
-            }
-        });
-    }
-
-    std::future::pending().await
-}
-
-#[derive(NetworkBehaviour)]
-struct SDBehaviour {
-    onion: crate::Behaviour,
-    dht: dht::Behaviour,
-}
+//#[derive(NetworkBehaviour)]
+//struct SDBehaviour {
+//    onion: crate::Behaviour,
+//    dht: dht::Behaviour,
+//}

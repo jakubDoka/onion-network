@@ -4,12 +4,12 @@ use {
         Keypair, PublicKey, SharedSecret,
     },
     aes_gcm::aead::OsRng,
-    codec::{Codec, Reminder},
-    component_utils::{ClosingStream, FindAndRemove, PacketReader, PacketWriter},
+    codec::Encode,
+    component_utils::{ClosingStream, FindAndRemove},
     core::{fmt, slice},
     futures::{
-        stream::{FusedStream, FuturesUnordered},
-        AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future, FutureExt, StreamExt,
+        stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future,
+        FutureExt, StreamExt,
     },
     instant::Duration,
     libp2p::{
@@ -182,7 +182,10 @@ impl Behaviour {
                 }
                 ChannelSource::ThisNode(secret, path_id, peer_id) => {
                     self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
-                        Ok((EncryptedStream::new(to, secret, self.config.buffer_cap), peer_id)),
+                        Ok((
+                            EncryptedStream::new(to, OsRng, secret, self.config.buffer_cap),
+                            peer_id,
+                        )),
                         path_id,
                     )));
                 }
@@ -363,87 +366,7 @@ pub enum Event {
 
 component_utils::gen_unique_id!(pub PathId);
 
-#[derive(Debug)]
-pub struct EncryptedStream {
-    inner: Option<libp2p::Stream>,
-    key: SharedSecret,
-    reader: PacketReader,
-    writer: PacketWriter,
-}
-
-impl EncryptedStream {
-    pub(crate) fn new(inner: libp2p::Stream, key: SharedSecret, cap: usize) -> Self {
-        Self { inner: Some(inner), key, reader: Default::default(), writer: PacketWriter::new(cap) }
-    }
-
-    #[must_use = "write could have failed"]
-    pub fn write_bytes(&mut self, data: &[u8]) -> Option<()> {
-        self.write(Reminder(data))
-    }
-
-    #[must_use = "write could have failed"]
-    pub fn write<'a>(&mut self, data: impl Codec<'a>) -> Option<()> {
-        let mut writer = self.writer.guard();
-        let reserved = writer.write([0u8; 2])?;
-        let raw = writer.write(data)?;
-        let tag = crypto::encrypt(raw, self.key, OsRng);
-        let full_len = raw.len() + tag.len();
-        writer.write(tag)?;
-        reserved.copy_from_slice(&(full_len as u16).to_be_bytes());
-
-        Some(())
-    }
-
-    pub fn poll(&mut self, cx: &mut std::task::Context<'_>) -> Poll<io::Result<&mut [u8]>> {
-        let Some(stream) = self.inner.as_mut() else {
-            return Poll::Pending;
-        };
-
-        if let Poll::Ready(Err(e)) = self.writer.poll(cx, stream) {
-            self.inner.take();
-            return Poll::Ready(Err(e));
-        }
-
-        let read = match futures::ready!(self.reader.poll_packet(cx, stream)) {
-            Ok(r) => r,
-            Err(err) => {
-                self.inner.take();
-                return Poll::Ready(Err(err));
-            }
-        };
-
-        let Some(read) = crypto::decrypt(read, self.key) else {
-            self.inner.take();
-            return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
-        };
-
-        Poll::Ready(Ok(read))
-    }
-
-    pub fn close(&mut self) {
-        _ = self.inner.take();
-    }
-}
-
-impl futures::Stream for EncryptedStream {
-    type Item = io::Result<Vec<u8>>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        if self.is_terminated() {
-            return Poll::Ready(None);
-        }
-        self.poll(cx).map_ok(|v| v.to_vec()).map(Some)
-    }
-}
-
-impl futures::stream::FusedStream for EncryptedStream {
-    fn is_terminated(&self) -> bool {
-        self.inner.is_none()
-    }
-}
+pub type EncryptedStream = opfusk::Output<OsRng, libp2p::Stream>;
 
 #[derive(Debug)]
 pub struct Stream {
@@ -686,7 +609,7 @@ async fn upgrade_inbound_low(
             buffer[0] = packet::OK;
             stream.write_all(&buffer).await.map_err(IUpgradeError::WriteAuthPacket)?;
 
-            Ok(IncomingOrResponse::Response(EncryptedStream::new(stream, ss, buffer_cap)))
+            Ok(IncomingOrResponse::Response(EncryptedStream::new(stream, OsRng, ss, buffer_cap)))
         }
     }
 }

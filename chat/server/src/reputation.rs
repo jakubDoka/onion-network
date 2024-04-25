@@ -1,9 +1,7 @@
 use {
-    crate::api::Origin,
+    crate::api::{Origin, State},
     chain_api::NodeIdentity,
     chat_spec::ChatError,
-    codec::Codec,
-    handlers::FromRequestOwned,
     libp2p::futures::task::AtomicWaker,
     opfusk::PeerIdExt,
     std::{
@@ -16,20 +14,13 @@ use {
 #[macro_export]
 macro_rules! rate_map {
     ($($($key:ident)|* => $value:expr),* $(,)?) => {
-        |res| match $crate::reputation::extract_error(res) {
-            $(Some($(ChatError::$key)|*) => $value,)*
+        |res| match res {
+            $($(ChatError::$key)|* => $value,)*
             _ => -1,
         }
     };
 
     ($flat_cost:expr) => { |_| $flat_cost };
-}
-
-pub fn extract_error(res: &handlers::Response) -> Option<ChatError> {
-    match res {
-        handlers::Response::Failure(body) => ChatError::decode(&mut body.as_slice()),
-        _ => None,
-    }
 }
 
 #[derive(Clone)]
@@ -44,21 +35,25 @@ impl<H, F> Rated<H, F> {
     }
 }
 
-impl<'a, C, T, R, H, F> handlers::Handler<'a, C, (Origin, T), R> for Rated<H, F>
+impl<H, F, C, S, A, B, O> handlers::Handler<C, S, (Origin, A), B> for Rated<H, F>
 where
-    C: handlers::Context,
-    R: codec::Codec<'a> + Send,
-    T: FromRequestOwned<C>,
-    H: handlers::Handler<'a, C, T, R>,
-    F: Fn(&<H::Future as Future>::Output) -> i64 + Send + Sync + 'static + Clone,
-    Origin: FromRequestOwned<C> + Send + 'static,
+    H: handlers::Handler<C, S, A, B>,
+    H::Future: Future<Output = Result<O, ChatError>>,
+    S: handlers::Stream,
+    A: handlers::FromContext<C>,
+    (Origin, A): handlers::FromContext<C>,
+    B: handlers::FromStream<S>,
+    F: Clone + 'static + Send + Sync + FnOnce(ChatError) -> i64,
 {
     type Future = impl Future<Output = <H::Future as Future>::Output> + Send;
 
-    fn call_computed(self, (origin, args): (Origin, T), res: R) -> Self::Future {
+    fn call(self, (origin, args): (Origin, A), res: B) -> Self::Future {
         async move {
-            let res = self.handler.call_computed(args, res).await;
-            let severity = (self.rater)(&res);
+            let res = self.handler.call(args, res).await;
+            let severity = match res {
+                Ok(_) => -1,
+                Err(e) => (self.rater)(e),
+            };
             Rep::get().rate(origin.to_hash(), severity);
             res
         }

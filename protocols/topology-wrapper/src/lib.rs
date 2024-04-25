@@ -5,7 +5,7 @@
 
 pub use impls::{channel, new, Behaviour, EventReceiver, EventSender};
 use {
-    codec::{Buffer, Codec, WritableBuffer},
+    codec::{Buffer, Codec, Decode, Encode, WritableBuffer},
     libp2p::{multihash::Multihash, swarm::NetworkBehaviour, PeerId},
 };
 
@@ -134,7 +134,7 @@ pub mod collector {
 
     use {
         crate::{Update, World},
-        codec::Codec,
+        codec::Decode,
         libp2p::{
             futures::{stream::SelectAll, StreamExt},
             swarm::NetworkBehaviour,
@@ -379,7 +379,7 @@ pub mod muxer {
             buf: &[u8],
         ) -> std::task::Poll<std::io::Result<usize>> {
             if self.meta.is_none() {
-                use codec::Codec;
+                use codec::Decode;
                 if let Some((sig, meta)) = <([u8; 32], PacketMeta)>::decode(&mut &*buf) {
                     if sig == crate::INIT_TAG {
                         self.meta = Some(meta);
@@ -722,7 +722,7 @@ mod impls {
 mod impls {
     use {
         crate::{ExtraEvent, ExtraEventAndMeta, PacketKind, PacketMeta, PeerIdWrapper},
-        codec::Codec,
+        codec::Encode,
         libp2p::{
             futures::{AsyncWrite, SinkExt},
             swarm::{
@@ -1099,15 +1099,17 @@ mod impls {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PeerIdWrapper(pub PeerId);
 
-impl<'a> Codec<'a> for PeerIdWrapper {
+impl<'a> Decode<'a> for PeerIdWrapper {
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let read = Multihash::<64>::read(buffer);
+        read.ok().and_then(|mh| PeerId::from_multihash(mh).ok()).map(Self)
+    }
+}
+
+impl Encode for PeerIdWrapper {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         let mh = Multihash::from(self.0);
         mh.write(WritableBuffer { buffer }).ok()?;
         Some(())
-    }
-
-    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
-        let read = Multihash::<64>::read(buffer);
-        read.ok().and_then(|mh| PeerId::from_multihash(mh).ok()).map(Self)
     }
 }

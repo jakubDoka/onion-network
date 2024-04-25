@@ -1,8 +1,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![feature(maybe_uninit_uninit_array_transpose)]
+#![feature(maybe_uninit_as_bytes)]
 #![feature(slice_take)]
 
 #[cfg(feature = "derive")]
 pub use codec_derive::Codec;
+use core::mem::MaybeUninit;
 
 mod impls;
 #[cfg(feature = "std")]
@@ -24,21 +27,14 @@ pub mod unsafe_as_raw_bytes {
     }
 }
 
-//#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-//pub struct AsRawBytes<T>(pub T);
-//
-//impl<'a, T> Codec<'a> for AsRawBytes<T> {
-//    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
-//        unsafe_as_raw_bytes::encode(&self.0, buffer)
-//    }
-//
-//    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
-//        Some(AsRawBytes(unsafe_as_raw_bytes::decode(buffer)?))
-//    }
-//}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Reminder<'a>(pub &'a [u8]);
+
+impl Reminder<'_> {
+    pub fn to_owned(&self) -> ReminderOwned {
+        ReminderOwned(self.0.to_vec())
+    }
+}
 
 impl<'a> AsRef<[u8]> for Reminder<'a> {
     fn as_ref(&self) -> &[u8] {
@@ -46,7 +42,7 @@ impl<'a> AsRef<[u8]> for Reminder<'a> {
     }
 }
 
-pub trait Buffer: AsMut<[u8]> {
+pub trait Buffer {
     #[must_use = "handle the error"]
     fn push(&mut self, byte: u8) -> Option<()>;
     #[must_use = "handle the error"]
@@ -55,10 +51,9 @@ pub trait Buffer: AsMut<[u8]> {
     }
 }
 
-pub trait Codec<'a>: Sized {
+pub trait Encode {
     #[must_use = "handle the error"]
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()>;
-    fn decode(buffer: &mut &'a [u8]) -> Option<Self>;
 
     #[cfg(feature = "std")]
     fn to_bytes(&self) -> Vec<u8> {
@@ -82,14 +77,21 @@ pub trait Codec<'a>: Sized {
             }
         }
 
-        impl AsMut<[u8]> for LenCounter {
-            fn as_mut(&mut self) -> &mut [u8] {
-                unreachable!("LenCounter is not a buffer")
-            }
-        }
-
         let mut counter = LenCounter(0);
         self.encode(&mut counter).expect("to encode");
         counter.0
     }
+}
+
+pub trait Decode<'a>: Sized {
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self>;
+}
+
+pub trait DecodeOwned: for<'a> Decode<'a> {}
+impl<T: for<'a> Decode<'a>> DecodeOwned for T {}
+
+pub fn uninit_to_zeroed_slice<T>(uninit: &mut MaybeUninit<T>) -> &mut [u8] {
+    let bytes = uninit.as_bytes_mut();
+    bytes.iter_mut().for_each(|byte| _ = byte.write(0));
+    unsafe { std::mem::transmute(bytes) }
 }

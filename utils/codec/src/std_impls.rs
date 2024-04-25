@@ -1,5 +1,5 @@
 use {
-    crate::{Buffer, Codec},
+    crate::{Buffer, Decode, Encode},
     std::{
         borrow::{Borrow, Cow},
         collections::HashSet,
@@ -9,9 +9,7 @@ use {
     },
 };
 
-impl<'a, K: Codec<'a> + Eq + std::hash::Hash, V: Codec<'a>, H: BuildHasher + Default> Codec<'a>
-    for std::collections::HashMap<K, V, H>
-{
+impl<K: Encode, V: Encode, H: BuildHasher> Encode for std::collections::HashMap<K, V, H> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
         for (k, v) in self {
@@ -20,7 +18,11 @@ impl<'a, K: Codec<'a> + Eq + std::hash::Hash, V: Codec<'a>, H: BuildHasher + Def
         }
         Some(())
     }
+}
 
+impl<'a, K: Decode<'a> + Eq + std::hash::Hash, V: Decode<'a>, H: BuildHasher + Default> Decode<'a>
+    for std::collections::HashMap<K, V, H>
+{
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let len = usize::decode(buffer)?;
         if len * 2 > buffer.len() {
@@ -36,7 +38,7 @@ impl<'a, K: Codec<'a> + Eq + std::hash::Hash, V: Codec<'a>, H: BuildHasher + Def
     }
 }
 
-impl<'a, T: Codec<'a> + Eq + std::hash::Hash> Codec<'a> for HashSet<T> {
+impl<T: Encode> Encode for HashSet<T> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
         for i in self {
@@ -44,7 +46,9 @@ impl<'a, T: Codec<'a> + Eq + std::hash::Hash> Codec<'a> for HashSet<T> {
         }
         Some(())
     }
+}
 
+impl<'a, T: Decode<'a> + Eq + std::hash::Hash> Decode<'a> for HashSet<T> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let len = usize::decode(buffer)?;
         if len > buffer.len() {
@@ -58,30 +62,37 @@ impl<'a, T: Codec<'a> + Eq + std::hash::Hash> Codec<'a> for HashSet<T> {
     }
 }
 
-impl<'a> Codec<'a> for Box<[u8]> {
+impl Encode for Box<[u8]> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.as_ref().encode(buffer)
     }
+}
 
+impl<'a> Decode<'a> for Box<[u8]> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         Some(<&[u8]>::decode(buffer)?.into())
     }
 }
 
-impl<'a, T: ToOwned + Codec<'a>> Codec<'a> for Cow<'a, T>
+impl<T: ToOwned + Encode> Encode for Cow<'_, T>
 where
-    T::Owned: Codec<'a>,
+    T::Owned: Encode,
 {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.as_ref().borrow().encode(buffer)
     }
+}
 
+impl<'a, T: ToOwned + Decode<'a>> Decode<'a> for Cow<'a, T>
+where
+    T::Owned: Decode<'a>,
+{
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         Some(Cow::Owned(<T::Owned>::decode(buffer)?))
     }
 }
 
-impl<'a, K: Codec<'a> + Ord, V: Codec<'a>> Codec<'a> for std::collections::BTreeMap<K, V> {
+impl<K: Encode, V: Encode> Encode for std::collections::BTreeMap<K, V> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
         for (k, v) in self {
@@ -90,7 +101,9 @@ impl<'a, K: Codec<'a> + Ord, V: Codec<'a>> Codec<'a> for std::collections::BTree
         }
         Some(())
     }
+}
 
+impl<'a, K: Decode<'a> + Ord, V: Decode<'a>> Decode<'a> for std::collections::BTreeMap<K, V> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let len = usize::decode(buffer)?;
         if len * 2 > buffer.len() {
@@ -106,7 +119,7 @@ impl<'a, K: Codec<'a> + Ord, V: Codec<'a>> Codec<'a> for std::collections::BTree
     }
 }
 
-impl<'a, T: Codec<'a>> Codec<'a> for std::collections::VecDeque<T> {
+impl<T: Encode> Encode for std::collections::VecDeque<T> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
         for i in self {
@@ -114,7 +127,9 @@ impl<'a, T: Codec<'a>> Codec<'a> for std::collections::VecDeque<T> {
         }
         Some(())
     }
+}
 
+impl<'a, T: Decode<'a>> Decode<'a> for std::collections::VecDeque<T> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let len = usize::decode(buffer)?;
         if len > buffer.len() {
@@ -131,34 +146,38 @@ impl<'a, T: Codec<'a>> Codec<'a> for std::collections::VecDeque<T> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ReminderOwned(pub Vec<u8>);
 
-impl<'a> Codec<'a> for ReminderOwned {
-    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
-        buffer.extend_from_slice(&self.0)
-    }
-
-    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
-        Some(Self(std::mem::take(buffer).to_vec()))
-    }
-}
-
 impl AsRef<[u8]> for ReminderOwned {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
 }
 
-impl<'a> Codec<'a> for String {
+impl Encode for ReminderOwned {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        buffer.extend_from_slice(&self.0)
+    }
+}
+
+impl<'a> Decode<'a> for ReminderOwned {
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        Some(Self(std::mem::take(buffer).to_vec()))
+    }
+}
+
+impl Encode for String {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.as_str().encode(buffer)
     }
+}
 
+impl<'a> Decode<'a> for String {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let str = <&str>::decode(buffer)?;
         Some(str.to_string())
     }
 }
 
-impl<'a, T: Codec<'a>> Codec<'a> for Vec<T> {
+impl<T: Encode> Encode for Vec<T> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
         for i in self {
@@ -166,7 +185,9 @@ impl<'a, T: Codec<'a>> Codec<'a> for Vec<T> {
         }
         Some(())
     }
+}
 
+impl<'a, T: Decode<'a>> Decode<'a> for Vec<T> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let len = <usize>::decode(buffer)?;
         if len > buffer.len() {
@@ -180,7 +201,7 @@ impl<'a, T: Codec<'a>> Codec<'a> for Vec<T> {
     }
 }
 
-impl<'a, T: Codec<'a>> Codec<'a> for Arc<[T]> {
+impl<T: Encode> Encode for Arc<[T]> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
         for i in self.iter() {
@@ -188,7 +209,9 @@ impl<'a, T: Codec<'a>> Codec<'a> for Arc<[T]> {
         }
         Some(())
     }
+}
 
+impl<'a, T: Decode<'a>> Decode<'a> for Arc<[T]> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         Some(<Vec<T>>::decode(buffer)?.into())
     }
@@ -218,5 +241,17 @@ impl<'a, T: Buffer> io::Write for WritableBuffer<'a, T> {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+impl<A: smallvec::Array<Item = u8>> Buffer for smallvec::SmallVec<A> {
+    fn push(&mut self, byte: u8) -> Option<()> {
+        self.push(byte);
+        Some(())
+    }
+
+    fn extend_from_slice(&mut self, slice: &[u8]) -> Option<()> {
+        self.extend_from_slice(slice);
+        Some(())
     }
 }

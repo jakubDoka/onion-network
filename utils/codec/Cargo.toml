@@ -11,6 +11,7 @@ edition.workspace = true
 [dependencies]
 arrayvec = { version = "0.7.4", default-features = false, optional = true }
 codec-derive = { workspace = true, optional = true }
+smallvec = "1.13.2"
 
 [lints]
 workspace = true

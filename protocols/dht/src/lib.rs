@@ -2,10 +2,13 @@
 #![feature(let_chains)]
 pub use primitive_types::U256;
 use {
+    arrayvec::ArrayVec,
     libp2p::{swarm::NetworkBehaviour, Multiaddr, PeerId},
     opfusk::{PeerIdExt, ToPeerId},
     std::convert::Infallible,
 };
+
+pub type SharedRoutingTable = &'static spin::RwLock<RoutingTable>;
 
 pub type Filter = fn(
     &mut RoutingTable,
@@ -16,7 +19,7 @@ pub type Filter = fn(
 
 #[derive(Clone)]
 pub struct Behaviour {
-    pub table: RoutingTable,
+    pub table: SharedRoutingTable,
     filter: Filter,
 }
 
@@ -28,7 +31,7 @@ impl Default for Behaviour {
 
 impl Behaviour {
     pub fn new(filter: Filter) -> Self {
-        Self { table: RoutingTable::default(), filter }
+        Self { table: Box::leak(Box::default()), filter }
     }
 }
 
@@ -43,7 +46,7 @@ impl NetworkBehaviour for Behaviour {
         local_addr: &Multiaddr,
         remote_addr: &Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        (self.filter)(&mut self.table, peer, local_addr, remote_addr)?;
+        (self.filter)(&mut self.table.write(), peer, local_addr, remote_addr)?;
         Ok(libp2p::swarm::dummy::ConnectionHandler)
     }
 
@@ -66,7 +69,7 @@ impl NetworkBehaviour for Behaviour {
     ) -> Result<Vec<Multiaddr>, libp2p::swarm::ConnectionDenied> {
         if addresses.is_empty()
             && let Some(peer) = maybe_peer
-            && let Some(addr) = self.table.get(peer)
+            && let Some(addr) = self.table.read().get(peer)
         {
             return Ok(vec![addr.clone()]);
         }
@@ -108,34 +111,51 @@ impl RoutingTable {
     pub fn bulk_insert(&mut self, routes: impl IntoIterator<Item = Route>) {
         assert!(self.routes.is_empty());
         self.routes.extend(routes);
+        self.routes.sort_unstable_by_key(|r| r.id);
     }
 
     pub fn insert(&mut self, route: Route) {
-        self.remove(route.id.into());
-        self.routes.push(route);
+        let index = self.routes.binary_search_by_key(&route.id, |r| r.id);
+        match index {
+            Ok(index) => self.routes[index] = route,
+            Err(index) => self.routes.insert(index, route),
+        }
     }
 
     pub fn remove(&mut self, id: [u8; 32]) -> Option<Route> {
-        let index = self.routes.iter().position(|r| r.id == id.into())?;
-        Some(self.routes.remove(index))
+        let id = U256::from(id);
+        let index = self.routes.binary_search_by_key(&id, |r| r.id);
+        index.map(|index| self.routes.remove(index)).ok()
     }
 
     #[must_use]
     pub fn get(&self, id: PeerId) -> Option<&Multiaddr> {
         let id = id.to_hash();
-        let id: U256 = id.into();
-        Some(&self.routes.iter().find(|r| r.id == id)?.addr)
+        let id = U256::from(id);
+        let index = self.routes.binary_search_by_key(&id, |r| r.id);
+        index.map(|index| &self.routes[index].addr).ok()
     }
 
-    pub fn closest(&mut self, data: &[u8]) -> impl Iterator<Item = &Route> + '_ {
-        let hash = blake3::hash(data);
-        let id = U256::from(hash.as_bytes());
-        self.closest_low(id)
-    }
+    pub fn closest<const COUNT: usize>(&self, key: &[u8]) -> ArrayVec<U256, COUNT> {
+        let &key = blake3::hash(key).as_bytes();
+        let key = U256::from(key);
+        let mut slots = ArrayVec::<U256, COUNT>::new();
+        let mut iter = self.routes.iter().map(|r| r.id);
 
-    fn closest_low(&mut self, id: U256) -> impl Iterator<Item = &Route> + '_ {
-        self.routes.sort_unstable_by_key(|r| r.id ^ id);
-        self.routes.iter()
+        slots.extend(iter.by_ref().take(COUNT));
+        slots.sort_unstable_by_key(|&id| id ^ key);
+
+        for id in iter {
+            let distance = id ^ key;
+            if distance >= *slots.last().unwrap() ^ key {
+                continue;
+            }
+            slots.pop();
+            let point = slots.partition_point(|&slot| slot ^ key < distance);
+            slots.insert(point, id);
+        }
+
+        slots
     }
 }
 

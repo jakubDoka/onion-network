@@ -372,46 +372,46 @@ impl Node {
     }
 
     fn onion_request(&mut self, req: RawOnionRequest) {
-        let Some(sub) = self
-            .subscriptions
-            .iter_mut()
-            .find(|s| req.topic.as_ref().map_or(true, |t| s.topics.contains(t)))
-        else {
-            self.handle_topic_search(RequestInit::OnionRequest(req));
-            return;
-        };
+        //  let Some(sub) = self
+        //      .subscriptions
+        //      .iter_mut()
+        //      .find(|s| req.topic.as_ref().map_or(true, |t| s.topics.contains(t)))
+        //  else {
+        //      self.handle_topic_search(RequestInit::OnionRequest(req));
+        //      return;
+        //  };
 
-        let request = chat_spec::Request {
-            prefix: req.prefix,
-            id: req.id,
-            topic: req.topic,
-            body: Reminder(&req.payload),
-        };
+        //  let request = chat_spec::Request {
+        //      prefix: req.prefix,
+        //      id: req.id,
+        //      topic: req.topic,
+        //      body: Reminder(&req.payload),
+        //  };
 
-        sub.stream.write(request).unwrap();
-        self.pending_chat_requests.insert(req.id, req.response);
-        log::debug!("request sent, {:?}", req.id);
+        //  sub.stream.write(request).unwrap();
+        //  self.pending_chat_requests.insert(req.id, req.response);
+        //  log::debug!("request sent, {:?}", req.id);
     }
 
     fn subscription_request(&mut self, sub: SubscriptionInit) {
-        log::info!("Subscribing to {:?}", sub.topic);
-        let Some(subs) = self.subscriptions.iter_mut().find(|s| s.topics.contains(&sub.topic))
-        else {
-            self.handle_topic_search(RequestInit::Subscription(sub));
-            return;
-        };
+        //  log::info!("Subscribing to {:?}", sub.topic);
+        //  let Some(subs) = self.subscriptions.iter_mut().find(|s| s.topics.contains(&sub.topic))
+        //  else {
+        //      self.handle_topic_search(RequestInit::Subscription(sub));
+        //      return;
+        //  };
 
-        log::info!("Creating Subsctiption request to {:?}", sub.topic);
-        let request = chat_spec::Request {
-            prefix: rpcs::SUBSCRIBE,
-            id: sub.id,
-            topic: Some(sub.topic),
-            body: Reminder(&[]),
-        };
+        //  log::info!("Creating Subsctiption request to {:?}", sub.topic);
+        //  let request = chat_spec::Request {
+        //      prefix: rpcs::SUBSCRIBE,
+        //      id: sub.id,
+        //      topic: Some(sub.topic),
+        //      body: Reminder(&[]),
+        //  };
 
-        subs.stream.write(request).unwrap();
-        subs.subscriptions.insert(sub.id, sub.channel);
-        log::debug!("subscription request sent, {:?}", sub.id);
+        //  subs.stream.write(request).unwrap();
+        //  subs.subscriptions.insert(sub.id, sub.channel);
+        //  log::debug!("subscription request sent, {:?}", sub.id);
     }
 
     fn command(&mut self, command: RequestInit) {

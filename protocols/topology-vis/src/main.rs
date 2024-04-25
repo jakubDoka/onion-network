@@ -412,7 +412,7 @@ async fn main() {
             log::info!("dialing node: {:?} at {:?}", id, addr);
             let route = Route::new(id, addr);
             let peer_id = route.peer_id();
-            swarm.behaviour_mut().dht.table.insert(route);
+            swarm.behaviour_mut().dht.table.write().insert(route);
             swarm.behaviour_mut().collector.world_mut().0.borrow_mut().servers.insert(peer_id);
             swarm.behaviour_mut().collector.world_mut().0.borrow_mut().nodes.push(Node::new(
                 screen_width() / 2.,

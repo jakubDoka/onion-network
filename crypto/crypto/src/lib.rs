@@ -60,3 +60,7 @@ pub fn encrypt(data: &mut [u8], secret: SharedSecret, rng: impl CryptoRngCore) -
 
     unsafe { core::mem::transmute((tag, nonce)) }
 }
+
+pub fn xor_secrets(b: SharedSecret, a: SharedSecret) -> SharedSecret {
+    core::array::from_fn(|i| b[i] ^ a[i])
+}

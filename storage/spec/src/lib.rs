@@ -12,18 +12,15 @@
 pub use berkleamp_welch::{DecodeError, RebuildError, ResourcesError, Share as ReconstructPiece};
 use {
     arrayvec::ArrayVec,
-    codec::{Codec, Reminder},
+    codec::{Codec, Encode, Reminder},
     crypto::{
         proof::{Nonce, Proof},
         sign::Signature,
     },
-    rpc::CallId,
     std::{fmt::Write as _, net::SocketAddr},
 };
 
-pub mod handler;
 pub mod protocol;
-pub mod sorted_compact_vec;
 pub mod uri;
 pub mod rpcs {
     macro_rules! rpcs {
@@ -239,9 +236,4 @@ impl Encoding {
 pub struct Request<'a> {
     pub prefix: u8,
     pub body: Reminder<'a>,
-}
-
-#[derive(Codec)]
-pub enum StreamKind {
-    RequestStream(CallId),
 }

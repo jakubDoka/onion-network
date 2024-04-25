@@ -1,4 +1,4 @@
-use {codec::Codec, rand_core::CryptoRngCore};
+use {codec::Encode, rand_core::CryptoRngCore};
 
 pub type Nonce = u64;
 
@@ -33,22 +33,22 @@ pub struct Proof<T> {
 }
 
 impl<T> Proof<T> {
-    pub fn new<'a>(
+    pub fn new(
         kp: &crate::sign::Keypair,
         nonce: &mut Nonce,
         context: T,
         rng: impl CryptoRngCore,
     ) -> Self
     where
-        T: Codec<'a>,
+        T: Encode,
     {
         let signature = kp.sign(&Self::pack_payload(*nonce, &context), rng);
         Self { pk: kp.public_key(), nonce: nonce.next(), signature, context }
     }
 
-    fn pack_payload<'a>(nonce: Nonce, context: &T) -> crate::Hash
+    fn pack_payload(nonce: Nonce, context: &T) -> crate::Hash
     where
-        T: Codec<'a>,
+        T: Encode,
     {
         struct BlakeBuffer(blake3::Hasher);
 
@@ -76,9 +76,9 @@ impl<T> Proof<T> {
         hasher.0.finalize().into()
     }
 
-    pub fn verify<'a>(&self) -> bool
+    pub fn verify(&self) -> bool
     where
-        T: Codec<'a>,
+        T: Encode,
     {
         self.pk.verify(&Self::pack_payload(self.nonce, &self.context), &self.signature).is_ok()
     }

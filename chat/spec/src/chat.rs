@@ -2,7 +2,7 @@ use {
     super::Nonce,
     crate::{BlockNumber, ChatError, Identity},
     arrayvec::ArrayString,
-    codec::{Buffer, Codec, Reminder},
+    codec::{Buffer, Codec, Decode, Encode, Reminder, ReminderOwned},
     std::{fmt::Display, iter, ops::Range, str::FromStr, time::SystemTime},
 };
 
@@ -106,12 +106,13 @@ impl Display for Permissions {
     }
 }
 
-impl<'a> Codec<'a> for Permissions {
+impl Encode for Permissions {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
-        self.bits().encode(buffer)?;
-        Some(())
+        self.bits().encode(buffer)
     }
+}
 
+impl<'a> Decode<'a> for Permissions {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         u32::decode(buffer).and_then(Self::from_bits)
     }
@@ -160,10 +161,9 @@ impl Cursor {
 
 pub type ChatName = ArrayString<CHAT_NAME_CAP>;
 
-#[derive(Codec)]
-#[allow(clippy::large_enum_variant)]
-pub enum ChatEvent<'a> {
-    Message(Identity, Reminder<'a>),
+#[derive(Codec, Clone)]
+pub enum ChatEvent {
+    Message(Identity, ReminderOwned),
     Member(Identity, Member),
     MemberRemoved(Identity),
 }

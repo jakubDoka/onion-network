@@ -1,21 +1,20 @@
 use {
-    super::MissingTopic,
-    chain_api::Nonce,
+    chain_api::{NodeIdentity, Nonce},
     chat_spec::{
         retain_messages, rpcs, unpack_messages_ref, BlockNumber, ChatError, ChatEvent, ChatName,
         Cursor, Identity, Member, Message, Permissions, ReplVec, REPLICATION_FACTOR,
     },
-    codec::{Codec, Reminder},
+    codec::{Codec, Encode, Reminder, ReminderOwned},
     crypto::proof::{NonceInt, Proof},
     dht::U256,
-    libp2p::{futures::StreamExt, PeerId},
+    handlers::{BorDec, Dec, DecFixed},
     opfusk::{PeerIdExt, ToPeerId},
     std::{
         collections::{btree_map, BTreeMap, HashMap, HashSet, VecDeque},
         ops::DerefMut,
         sync::Arc,
     },
-    tokio::sync::{OwnedRwLockWriteGuard, RwLock},
+    tokio::sync::RwLock,
 };
 
 const MAX_MESSAGE_SIZE: usize = 1024 - 40;
@@ -40,32 +39,22 @@ fn advance_nonce(nonce: &mut Nonce, new_nonce: Nonce) -> Result<()> {
 
 pub async fn create(
     cx: crate::Context,
-    missing_topic: Option<MissingTopic>,
     name: ChatName,
-    identity: Identity,
+    DecFixed(identity): DecFixed<Identity>,
 ) -> Result<()> {
-    if let Some(missing_topic) = missing_topic {
-        handlers::ensure!(
-            let MissingTopic::Chat { mut lock, .. } = missing_topic,
-            ChatError::AlreadyExists
-        );
+    handlers::ensure!(
+        let dashmap::mapref::entry::Entry::Vacant(v) = cx.chats.entry(name),
+        ChatError::AlreadyExists
+    );
 
-        *lock = Chat::new(identity, name);
-    } else {
-        handlers::ensure!(
-            let dashmap::mapref::entry::Entry::Vacant(v) = cx.chats.entry(name),
-            ChatError::AlreadyExists
-        );
-
-        v.insert(Arc::new(RwLock::new(Chat::new(identity, name))));
-    }
+    v.insert(Arc::new(RwLock::new(Chat::new(identity, name))));
 
     Ok(())
 }
 
 pub async fn add_member(
     cx: crate::Context,
-    (proof, identity, member): (Proof<ChatName>, Identity, Member),
+    Dec((proof, identity, member)): Dec<(Proof<ChatName>, Identity, Member)>,
 ) -> Result<()> {
     let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
     let mut chat = chat.write().await;
@@ -109,7 +98,7 @@ pub async fn add_member(
 
 pub async fn kick_member(
     cx: crate::Context,
-    (proof, identity): (Proof<ChatName>, Identity),
+    Dec((proof, identity)): Dec<(Proof<ChatName>, Identity)>,
 ) -> Result<()> {
     let chat = cx.chats.get(&proof.context).ok_or(ChatError::NotFound)?.clone();
     {
@@ -146,7 +135,7 @@ pub async fn kick_member(
 pub async fn fetch_members(
     cx: crate::Context,
     name: ChatName,
-    (identity, count): (Identity, usize),
+    Dec((identity, count)): Dec<(Identity, usize)>,
 ) -> Result<Vec<(Identity, Member)>> {
     Ok(cx
         .chats
@@ -165,8 +154,9 @@ pub async fn send_message(
     cx: crate::Context,
     group: super::FullReplGroup,
     name: ChatName,
-    proof: Proof<Reminder<'_>>,
+    proof: BorDec<'_, Proof<Reminder<'_>>>,
 ) -> Result<()> {
+    let proof = proof.get();
     let msg = proof.context.0;
     handlers::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatError::MessageTooLarge);
     handlers::ensure!(proof.verify(), ChatError::InvalidProof);
@@ -202,7 +192,7 @@ pub async fn send_message(
         }
     }
 
-    cx.push_chat_event(name, ChatEvent::Message(identity, proof.context)).await;
+    cx.push_chat_event(name, ChatEvent::Message(identity, proof.context.to_owned())).await;
 
     Ok(())
 }
@@ -212,9 +202,9 @@ pub async fn vote(
     origin: super::Origin,
     group: super::ReplGroup,
     name: ChatName,
-    (hash, bn, agrees): (crypto::Hash, BlockNumber, bool),
+    Dec((hash, bn, agrees)): Dec<(crypto::Hash, BlockNumber, bool)>,
 ) -> Result<()> {
-    if !group.contains(&origin) {
+    if !group.contains(&origin.to_hash().into()) {
         return Err(ChatError::NoReplicator);
     }
 
@@ -260,12 +250,13 @@ pub async fn handle_message_block(
     origin: super::Origin,
     group: super::FullReplGroup,
     name: ChatName,
-    (number, base_hash, Reminder(block)): (BlockNumber, crypto::Hash, Reminder<'_>),
+    Dec((number, base_hash, ReminderOwned(block))): Dec<(BlockNumber, crypto::Hash, ReminderOwned)>,
 ) -> Result<()> {
     use ChatError::*;
 
     async fn apply_vote(chat: &mut Chat, cx: crate::Context, name: ChatName, vote: BlockVote) {
-        cx.repl_rpc_no_resp(name, rpcs::VOTE_BLOCK, (vote.block.hash, vote.number, vote.no == 0))
+        _ = cx
+            .repl_rpc::<()>(name, rpcs::VOTE_BLOCK, (vote.block.hash, vote.number, vote.no == 0))
             .await;
         if let Some((i, v)) =
             chat.votes.iter_mut().enumerate().find(|(_, v)| v.block.hash == vote.block.hash)
@@ -312,7 +303,7 @@ pub async fn handle_message_block(
 
         log::warn!(
             "not selected to finalize block: us: {} them: {} expected: {} block_len: {}",
-            cx.local_peer_id,
+            cx.local_peer_id.to_peer_id(),
             origin,
             finalizer.to_peer_id(),
             chat.buffer.len()
@@ -330,7 +321,7 @@ pub async fn handle_message_block(
             "extra messages in block: message_count: {:?} proposed: {:?} us: {} them: {}",
             message_count,
             proposed.len(),
-            cx.local_peer_id,
+            cx.local_peer_id.to_peer_id(),
             origin,
         );
         apply_vote(chat, cx, name, BlockVote { no: 1, ..vote }).await;
@@ -350,7 +341,7 @@ pub async fn fetch_chat_data(cx: crate::Context, name: ChatName, _: ()) -> Resul
 pub async fn fetch_messages(
     cx: crate::Context,
     name: ChatName,
-    mut cursor: Cursor,
+    Dec(mut cursor): Dec<Cursor>,
 ) -> Result<(Cursor, Vec<u8>)> {
     let chat = cx.chats.get(&name).ok_or(ChatError::NotFound)?.clone();
     let chat = chat.read().await;
@@ -399,24 +390,14 @@ pub async fn fetch_messages(
     Ok((cursor, slice[cursor.offset..].to_vec()))
 }
 
-pub async fn recover(
-    cx: crate::Context,
-    name: ChatName,
-    mut chat: OwnedRwLockWriteGuard<Chat>,
-) -> Result<()> {
+pub async fn recover(cx: crate::Context, name: ChatName) -> Result<()> {
+    let chat = cx.chats.entry(name).or_default().clone();
+
     let mut repl_chat_data = cx
-        .repl_rpc(name, rpcs::FETCH_CHAT_DATA, name)
-        .await
-        .collect::<ReplVec<_>>()
-        .await
+        .repl_rpc::<Result<MinimalChatData>>(name, rpcs::FETCH_CHAT_DATA, name)
+        .await?
         .into_iter()
-        .filter_map(|(peer, resp)| {
-            resp.as_deref()
-                .ok()
-                .and_then(|mut r| <_>::decode(&mut r))
-                .and_then(Result::<MinimalChatData>::ok)
-                .map(|resp| (peer, resp))
-        })
+        .filter_map(|(p, s)| s.ok().map(|s| (p, s)))
         .collect::<ReplVec<_>>();
 
     if repl_chat_data.len() <= REPLICATION_FACTOR.get() / 2 {
@@ -426,13 +407,14 @@ pub async fn recover(
     }
 
     let chat_data = reconstruct_chat(&mut repl_chat_data);
+    let mut chat = chat.write().await;
     chat.number = chat_data.number;
     chat.members = chat_data.members;
 
     Ok(())
 }
 
-fn reconstruct_chat(block_data: &mut ReplVec<(PeerId, MinimalChatData)>) -> MinimalChatData {
+fn reconstruct_chat(block_data: &mut ReplVec<(NodeIdentity, MinimalChatData)>) -> MinimalChatData {
     fn retain_outliers<T>(
         block_data: &mut ReplVec<T>,
         tolerance: impl Fn(usize) -> usize,
@@ -451,7 +433,7 @@ fn reconstruct_chat(block_data: &mut ReplVec<(PeerId, MinimalChatData)>) -> Mini
     }
 
     fn retain_members(
-        block_data: &mut ReplVec<(PeerId, MinimalChatData)>,
+        block_data: &mut ReplVec<(NodeIdentity, MinimalChatData)>,
     ) -> BTreeMap<Identity, Member> {
         let mut member_count_map = HashMap::<Identity, ReplVec<Member>>::new();
         for (id, other) in block_data.iter().flat_map(|(_, data)| &data.members) {
@@ -478,11 +460,8 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(data: &[u8], prev_hash: crypto::Hash) -> Self {
-        Self {
-            hash: crypto::hash::combine(crypto::hash::new(data), prev_hash),
-            data: data.to_vec(),
-        }
+    pub fn new(data: Vec<u8>, prev_hash: crypto::Hash) -> Self {
+        Self { hash: crypto::hash::combine(crypto::hash::new(&data), prev_hash), data }
     }
 }
 
@@ -531,8 +510,7 @@ impl Chat {
     ) {
         let selected =
             self.select_finalizer(group.clone(), self.number, self.buffer.len() - BLOCK_SIZE);
-        let us = cx.local_peer_id.try_to_hash().expect("we can trust us");
-        if selected != us {
+        if selected != cx.local_peer_id {
             return;
         }
 
@@ -549,23 +527,24 @@ impl Chat {
         };
 
         let latest_hash = self.get_latest_base_hash(self.number);
-        cx.repl_rpc_no_resp(
-            name,
-            rpcs::SEND_BLOCK,
-            (self.number, latest_hash, Reminder(&self.buffer[..actual_block_size])),
-        )
-        .await;
+        _ = cx
+            .repl_rpc::<()>(
+                name,
+                rpcs::SEND_BLOCK,
+                (self.number, latest_hash, Reminder(&self.buffer[..actual_block_size])),
+            )
+            .await;
 
         self.votes.push_back(BlockVote {
             number: self.number,
             yes: 1,
             no: 0,
-            block: Block::new(&self.buffer[..actual_block_size], latest_hash),
+            block: Block::new(self.buffer[..actual_block_size].to_vec(), latest_hash),
             votes: ReplVec::new(),
         });
     }
 
-    pub fn finalize_block(&mut self, _us: PeerId, number: BlockNumber, block: Block) {
+    pub fn finalize_block(&mut self, _us: NodeIdentity, number: BlockNumber, block: Block) {
         let mapping = unpack_messages_ref(&block.data).collect::<HashSet<_>>();
 
         let mut new_len = 0;
@@ -622,7 +601,7 @@ impl Chat {
 
     fn process_vote_decision(
         &mut self,
-        us: PeerId,
+        us: NodeIdentity,
         i: usize,
         number: BlockNumber,
         decision: Option<Option<Block>>,

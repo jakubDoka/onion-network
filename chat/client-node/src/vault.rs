@@ -1,7 +1,7 @@
 use {
     crate::encrypt,
     chat_spec::*,
-    codec::Codec,
+    codec::{Codec, DecodeOwned, Encode},
     crypto::{decrypt, proof::Nonce},
     double_ratchet::DoubleRatchet,
     onion::SharedSecret,
@@ -58,7 +58,7 @@ fn friends() -> SharedSecret {
     constant_key("friends")
 }
 
-fn get_encrypted<T: for<'a> Codec<'a>>(
+fn get_encrypted<T: DecodeOwned>(
     key: crypto::Hash,
     decryption_key: SharedSecret,
     values: &BTreeMap<crypto::Hash, Vec<u8>>,
@@ -66,7 +66,7 @@ fn get_encrypted<T: for<'a> Codec<'a>>(
     values.get(&key).and_then(|v| <_>::decode(&mut &*decrypt(&mut v.to_owned(), decryption_key)?))
 }
 
-fn get_plain<T: for<'a> Codec<'a>>(
+fn get_plain<T: DecodeOwned>(
     key: crypto::Hash,
     values: &BTreeMap<crypto::Hash, Vec<u8>>,
 ) -> Option<T> {
@@ -122,7 +122,7 @@ impl Vault {
         let value = match id {
             VCI::Chats => self.chats.to_bytes(),
             VCI::Theme => self.theme.to_bytes(),
-            VCI::Friend(name) => self.friends.get(&name).map(Codec::to_bytes)?,
+            VCI::Friend(name) => self.friends.get(&name).map(Encode::to_bytes)?,
             VCI::FriendNames => {
                 self.friends.iter().map(|(&n, f)| (n, f.id)).collect::<Vec<_>>().to_bytes()
             }

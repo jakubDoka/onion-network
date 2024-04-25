@@ -12,10 +12,12 @@ description = "a trivial network topology algotithm for libp2p"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+arrayvec.workspace = true
 blake3 = "1.5.0"
 libp2p = { workspace = true }
 opfusk.workspace = true
 primitive-types = "0.12.2"
+spin = "0.9.8"
 
 [lints]
 workspace = true

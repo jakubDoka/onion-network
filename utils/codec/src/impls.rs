@@ -1,5 +1,5 @@
 use {
-    crate::{Buffer, Codec, Reminder},
+    crate::{Buffer, Decode, Encode, Reminder},
     core::{
         convert::Infallible,
         marker::PhantomData,
@@ -31,61 +31,65 @@ impl Buffer for &mut [u8] {
     }
 }
 
-impl<'a, T: Codec<'a>> Codec<'a> for Range<T> {
+impl<T: Encode> Encode for Range<T> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.start.encode(buffer)?;
         self.end.encode(buffer)
     }
+}
 
+impl<'a, T: Decode<'a>> Decode<'a> for Range<T> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         Some(Self { start: T::decode(buffer)?, end: T::decode(buffer)? })
     }
 }
 
-impl<'a, 'b, T: Codec<'a>> Codec<'a> for &'b T {
+impl<'b, T: Encode> Encode for &'b T {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         (*self).encode(buffer)
     }
-
-    fn decode(_: &mut &'a [u8]) -> Option<Self> {
-        unreachable!("&T is not a valid codec")
-    }
 }
 
-impl Codec<'_> for Infallible {
+impl Encode for Infallible {
     fn encode(&self, _: &mut impl Buffer) -> Option<()> {
         match self {
             &s => match s {},
         }
     }
+}
 
-    fn decode(_: &mut &[u8]) -> Option<Self> {
+impl<'a> Decode<'a> for Infallible {
+    fn decode(_: &mut &'a [u8]) -> Option<Self> {
         None
     }
 }
 
-impl<'a, T> Codec<'a> for PhantomData<T> {
+impl<T> Encode for PhantomData<T> {
     fn encode(&self, _: &mut impl Buffer) -> Option<()> {
         Some(())
     }
+}
 
+impl<'a, T> Decode<'a> for PhantomData<T> {
     fn decode(_: &mut &'a [u8]) -> Option<Self> {
         Some(Self)
     }
 }
 
-impl<'a> Codec<'a> for SocketAddr {
-    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
-        self.ip().encode(buffer)?;
-        self.port().encode(buffer)
-    }
-
+impl<'a> Decode<'a> for SocketAddr {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         Some(Self::new(<IpAddr>::decode(buffer)?, <u16>::decode(buffer)?))
     }
 }
 
-impl<'a> Codec<'a> for IpAddr {
+impl Encode for SocketAddr {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        self.ip().encode(buffer)?;
+        self.port().encode(buffer)
+    }
+}
+
+impl Encode for IpAddr {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         match self {
             IpAddr::V4(v4) => {
@@ -98,7 +102,9 @@ impl<'a> Codec<'a> for IpAddr {
             }
         }
     }
+}
 
+impl<'a> Decode<'a> for IpAddr {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         match <u8>::decode(buffer)? {
             0 => std::net::Ipv4Addr::decode(buffer).map(IpAddr::V4),
@@ -108,29 +114,33 @@ impl<'a> Codec<'a> for IpAddr {
     }
 }
 
-impl<'a> Codec<'a> for std::net::Ipv4Addr {
+impl Encode for std::net::Ipv4Addr {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         buffer.extend_from_slice(&self.octets())
     }
+}
 
+impl<'a> Decode<'a> for std::net::Ipv4Addr {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let octets = <[u8; 4]>::decode(buffer)?;
         Some(Self::from(octets))
     }
 }
 
-impl<'a> Codec<'a> for std::net::Ipv6Addr {
+impl Encode for std::net::Ipv6Addr {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         buffer.extend_from_slice(&self.octets())
     }
+}
 
+impl<'a> Decode<'a> for std::net::Ipv6Addr {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let octets = <[u8; 16]>::decode(buffer)?;
         Some(Self::from(octets))
     }
 }
 
-impl<'a, R: Codec<'a>, E: Codec<'a>> Codec<'a> for Result<R, E> {
+impl<R: Encode, E: Encode> Encode for Result<R, E> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         match self {
             Ok(r) => {
@@ -143,18 +153,22 @@ impl<'a, R: Codec<'a>, E: Codec<'a>> Codec<'a> for Result<R, E> {
             }
         }
     }
+}
 
+impl<'a, R: Decode<'a>, E: Decode<'a>> Decode<'a> for Result<R, E> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let is_ok = <bool>::decode(buffer)?;
         Some(if is_ok { Ok(R::decode(buffer)?) } else { Err(E::decode(buffer)?) })
     }
 }
 
-impl Codec<'_> for () {
+impl Encode for () {
     fn encode(&self, _buffer: &mut impl Buffer) -> Option<()> {
         Some(())
     }
+}
 
+impl Decode<'_> for () {
     fn decode(_buffer: &mut &[u8]) -> Option<Self> {
         Some(())
     }
@@ -191,25 +205,29 @@ fn base128_decode(buffer: &mut &[u8]) -> Option<u64> {
 
 macro_rules! impl_int {
     ($($t:ty),*) => {$(
-            impl<'a> Codec<'a> for $t {
-                fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
-                    base128_encode(*self as u64, buffer)
-                }
-
-                fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
-                    base128_decode(buffer).map(|v| v as $t)
-                }
+        impl Encode for $t {
+            fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+                base128_encode(*self as u64, buffer)
             }
+        }
+
+        impl<'a> Decode<'a> for $t {
+            fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+                base128_decode(buffer)?.try_into().ok()
+            }
+        }
     )*};
 }
 
 impl_int!(u16, u32, u64, u128, usize);
 
-impl<'a> Codec<'a> for bool {
+impl Encode for bool {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         buffer.push(u8::from(*self))
     }
+}
 
+impl<'a> Decode<'a> for bool {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let Some((&bool_byte @ (0 | 1), rest)) = buffer.split_first() else {
             return None;
@@ -219,11 +237,13 @@ impl<'a> Codec<'a> for bool {
     }
 }
 
-impl<'a> Codec<'a> for u8 {
+impl Encode for u8 {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         buffer.push(*self)
     }
+}
 
+impl<'a> Decode<'a> for u8 {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let (&byte, rest) = buffer.split_first()?;
         *buffer = rest;
@@ -231,21 +251,25 @@ impl<'a> Codec<'a> for u8 {
     }
 }
 
-impl<'a> Codec<'a> for Reminder<'a> {
+impl Encode for Reminder<'_> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         buffer.extend_from_slice(self.0)
     }
+}
 
+impl<'a> Decode<'a> for Reminder<'a> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         Some(Self(core::mem::take(buffer)))
     }
 }
 
-impl<'a> Codec<'a> for &'a str {
+impl Encode for &str {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.as_bytes().encode(buffer)
     }
+}
 
+impl<'a> Decode<'a> for &'a str {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let bytes = <&[u8]>::decode(buffer)?;
         core::str::from_utf8(bytes).ok()
@@ -253,7 +277,8 @@ impl<'a> Codec<'a> for &'a str {
 }
 
 #[cfg(feature = "arrayvec")]
-impl<'a, T: Codec<'a>, const LEN: usize> Codec<'a> for arrayvec::ArrayVec<T, LEN> {
+#[cfg(feature = "arrayvec")]
+impl<T: Encode, const LEN: usize> Encode for arrayvec::ArrayVec<T, LEN> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
         for i in self {
@@ -261,7 +286,10 @@ impl<'a, T: Codec<'a>, const LEN: usize> Codec<'a> for arrayvec::ArrayVec<T, LEN
         }
         Some(())
     }
+}
 
+#[cfg(feature = "arrayvec")]
+impl<'a, T: Decode<'a>, const LEN: usize> Decode<'a> for arrayvec::ArrayVec<T, LEN> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let len = <usize>::decode(buffer)?;
         if len > LEN {
@@ -276,25 +304,28 @@ impl<'a, T: Codec<'a>, const LEN: usize> Codec<'a> for arrayvec::ArrayVec<T, LEN
 }
 
 #[cfg(feature = "arrayvec")]
-impl<'a, const LEN: usize> Codec<'a> for arrayvec::ArrayString<LEN> {
+impl<const LEN: usize> Encode for arrayvec::ArrayString<LEN> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.as_bytes().encode(buffer)
     }
+}
 
+#[cfg(feature = "arrayvec")]
+impl<'a, const LEN: usize> Decode<'a> for arrayvec::ArrayString<LEN> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let bytes = <&[u8]>::decode(buffer)?;
-        let str = core::str::from_utf8(bytes).ok()?;
-        Self::from(str).ok()
+        Self::from(core::str::from_utf8(bytes).ok()?).ok()
     }
 }
 
-impl<'a> Codec<'a> for &'a [u8] {
+impl Encode for [u8] {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;
-        buffer.extend_from_slice(self)?;
-        Some(())
+        buffer.extend_from_slice(self)
     }
+}
 
+impl<'a> Decode<'a> for &'a [u8] {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let len = <usize>::decode(buffer)?;
         if buffer.len() < len {
@@ -307,24 +338,34 @@ impl<'a> Codec<'a> for &'a [u8] {
     }
 }
 
-impl<'a, T: Codec<'a>, const SIZE: usize> Codec<'a> for [T; SIZE] {
+impl<T: Encode, const LEN: usize> Encode for [T; LEN] {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         for i in self {
             i.encode(buffer)?;
         }
         Some(())
     }
+}
 
+impl<'a, T: Decode<'a>, const LEN: usize> Decode<'a> for [T; LEN] {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
-        let tries = [(); SIZE].map(|()| <T>::decode(buffer));
-        if tries.iter().any(core::option::Option::is_none) {
-            return None;
+        let mut s = std::mem::MaybeUninit::<Self>::uninit().transpose();
+        for (i, v) in s.iter_mut().enumerate() {
+            match <T>::decode(buffer) {
+                Some(t) => _ = v.write(t),
+                None => {
+                    for j in &mut s[0..i] {
+                        unsafe { j.as_mut_ptr().drop_in_place() }
+                    }
+                    return None;
+                }
+            }
         }
-        Some(tries.map(|t| t.expect("to be some, since we checked")))
+        Some(unsafe { s.transpose().assume_init() })
     }
 }
 
-impl<'a, T: Codec<'a>> Codec<'a> for Option<T> {
+impl<T: Encode> Encode for Option<T> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         match self {
             Some(t) => {
@@ -334,7 +375,9 @@ impl<'a, T: Codec<'a>> Codec<'a> for Option<T> {
             None => false.encode(buffer),
         }
     }
+}
 
+impl<'a, T: Decode<'a>> Decode<'a> for Option<T> {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
         let is_some = <bool>::decode(buffer)?;
         Some(if is_some { Some(<T>::decode(buffer)?) } else { None })
@@ -344,15 +387,17 @@ impl<'a, T: Codec<'a>> Codec<'a> for Option<T> {
 macro_rules! derive_tuples {
     ($($($t:ident),*;)*) => {$(
         #[allow(non_snake_case)]
-        impl<'a, $($t: Codec<'a>),*> Codec<'a> for ($($t,)*) {
+        impl<$($t: Encode),*> Encode for ($($t,)*) {
             fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
                 let ($($t,)*) = self;
                 $($t.encode(buffer)?;)*
                 Some(())
             }
+        }
 
+        impl<'a, $($t: Decode<'a>),*> Decode<'a> for ($($t,)*) {
             fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
-                Some(($(<$t>::decode(buffer)?,)*))
+                Some(($($t::decode(buffer)?,)*))
             }
         }
     )*};

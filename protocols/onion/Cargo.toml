@@ -26,6 +26,7 @@ component-utils = { workspace = true }
 crypto = { workspace = true }
 codec = { workspace = true }
 arrayvec = "0.7.4"
+opfusk = { path = "../../crypto/opfusk" }
 
 [dev-dependencies]
 env_logger = "0.11.0"

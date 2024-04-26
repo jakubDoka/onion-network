@@ -254,6 +254,7 @@ impl Subscription {
     }
 
     pub async fn send_mail(&mut self, to: Identity, mail: impl Encode) -> anyhow::Result<()> {
+        log::info!("sending mail to {:?}", mail.to_bytes());
         self.request(rpcs::SEND_MAIL, Topic::Profile(to), mail).await
     }
 

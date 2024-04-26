@@ -341,7 +341,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     );
 
     let (member_list_button, member_list_popup) =
-        member_list_poppup(state, current_member, current_chat);
+        member_list_poppup(state, current_member, current_chat, is_friend);
 
     let message_input = create_node_ref::<Textarea>();
     let clear_input = move || {
@@ -485,6 +485,7 @@ fn member_list_poppup(
     state: crate::State,
     me: ReadSignal<Member>,
     name_sig: RwSignal<Option<ChatName>>,
+    is_friend: ReadSignal<bool>,
 ) -> (impl IntoView, impl IntoView) {
     let (hidden, set_hidden) = create_signal(true);
     let members = create_node_ref::<html::Table>();
@@ -495,6 +496,10 @@ fn member_list_poppup(
     let show = move |_| _ = (set_hidden(false), set_exhausted(false));
     let hide = move |_| set_hidden(true);
     let load_members = handled_async_closure("loading members", move || async move {
+        if is_friend.get_untracked() {
+            return Ok(());
+        }
+
         let name = name_sig.get_untracked().context("no chat selected")?;
         let last_identity = cursor.get_value();
         let fetched_members =

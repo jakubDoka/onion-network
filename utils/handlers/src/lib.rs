@@ -117,13 +117,13 @@ impl<T: DecodeOwned + Send + Sync, S: Stream> FromStream<S> for Dec<T> {
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
-            let buffer = Vec::<u8>::from_context(stream, len).await?;
+            let ReminderOwned(buffer) = ReminderOwned::from_context(stream, len).await?;
             Ok(Dec(T::decode(&mut &*buffer).ok_or(io::ErrorKind::InvalidData)?))
         }
     }
 }
 
-impl<S: Stream> FromStream<S> for Vec<u8> {
+impl<S: Stream> FromStream<S> for ReminderOwned {
     fn from_context(
         stream: &mut Option<S>,
         len: usize,
@@ -132,7 +132,7 @@ impl<S: Stream> FromStream<S> for Vec<u8> {
             let stream = stream.as_mut().ok_or(io::ErrorKind::InvalidInput)?;
             let mut buffer = vec![0u8; len];
             stream.read_exact(&mut buffer).await?;
-            Ok(buffer)
+            Ok(ReminderOwned(buffer))
         }
     }
 }
@@ -154,7 +154,7 @@ impl<'a, T: Decode<'a> + Sync, S: Stream> FromStream<S> for BorDec<'a, T> {
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
-            let buffer = Vec::<u8>::from_context(stream, len).await?;
+            let ReminderOwned(buffer) = ReminderOwned::from_context(stream, len).await?;
             if T::decode(&mut unsafe { std::mem::transmute(buffer.as_slice()) }).is_none() {
                 return Err(io::ErrorKind::InvalidData.into());
             }

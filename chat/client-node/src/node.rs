@@ -498,6 +498,8 @@ impl Subscription {
                             stream.write_all(header.as_bytes()).await?;
                             stream.flush().await?;
                         }
+                    } else {
+                        log::error!("invalid chat event received");
                     }
                     subs.insert(header.call_id, RegisteredCall::ChatSub(chat, ch));
                 }
@@ -518,6 +520,8 @@ impl Subscription {
                             stream.write_all(header.as_bytes()).await?;
                             stream.flush().await?;
                         }
+                    } else {
+                        log::error!("invalid mail received: {data:?}");
                     }
                     subs.insert(header.call_id, RegisteredCall::ProfileSub(id, ch));
                 }

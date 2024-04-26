@@ -135,7 +135,7 @@ pub async fn send_mail(
     cx: super::Context,
     origin: OnlineLocation,
     for_who: Identity,
-    mail: Vec<u8>,
+    ReminderOwned(mail): ReminderOwned,
 ) -> Result<()> {
     let push_mail = || {
         let mut profile = cx.profiles.get_mut(&for_who).ok_or(ChatError::NotFound)?;

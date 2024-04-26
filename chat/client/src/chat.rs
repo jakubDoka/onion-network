@@ -5,7 +5,7 @@ use {
     anyhow::Context,
     chat_client_node::{encode_direct_chat_name, MessageContent, RawChatMessage},
     chat_spec::{ChatError, ChatEvent, ChatName, Identity, Member, Permissions, Rank, UserName},
-    codec::{Codec, Reminder},
+    codec::{Decode, Encode, ReminderOwned},
     component_utils::DropFn,
     crypto::SharedSecret,
     leptos::{
@@ -37,7 +37,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     };
 
     let my_name = keys.name;
-    let my_id = keys.identity_hash();
+    let my_id = keys.identity();
     let requests = move || state.requests.get_value().unwrap();
     let selected: Option<ChatName> = leptos_router::use_query_map()
         .with_untracked(|m| m.get("id").and_then(|v| v.as_str().try_into().ok()))
@@ -111,7 +111,11 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
         match cursor.get_untracked() {
             Cursor::Normal(mut cursor) => {
-                for message in requests.fetch_and_decrypt_messages(chat, &mut cursor, state).await?
+                for message in requests
+                    .subscription_for(chat)
+                    .await?
+                    .fetch_and_decrypt_messages(chat, &mut cursor, state)
+                    .await?
                 {
                     prepend_message(message.sender, message.content);
                 }
@@ -132,17 +136,10 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         Ok(())
     });
 
-    on_cleanup(move || {
-        if let Some(chat) = current_chat.get_untracked() {
-            requests().unsubscribe(chat);
-        }
-    });
-
     let handle_event = move |event: ChatEvent, secret: SharedSecret| match event {
-        ChatEvent::Message(sender, Reminder(message)) => {
+        ChatEvent::Message(sender, ReminderOwned(mut message)) => {
             _ = sender; // TODO: verify this matches with the username
 
-            let mut message = message.to_vec();
             let Some(message) = crypto::decrypt(&mut message, secret) else {
                 log::warn!("message cannot be decrypted: {:?} {:?}", message, secret);
                 return;
@@ -186,10 +183,6 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     };
 
     create_effect(move |prev_chat| {
-        if let Some(Some(prev_chat)) = prev_chat {
-            requests().unsubscribe(prev_chat);
-        }
-
         let Some(chat) = current_chat() else {
             messages.get_untracked().unwrap().set_inner_html("");
             return None;
@@ -201,14 +194,15 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         let secret = state.chat_secret(chat)?;
 
         handled_spawn_local("reading chat messages", async move {
-            let mut sub = requests().subscribe(chat).await?;
+            // TODO: make subscription avare of its topic
+            let mut sub = requests()
+                .subscription_for(chat)
+                .await?
+                .subscribe_to_chat(chat)
+                .await
+                .context("subscribint to chat")?;
             log::info!("subscribed to chat: {:?}", chat);
-            while let Some(bytes) = sub.next().await {
-                let Some(event) = ChatEvent::decode(&mut &*bytes) else {
-                    log::warn!("received message that cannot be decoded");
-                    continue;
-                };
-
+            while let Some(event) = sub.next().await {
                 handle_event(event, secret);
             }
 
@@ -239,10 +233,15 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 Member::best()
             } else {
                 let m = requests()
+                    .subscription_for(chat)
+                    .await?
                     .fetch_my_member(chat, my_id)
                     .await
                     .inspect_err(|e| {
-                        if !matches!(e, ChatError::NotFound | ChatError::NotMember) {
+                        if !matches!(
+                            e.root_cause().downcast_ref(),
+                            Some(ChatError::NotFound | ChatError::NotMember)
+                        ) {
                             return;
                         }
                         state.vault.update(|v| _ = v.chats.remove(&chat));
@@ -293,7 +292,12 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 anyhow::bail!("chat already exists");
             }
 
-            requests().create_and_save_chat(chat, state).await.context("creating chat")?;
+            requests()
+                .subscription_for(chat)
+                .await?
+                .create_and_save_chat(chat, state)
+                .await
+                .context("creating chat")?;
 
             Ok(())
         },
@@ -316,7 +320,12 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 anyhow::bail!("friend or pending friend request already exists");
             }
 
-            requests().send_friend_request(name, state).await.context("sending friend request")
+            requests()
+                .subscription_for(name)
+                .await?
+                .send_friend_request(name, state)
+                .await
+                .context("sending friend request")
         },
     );
 
@@ -334,7 +343,11 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
             let invitee = chat_client_node::fetch_profile(my_name, name).await?;
             let chat = current_chat.get_untracked().context("no chat selected")?;
-            requests().invite_member(chat, invitee.sign, state, Member::worst()).await?;
+            requests()
+                .subscription_for(chat)
+                .await?
+                .invite_member(chat, invitee.sign, state, Member::worst())
+                .await?;
             log::info!("invited user: {:?}", name);
             Ok(())
         },
@@ -357,7 +370,11 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         handled_spawn_local("sending normal message", async move {
             let content = RawChatMessage { sender: my_name, content, identity: Default::default() }
                 .to_bytes();
-            requests().send_encrypted_message(chat, content, state).await?;
+            requests()
+                .subscription_for(chat)
+                .await?
+                .send_encrypted_message(chat, content, state)
+                .await?;
             clear_input();
             Ok(())
         });
@@ -365,7 +382,11 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let send_friend_message = move |to_user: UserName, content: String| {
         handled_spawn_local("sending hardened message", async move {
-            requests().send_frined_message(to_user, content.clone(), state).await?;
+            requests()
+                .subscription_for(to_user)
+                .await?
+                .send_frined_message(to_user, content.clone(), state)
+                .await?;
 
             append_message(my_name, content.clone());
             let message = db::Message {
@@ -489,7 +510,8 @@ fn member_list_poppup(
     let load_members = handled_async_closure("loading members", move || async move {
         let name = name_sig.get_untracked().context("no chat selected")?;
         let last_identity = cursor.get_value();
-        let fetched_members = requests().fetch_members(name, last_identity, 31).await?;
+        let fetched_members =
+            requests().subscription_for(name).await?.fetch_members(name, last_identity, 31).await?;
         set_exhausted(fetched_members.len() < 31);
 
         let members = members.get_untracked().expect("layout invariants");
@@ -547,7 +569,7 @@ fn member_view(
     me: ReadSignal<Member>,
     name: RwSignal<Option<ChatName>>,
 ) -> HtmlElement<html::Tr> {
-    let my_id = state.keys.get_untracked().unwrap().identity_hash();
+    let my_id = state.keys.get_untracked().unwrap().identity();
     let can_modify = me.get_untracked().rank < m.rank || my_id == identity;
     let root = create_node_ref::<html::Tr>();
     let start_edit = handled_callback("opening member edit", move |_| {
@@ -586,7 +608,7 @@ fn editable_member(
     let root = create_node_ref::<html::Tbody>();
 
     let ctx = "commiting member changes";
-    let is_me = state.keys.get_untracked().unwrap().identity_hash() == identity;
+    let is_me = state.keys.get_untracked().unwrap().identity() == identity;
     let kick_label = if is_me { "leave" } else { "kick" };
     let kick_ctx = if is_me { "leaving chat" } else { "kicking member" };
 
@@ -600,7 +622,7 @@ fn editable_member(
     let kick = handled_async_callback(kick_ctx, move |_| async move {
         let name = name_sig.get_untracked().context("no chat selected")?;
         let mut requests = state.requests.get_value().unwrap();
-        requests.kick_member(name, identity, state).await?;
+        requests.subscription_for(name).await?.kick_member(name, identity, state).await?;
         root.get_untracked().unwrap().remove();
         Ok(())
     });
@@ -621,7 +643,11 @@ fn editable_member(
         let updated_member = Member { rank, permissions, action_cooldown_ms, ..m };
 
         let mut requests = state.requests.get_value().unwrap();
-        requests.update_member(name, identity, updated_member, state).await?;
+        requests
+            .subscription_for(name)
+            .await?
+            .update_member(name, identity, updated_member, state)
+            .await?;
 
         cancel();
 

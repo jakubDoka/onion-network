@@ -15,11 +15,11 @@ pub use {
 };
 use {
     chain_types::{polkadot, Hash},
-    codec::{Codec, Decode, Encode},
+    codec::{Codec, Decode, DecodeOwned, Encode},
     crypto::{
         enc,
         rand_core::{OsRng, SeedableRng},
-        sign,
+        sign, SharedSecret,
     },
     futures::{SinkExt, StreamExt, TryStreamExt},
     libp2p::{multiaddr, Multiaddr, PeerId},
@@ -27,6 +27,7 @@ use {
     rand_chacha::ChaChaRng,
     std::{
         fs, io,
+        marker::PhantomData,
         net::{IpAddr, SocketAddr},
         str::FromStr,
         sync::Arc,
@@ -554,4 +555,30 @@ impl std::fmt::Display for ClapNodeIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex::encode(&self.0))
     }
+}
+
+#[derive(Codec)]
+pub struct Encrypted<T>(Vec<u8>, PhantomData<T>);
+
+impl<T> Encrypted<T> {
+    pub fn new(data: T, secret: SharedSecret) -> Self
+    where
+        T: Encode,
+    {
+        Self(encrypt(data.to_bytes(), secret), PhantomData)
+    }
+
+    pub fn decrypt(&mut self, secret: SharedSecret) -> Option<T>
+    where
+        T: DecodeOwned,
+    {
+        let data = crypto::decrypt(&mut self.0, secret)?;
+        T::decode(&mut &data[..])
+    }
+}
+
+pub fn encrypt(mut data: Vec<u8>, secret: SharedSecret) -> Vec<u8> {
+    let tag = crypto::encrypt(&mut data, secret, OsRng);
+    data.extend(tag);
+    data
 }

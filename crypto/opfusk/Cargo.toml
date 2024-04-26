@@ -16,6 +16,7 @@ libp2p-core = "0.41.2"
 libp2p-identity = "0.2.8"
 log.workspace = true
 multihash = "0.19.1"
+primitive-types = "0.12.2"
 rand_core = "0.6.4"
 thiserror.workspace = true
 

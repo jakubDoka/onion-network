@@ -1,18 +1,17 @@
 #![feature(slice_take)]
+#![feature(never_type)]
 #![feature(type_alias_impl_trait)]
 
 use {
-    crate::requests::Result,
     argon2::Argon2,
-    chain_api::Profile,
+    chain_api::{Nonce, Profile},
     chat_spec::*,
-    codec::Codec,
-    crypto::{decrypt, enc, sign},
-    libp2p::futures::channel::{mpsc, oneshot},
-    onion::SharedSecret,
-    rand::{rngs::OsRng, CryptoRng, RngCore},
-    std::{future::Future, marker::PhantomData, net::SocketAddr, pin, task::Poll, time::Duration},
-    storage_spec::{ClientError, NodeIdentity},
+    codec::{DecodeOwned, Encode},
+    crypto::{enc, sign},
+    libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    rand::{CryptoRng, RngCore},
+    std::{future::Future, io, pin, task::Poll, time::Duration},
+    storage_spec::ClientError,
     web_sys::{
         wasm_bindgen::{closure::Closure, JsCast},
         window,
@@ -40,65 +39,38 @@ pub fn encode_direct_chat_name(name: UserName) -> String {
     format!("{}{}", name, " ".repeat(32))
 }
 
-fn encrypt(mut data: Vec<u8>, secret: SharedSecret) -> Vec<u8> {
-    let tag = crypto::encrypt(&mut data, secret, OsRng);
-    data.extend(tag);
-    data
+pub trait DowncastNonce<O> {
+    fn downcast_nonce(self) -> anyhow::Result<Result<O, Nonce>>;
 }
 
-fn vault_chat_404(name: ChatName) -> impl FnOnce() -> String {
-    move || format!("chat {name} not found in vault")
-}
-
-pub type RequestChannel = mpsc::Receiver<RequestInit>;
-
-pub enum RequestInit {
-    OnionRequest(RawOnionRequest),
-    StorageRequest(RawStorageRequest),
-    SateliteRequest(RawSateliteRequest),
-    Subscription(SubscriptionInit),
-    EndSubscription(Topic),
-}
-
-impl RequestInit {
-    pub fn topic(&self) -> Topic {
-        match self {
-            Self::OnionRequest(r) => r.topic.unwrap(),
-            Self::Subscription(s) => s.topic,
-            Self::EndSubscription(t) => *t,
-            _ => unreachable!(),
-        }
+impl<O> DowncastNonce<O> for anyhow::Result<O> {
+    fn downcast_nonce(self) -> anyhow::Result<Result<O, Nonce>> {
+        self.map(Ok).or_else(|e| {
+            e.root_cause()
+                .downcast_ref::<ClientError>()
+                .and_then(|e| match e {
+                    ClientError::InvalidNonce(n) => Some(Err(*n)),
+                    _ => None,
+                })
+                .ok_or(e)
+        })
     }
 }
 
-pub struct SubscriptionInit {
-    pub id: CallId,
-    pub topic: Topic,
-    pub channel: mpsc::Sender<SubscriptionMessage>,
-}
-
-pub struct RawOnionRequest {
-    pub id: CallId,
-    pub topic: Option<Topic>,
-    pub prefix: u8,
-    pub payload: Vec<u8>,
-    pub response: oneshot::Sender<RawResponse>,
-}
-
-pub struct RawStorageRequest {
-    pub prefix: u8,
-    pub payload: Vec<u8>,
-    pub identity: NodeIdentity,
-    pub addr: SocketAddr,
-    pub response: Result<oneshot::Sender<libp2p::Stream>, oneshot::Sender<RawResponse>>,
-}
-
-pub struct RawSateliteRequest {
-    pub prefix: u8,
-    pub payload: Vec<u8>,
-    pub identity: NodeIdentity,
-    pub response: oneshot::Sender<RawResponse>,
-}
+//pub struct RawStorageRequest {
+//    pub prefix: u8,
+//    pub payload: Vec<u8>,
+//    pub identity: NodeIdentity,
+//    pub addr: SocketAddr,
+//    pub response: Result<oneshot::Sender<libp2p::Stream>, oneshot::Sender<RawResponse>>,
+//}
+//
+//pub struct RawSateliteRequest {
+//    pub prefix: u8,
+//    pub payload: Vec<u8>,
+//    pub identity: NodeIdentity,
+//    pub response: oneshot::Sender<RawResponse>,
+//}
 
 #[derive(Clone)]
 pub struct UserKeys {
@@ -122,11 +94,11 @@ impl UserKeys {
             }
 
             fn fill_bytes(&mut self, dest: &mut [u8]) {
-                let data = self.0.take(..dest.len()).expect("not enough entropy");
+                let data = (&mut self.0).take(..dest.len()).expect("not enough entropy");
                 dest.copy_from_slice(data);
             }
 
-            fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand::Error> {
+            fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> std::result::Result<(), rand::Error> {
                 self.fill_bytes(bytes);
                 Ok(())
             }
@@ -150,7 +122,7 @@ impl UserKeys {
         Self { name, sign, enc, vault }
     }
 
-    pub fn identity_hash(&self) -> Identity {
+    pub fn identity(&self) -> Identity {
         crypto::hash::new(self.sign.public_key())
     }
 
@@ -160,34 +132,6 @@ impl UserKeys {
             enc: crypto::hash::new(self.enc.public_key()),
         }
     }
-}
-
-#[derive(Codec)]
-pub struct Encrypted<T>(Vec<u8>, PhantomData<T>);
-
-impl<T> Encrypted<T> {
-    pub fn new(data: T, secret: SharedSecret) -> Self
-    where
-        T: for<'a> Codec<'a>,
-    {
-        Self(encrypt(data.to_bytes(), secret), PhantomData)
-    }
-
-    pub fn decrypt(&mut self, secret: SharedSecret) -> Option<T>
-    where
-        T: for<'a> Codec<'a>,
-    {
-        let data = decrypt(&mut self.0, secret)?;
-        T::decode(&mut &data[..])
-    }
-}
-
-pub async fn chat_timeout<F: Future>(f: F, dur: Duration) -> Result<F::Output, ChatError> {
-    timeout(f, dur).await.ok_or(ChatError::Timeout)
-}
-
-pub async fn satelite_timeout<F: Future>(f: F, dur: Duration) -> Result<F::Output, ClientError> {
-    timeout(f, dur).await.ok_or(ClientError::Timeout)
 }
 
 pub async fn timeout<F: Future>(f: F, duration: Duration) -> Option<F::Output> {
@@ -223,4 +167,38 @@ pub async fn timeout<F: Future>(f: F, duration: Duration) -> Option<F::Output> {
         Poll::Pending
     })
     .await
+}
+
+pub async fn send_request<R: DecodeOwned>(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    id: u8,
+    topic: impl Into<Topic>,
+    req: impl Encode,
+) -> anyhow::Result<R> {
+    send_request_low::<Result<R, ChatError>>(stream, id, topic, req).await?.map_err(Into::into)
+}
+
+pub async fn send_request_low<R: DecodeOwned>(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    id: u8,
+    topic: impl Into<Topic>,
+    req: impl Encode,
+) -> io::Result<R> {
+    let topic = topic.into();
+    let len = req.encoded_len();
+    let header = RequestHeader {
+        prefix: id,
+        call_id: [0; 4],
+        topic: topic.compress(),
+        len: (len as u32).to_be_bytes(),
+    };
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(&req.to_bytes()).await?;
+
+    let mut header = [0; std::mem::size_of::<ResponseHeader>()];
+    stream.read_exact(&mut header).await?;
+    let header = ResponseHeader::from_array(header);
+    let mut buf = vec![0; header.get_len()];
+    stream.read_exact(&mut buf).await?;
+    R::decode(&mut buf.as_slice()).ok_or(io::ErrorKind::InvalidData.into())
 }

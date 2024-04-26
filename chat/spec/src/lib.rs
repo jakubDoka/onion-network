@@ -103,23 +103,16 @@ pub enum ChatError {
     NoPermission,
     #[error("rate limited for next {0}ms")]
     RateLimited(u64),
-    #[error("connection dropped mid request")]
-    ChannelClosed,
     #[error("invalid response")]
     InvalidResponse,
     #[error("timeout")]
     Timeout,
-    #[error("context dropped")]
-    ContextDropped,
-    #[error("opposite party needs to send the message first")]
-    OppositePartyFirst,
 }
 
 impl From<io::Error> for ChatError {
     fn from(e: io::Error) -> Self {
         match e.kind() {
             io::ErrorKind::TimedOut => Self::Timeout,
-            io::ErrorKind::ConnectionReset => Self::ChannelClosed,
             _ => Self::InvalidResponse,
         }
     }
@@ -207,6 +200,27 @@ pub struct RequestHeader {
 }
 
 impl RequestHeader {
+    pub fn as_bytes(&self) -> &[u8; std::mem::size_of::<Self>()] {
+        unsafe { std::mem::transmute(self) }
+    }
+
+    pub fn from_array(arr: [u8; std::mem::size_of::<Self>()]) -> Self {
+        unsafe { std::mem::transmute(arr) }
+    }
+
+    pub fn get_len(&self) -> usize {
+        u32::from_be_bytes(self.len) as usize
+    }
+}
+
+#[repr(packed)]
+#[derive(Clone, Copy)]
+pub struct ResponseHeader {
+    pub call_id: [u8; 4],
+    pub len: [u8; 4],
+}
+
+impl ResponseHeader {
     pub fn as_bytes(&self) -> &[u8; std::mem::size_of::<Self>()] {
         unsafe { std::mem::transmute(self) }
     }

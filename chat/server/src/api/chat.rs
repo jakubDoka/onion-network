@@ -154,10 +154,9 @@ pub async fn send_message(
     cx: crate::Context,
     group: super::FullReplGroup,
     name: ChatName,
-    proof: BorDec<'_, Proof<Reminder<'_>>>,
+    Dec(proof): Dec<Proof<ReminderOwned>>,
 ) -> Result<()> {
-    let proof = proof.get();
-    let msg = proof.context.0;
+    let msg = &proof.context.0;
     handlers::ensure!(msg.len() <= MAX_MESSAGE_SIZE, ChatError::MessageTooLarge);
     handlers::ensure!(proof.verify(), ChatError::InvalidProof);
 
@@ -174,7 +173,7 @@ pub async fn send_message(
         advance_nonce(&mut sender.action, proof.nonce)?;
         sender.allocate_action(Permissions::SEND)?;
 
-        let message = Message { sender: identity, nonce, content: Reminder(msg) };
+        let message = Message { sender: identity, nonce, content: Reminder(&msg) };
         let encoded_len = message.encoded_len();
 
         if chat.buffer.len() + encoded_len + 2 > UNFINALIZED_BUFFER_CAP {
@@ -192,7 +191,7 @@ pub async fn send_message(
         }
     }
 
-    cx.push_chat_event(name, ChatEvent::Message(identity, proof.context.to_owned())).await;
+    cx.push_chat_event(name, ChatEvent::Message(identity, proof.context)).await;
 
     Ok(())
 }

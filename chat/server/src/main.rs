@@ -22,11 +22,11 @@ use {
         ChatStakeEvent, EnvConfig, Mnemonic, NodeIdentity, NodeKeys, NodeVec, StakeEvents,
     },
     chat_spec::{
-        rpcs, ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, Topic,
-        REPLICATION_FACTOR,
+        rpcs, ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, ResponseHeader,
+        Topic, REPLICATION_FACTOR,
     },
     codec::{Codec, DecodeOwned, Encode},
-    dashmap::DashMap,
+    dashmap::{mapref::entry::Entry, DashMap},
     dht::{Route, SharedRoutingTable},
     futures::channel::mpsc,
     handlers::CallId,
@@ -183,8 +183,9 @@ impl Server {
                 profiles: Default::default(),
                 online: Default::default(),
                 chats: Default::default(),
-                subscriptions: Default::default(),
+                chat_subs: Default::default(),
                 clients: Default::default(),
+                profile_subs: Default::default(),
                 stream_requests: stream_requests.0,
                 local_peer_id: swarm.local_peer_id().to_hash(),
                 dht: swarm.behaviour_mut().dht.table,
@@ -330,15 +331,12 @@ pub struct Behaviour {
     streaming: streaming::Behaviour,
 }
 
-#[derive(Codec)]
 pub enum ClientEvent {
-    Chat(CallId, ChatName, chat_spec::ChatEvent),
-    Profile(CallId, Vec<u8>),
+    Sub(CallId, Vec<u8>),
 }
 
 pub struct Client {
     events: mpsc::Sender<ClientEvent>,
-    profile_sub: Option<CallId>,
 }
 
 impl Client {
@@ -349,7 +347,7 @@ impl Client {
             log::warn!("client task failed with id {id:?}: {e}");
             context.clients.remove(&id);
         });
-        Self { events, profile_sub: None }
+        Self { events }
     }
 }
 
@@ -362,13 +360,15 @@ async fn run_client(
     async fn handle_event(
         stream: &mut EncryptedStream,
         event: ClientEvent,
-        buffer: &mut Vec<u8>,
     ) -> Result<(), io::Error> {
-        use codec::Encode;
-        buffer.clear();
-        event.encode(buffer).unwrap();
-        stream.write_all(&(buffer.len() as u32).to_be_bytes()).await?;
-        stream.write_all(&buffer).await
+        match event {
+            ClientEvent::Sub(cid, data) => {
+                let header =
+                    ResponseHeader { call_id: cid, len: (data.len() as u32).to_be_bytes() };
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(&data).await
+            }
+        }
     }
 
     async fn handle_request(
@@ -405,11 +405,10 @@ async fn run_client(
             .ok_or(io::ErrorKind::ConnectionAborted.into())
     }
 
-    let mut tmp_vec = Vec::new();
     let mut buf = [0u8; std::mem::size_of::<RequestHeader>()];
     loop {
         tokio::select! {
-            event = events.select_next_some() => handle_event(&mut stream, event, &mut tmp_vec).await?,
+            event = events.select_next_some() => handle_event(&mut stream, event).await?,
             res = stream.read_exact(&mut buf) => {
                 stream = handle_request(path_id, stream, res, buf, cx).await?;
             },
@@ -429,7 +428,8 @@ pub struct OwnedContext {
     profiles: DashMap<Identity, Profile>,
     online: DashMap<Identity, OnlineLocation>,
     chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
-    subscriptions: DashMap<Topic, HashMap<PathId, CallId>>,
+    chat_subs: DashMap<ChatName, HashMap<PathId, CallId>>,
+    profile_subs: DashMap<Identity, (PathId, CallId)>,
     stream_requests: mpsc::Sender<(NodeIdentity, oneshot::Sender<libp2p::Stream>)>,
     clients: DashMap<PathId, Client>,
     local_peer_id: NodeIdentity,
@@ -437,24 +437,26 @@ pub struct OwnedContext {
 }
 
 impl OwnedContext {
-    async fn push_chat_event(&self, context: ChatName, identity: chat_spec::ChatEvent) {
-        let topic = Topic::Chat(context);
-        let Some(mut subscriptions) = self.subscriptions.get_mut(&topic) else { return };
+    async fn push_chat_event(&self, topic: ChatName, ev: chat_spec::ChatEvent) {
+        let Some(mut subscriptions) = self.chat_subs.get_mut(&topic) else { return };
         subscriptions.retain(|path_id, call_id| {
             let Some(mut client) = self.clients.get_mut(path_id) else { return false };
-            let event = ClientEvent::Chat(*call_id, context, identity.clone());
+            let event = ClientEvent::Sub(*call_id, ev.to_bytes());
             client.events.try_send(event).is_ok()
         });
     }
 
     async fn push_profile_event(&self, for_who: Identity, mail: Vec<u8>) -> bool {
-        let topic = Topic::Profile(for_who);
-        let Some(mut subscriptions) = self.subscriptions.get_mut(&topic) else { return false };
-        subscriptions.retain(|path_id, call_id| {
-            let Some(mut client) = self.clients.get_mut(path_id) else { return false };
-            let event = ClientEvent::Profile(*call_id, mail.clone());
-            client.events.try_send(event).is_ok()
-        });
+        let Entry::Occupied(ent) = self.profile_subs.entry(for_who) else { return false };
+        let (path_id, call_id) = *ent.get();
+        let Some(mut client) = self.clients.get_mut(&path_id) else { return false };
+
+        let event = ClientEvent::Sub(call_id, mail.clone());
+        if client.events.try_send(event).is_err() {
+            ent.remove();
+            return false;
+        }
+
         true
     }
 

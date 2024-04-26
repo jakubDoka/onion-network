@@ -31,7 +31,7 @@ pub mod unsafe_as_raw_bytes {
 pub struct Reminder<'a>(pub &'a [u8]);
 
 impl Reminder<'_> {
-    pub fn to_owned(&self) -> ReminderOwned {
+    pub fn make_owned(&self) -> ReminderOwned {
         ReminderOwned(self.0.to_vec())
     }
 }

@@ -1,7 +1,7 @@
 use {
-    crate::encrypt,
+    chain_api::encrypt,
     chat_spec::*,
-    codec::{Codec, DecodeOwned, Encode},
+    codec::{Codec, Decode, DecodeOwned, Encode},
     crypto::{decrypt, proof::Nonce},
     double_ratchet::DoubleRatchet,
     onion::SharedSecret,
@@ -63,14 +63,16 @@ fn get_encrypted<T: DecodeOwned>(
     decryption_key: SharedSecret,
     values: &BTreeMap<crypto::Hash, Vec<u8>>,
 ) -> Option<T> {
-    values.get(&key).and_then(|v| <_>::decode(&mut &*decrypt(&mut v.to_owned(), decryption_key)?))
+    values
+        .get(&key)
+        .and_then(|v| Decode::decode(&mut &*decrypt(&mut v.to_owned(), decryption_key)?))
 }
 
 fn get_plain<T: DecodeOwned>(
     key: crypto::Hash,
     values: &BTreeMap<crypto::Hash, Vec<u8>>,
 ) -> Option<T> {
-    values.get(&key).and_then(|v| <_>::decode(&mut v.as_slice()))
+    values.get(&key).and_then(|v| Decode::decode(&mut v.as_slice()))
 }
 
 impl Vault {

@@ -11,6 +11,7 @@ use {
     },
     libp2p_identity::PeerId,
     multihash::Multihash,
+    primitive_types::U256,
     rand_core::CryptoRngCore,
     std::{io, ops::DerefMut, pin::Pin, task::Poll, u16, usize},
 };
@@ -515,6 +516,12 @@ impl ToPeerId for sign::Keypair {
 impl ToPeerId for crypto::Hash {
     fn to_peer_id(&self) -> PeerId {
         hash_to_peer_id(*self)
+    }
+}
+
+impl ToPeerId for U256 {
+    fn to_peer_id(&self) -> PeerId {
+        hash_to_peer_id((*self).into())
     }
 }
 

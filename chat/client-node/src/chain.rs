@@ -1,5 +1,4 @@
 use {
-    crate::requests::Result,
     chain_api::{Params, Profile, TransactionHandler},
     chat_spec::*,
     std::str::FromStr,

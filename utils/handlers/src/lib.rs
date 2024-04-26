@@ -1,4 +1,5 @@
 #![feature(impl_trait_in_assoc_type)]
+#![feature(slice_flatten)]
 #![feature(specialization)]
 #![feature(macro_metavar_expr)]
 #![allow(incomplete_features)]
@@ -193,7 +194,9 @@ where
             if let Some(ref mut stream) = stream {
                 let res = res.to_bytes();
                 if !res.is_empty() {
-                    stream.write_all(&id).await?;
+                    let resp = (id, (res.len() as u32).to_be_bytes());
+                    let resp: [[u8; 4]; 2] = resp.into();
+                    stream.write_all(resp.flatten()).await?;
                     stream.write_all(&res).await?;
                 }
             }

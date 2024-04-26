@@ -3,6 +3,7 @@
 #![feature(type_alias_impl_trait)]
 
 use {
+    anyhow::Context,
     argon2::Argon2,
     chain_api::{Nonce, Profile},
     chat_spec::*,
@@ -175,7 +176,13 @@ pub async fn send_request<R: DecodeOwned>(
     topic: impl Into<Topic>,
     req: impl Encode,
 ) -> anyhow::Result<R> {
-    send_request_low::<Result<R, ChatError>>(stream, id, topic, req).await?.map_err(Into::into)
+    timeout(
+        send_request_low::<Result<R, ChatError>>(stream, id, topic, req),
+        Duration::from_secs(5),
+    )
+    .await
+    .context("timeout")??
+    .map_err(Into::into)
 }
 
 pub async fn send_request_low<R: DecodeOwned>(
@@ -193,10 +200,15 @@ pub async fn send_request_low<R: DecodeOwned>(
         len: (len as u32).to_be_bytes(),
     };
     stream.write_all(header.as_bytes()).await?;
+    log::debug!("");
     stream.write_all(&req.to_bytes()).await?;
+    log::debug!("");
+    stream.flush().await?;
+    log::debug!("");
 
     let mut header = [0; std::mem::size_of::<ResponseHeader>()];
     stream.read_exact(&mut header).await?;
+    log::debug!("header: {:?}", header);
     let header = ResponseHeader::from_array(header);
     let mut buf = vec![0; header.get_len()];
     stream.read_exact(&mut buf).await?;

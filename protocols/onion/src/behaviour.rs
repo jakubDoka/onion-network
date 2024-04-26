@@ -249,9 +249,17 @@ impl Behaviour {
                 streaming::Event::OutgoingStream(peer, Err(err)) => 'b: {
                     let Some(request) = self.pending_requests.find_and_remove(|r| r.to == peer)
                     else {
-                        log::warn!("received unexpected invalid stream");
+                        if let Some(conn) =
+                            self.pending_connections.find_and_remove(|r| r.meta.to == peer)
+                        {
+                            self.error_streams.push(ClosingStream::new(conn.stream, MISSING_PEER));
+                            break 'b;
+                        }
+
+                        log::warn!("received unexpected invalid stream: {err}");
                         break 'b;
                     };
+
                     self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
                         Err(err.map_upgrade_err(|v| void::unreachable(v))),
                         request.path_id,
@@ -269,22 +277,22 @@ impl NetworkBehaviour for Behaviour {
 
     fn handle_established_inbound_connection(
         &mut self,
-        _: ConnectionId,
+        cid: ConnectionId,
         peer_id: PeerId,
         _: &libp2p::Multiaddr,
         _: &libp2p::Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(self.streaming.new_handler(peer_id, || ROUTING_PROTOCOL))
+        self.streaming.new_handler(peer_id, cid, || ROUTING_PROTOCOL)
     }
 
     fn handle_established_outbound_connection(
         &mut self,
-        _: ConnectionId,
+        cid: ConnectionId,
         peer_id: PeerId,
         _: &libp2p::Multiaddr,
         _: libp2p::core::Endpoint,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(self.streaming.new_handler(peer_id, || ROUTING_PROTOCOL))
+        self.streaming.new_handler(peer_id, cid, || ROUTING_PROTOCOL)
     }
 
     fn on_swarm_event(&mut self, se: libp2p::swarm::FromSwarm) {

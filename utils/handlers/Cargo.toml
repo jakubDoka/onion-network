@@ -11,10 +11,6 @@ edition.workspace = true
 [dependencies]
 codec.workspace = true
 futures.workspace = true
-libp2p.workspace = true
-log.workspace = true
-smallvec = "1.13.2"
-tokio = "1.37.0"
 
 [lints]
 workspace = true

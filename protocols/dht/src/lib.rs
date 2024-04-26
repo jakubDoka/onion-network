@@ -1,3 +1,4 @@
+#![feature(array_windows)]
 #![feature(trait_alias)]
 #![feature(let_chains)]
 pub use primitive_types::U256;
@@ -154,6 +155,8 @@ impl RoutingTable {
             let point = slots.partition_point(|&slot| slot ^ key < distance);
             slots.insert(point, id);
         }
+
+        debug_assert!(slots.array_windows().all(|&[a, b]| a ^ key <= b ^ key));
 
         slots
     }

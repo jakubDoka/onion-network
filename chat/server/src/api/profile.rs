@@ -113,6 +113,7 @@ pub async fn fetch_keys(cx: super::Context, identity: Identity, _: ()) -> Result
 }
 
 pub async fn fetch_vault(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {
+    log::info!("fetching vault for {:?}", identity);
     cx.profiles
         .get(&identity)
         .ok_or(ChatError::NotFound)
@@ -181,7 +182,7 @@ pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
         .await?
         .into_iter()
         .filter_map(|(_, r)| r.ok())
-        .filter(|r| crypto::hash::new(r.sign) == identity)
+        .filter(|r| r.sign.identity() == identity)
         .filter(|r| r.is_valid())
         .max_by_key(|r| r.vault.version)
         .ok_or(ChatError::NotFound)?;

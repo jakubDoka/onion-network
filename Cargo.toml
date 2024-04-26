@@ -53,7 +53,6 @@ merkle-tree = { path = "crypto/merkle-tree" }
 codec-derive = { path = "utils/codec-derive" }
 codec = { path = "utils/codec" }
 component-utils = { path = "utils/component-utils" }
-config = { path = "utils/config" }
 handlers = { path = "utils/handlers" }
 
 chain-api = { path = "chain/api", default-features = false }

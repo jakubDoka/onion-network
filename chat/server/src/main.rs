@@ -18,13 +18,12 @@ use {
     crate::api::{chat, profile, Handler as _, State},
     anyhow::Context as _,
     api::FullReplGroup,
-    chain_api::{
-        ChatStakeEvent, EnvConfig, Mnemonic, NodeIdentity, NodeKeys, NodeVec, StakeEvents,
-    },
+    chain_api::{ChatStakeEvent, NodeIdentity, NodeKeys, NodeVec, StakeEvents},
     chat_spec::{
         rpcs, ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, ResponseHeader,
         Topic, REPLICATION_FACTOR,
     },
+    clap::Parser,
     codec::{DecodeOwned, Encode},
     dashmap::{mapref::entry::Entry, DashMap},
     dht::{Route, SharedRoutingTable},
@@ -65,30 +64,28 @@ type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let (node_config, chain_config) =
-        config::combine_errors(NodeConfig::from_env(), EnvConfig::from_env())?;
-    let keys = NodeKeys::from_mnemonic(&node_config.mnemonic);
-    let (node_list, stake_events) = chain_config.connect_chat().await?;
-    reputation::Rep::report_at_background(keys.identity());
+    let node_config = NodeConfig::parse();
+    let keys = NodeKeys::from_mnemonic(&node_config.chain.mnemonic);
+    let (node_list, stake_events) = node_config.chain.clone().connect_chat().await?;
+    reputation::Rep::report_at_background(keys.identity(), node_config.chain.clone());
 
     Server::new(node_config, keys, node_list, stake_events).await?.await;
 
     Ok(())
 }
 
-config::env_config! {
-    struct NodeConfig {
-        /// The port to listen on and publish to chain
-        port: u16,
-        /// The port to listen on for websocket connections, clients expect `port + 1`
-        ws_port: u16,
-        /// The mnemonic to derive keys from, this is secret to the node
-        mnemonic: Mnemonic,
-        /// Idle connection is dropped after ms of inactivity
-        idle_timeout: u64,
-        /// Rpc request is dropped after ms of delay
-        rpc_timeout: u64,
-    }
+#[derive(Parser)]
+pub struct NodeConfig {
+    /// The port to listen on and publish to chain
+    port: u16,
+    /// The port to listen on for websocket connections, clients expect `port + 1`
+    ws_port: u16,
+    /// Idle connection is dropped after ms of inactivity
+    idle_timeout: u64,
+    /// Rpc request is dropped after ms of delay
+    rpc_timeout: u64,
+    #[clap(flatten)]
+    chain: chain_api::EnvConfig,
 }
 
 struct Server {
@@ -96,7 +93,7 @@ struct Server {
     context: Context,
     stake_events: StakeEvents<ChatStakeEvent>,
     stream_requests: mpsc::Receiver<(NodeIdentity, oneshot::Sender<libp2p::Stream>)>,
-    penidng_strame_requests: HashMap<NodeIdentity, Vec<oneshot::Sender<libp2p::Stream>>>,
+    penidng_stream_requests: HashMap<NodeIdentity, Vec<oneshot::Sender<libp2p::Stream>>>,
 }
 
 impl Server {
@@ -193,7 +190,7 @@ impl Server {
             swarm,
             stake_events,
             stream_requests: stream_requests.1,
-            penidng_strame_requests: Default::default(),
+            penidng_stream_requests: Default::default(),
         })
     }
 
@@ -245,7 +242,7 @@ impl Server {
                 peer,
                 stream,
             ))) => {
-                let Some(requests) = self.penidng_strame_requests.get_mut(&peer.to_hash()) else {
+                let Some(requests) = self.penidng_stream_requests.get_mut(&peer.to_hash()) else {
                     log::error!("we established stream with {peer} but we dont have any requests");
                     return;
                 };
@@ -290,7 +287,7 @@ impl Server {
 
     fn stream_request(&mut self, (id, sender): (NodeIdentity, oneshot::Sender<libp2p::Stream>)) {
         self.swarm.behaviour_mut().streaming.create_stream(id.to_peer_id());
-        self.penidng_strame_requests.entry(id).or_default().push(sender);
+        self.penidng_stream_requests.entry(id).or_default().push(sender);
     }
 }
 
@@ -366,7 +363,8 @@ async fn run_client(
                 let header =
                     ResponseHeader { call_id: cid, len: (data.len() as u32).to_be_bytes() };
                 stream.write_all(header.as_bytes()).await?;
-                stream.write_all(&data).await
+                stream.write_all(&data).await?;
+                stream.flush().await
             }
         }
     }
@@ -382,12 +380,24 @@ async fn run_client(
 
         let header = RequestHeader::from_array(id);
         let len = header.get_len();
+
+        if len > u16::MAX as usize {
+            log::warn!("peer {path_id:?} tried to send too big message");
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+
         let topic = Topic::decompress(header.topic);
 
         let repl_rgoup =
             cx.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
 
+        log::info!("repl_group: {repl_rgoup:?}");
+
         if !repl_rgoup.contains(&cx.local_peer_id.into()) {
+            log::warn!(
+                "peer {path_id:?} tried to access {topic:?} but it is not in the replication group, (prefix: {})",
+                header.prefix,
+            );
             return Err(io::ErrorKind::InvalidInput.into());
         }
 
@@ -401,7 +411,10 @@ async fn run_client(
 
         client_router(header.call_id, header.prefix, len, state, stream)
             .await
-            .ok_or(io::ErrorKind::PermissionDenied)??
+            .ok_or(io::ErrorKind::PermissionDenied)
+            .inspect_err(|_| {
+                log::warn!("user accessed prefix '{}' that us not recognised", header.prefix)
+            })??
             .ok_or(io::ErrorKind::ConnectionAborted.into())
     }
 
@@ -411,6 +424,7 @@ async fn run_client(
             event = events.select_next_some() => handle_event(&mut stream, event).await?,
             res = stream.read_exact(&mut buf) => {
                 stream = handle_request(path_id, stream, res, buf, cx).await?;
+                stream.flush().await?;
             },
         }
     }
@@ -484,6 +498,7 @@ impl OwnedContext {
         };
         stream.write_all(header.as_bytes()).await?;
         stream.write_all(msg).await?;
+        stream.flush().await?;
 
         if std::mem::size_of::<R>() == 0 {
             return Ok(unsafe { std::mem::zeroed() });
@@ -541,11 +556,11 @@ impl OwnedContext {
         Ok(streams
             .into_iter()
             .map(|(id, mut stream)| {
-                tokio::time::timeout(Duration::from_secs(3), async move {
-                    let mut buf = [0; 4];
+                tokio::time::timeout(Duration::from_secs(2), async move {
+                    let mut buf = [0; std::mem::size_of::<ResponseHeader>()];
                     stream.read_exact(&mut buf).await?;
-                    let len = u32::from_be_bytes(buf) as usize;
-                    let mut buf = vec![0; len];
+                    let header = ResponseHeader::from_array(buf);
+                    let mut buf = vec![0; header.get_len()];
                     stream.read_exact(&mut buf).await?;
                     Ok::<_, ChatError>((
                         id.into(),
@@ -570,7 +585,39 @@ impl OwnedContext {
             log::error!("we tried to replicate on group where we dont belong");
             return None;
         }
+        log::info!("replicating on group: {others:?}");
         Some(others)
+    }
+}
+
+pub async fn subscribe(
+    cx: Context,
+    topic: Topic,
+    user: PathId,
+    cid: CallId,
+    _: (),
+) -> Result<(), ChatError> {
+    match topic {
+        Topic::Chat(name) if cx.chats.contains_key(&name) => {
+            cx.chat_subs.entry(name).or_default().insert(user, cid);
+            Ok(())
+        }
+        Topic::Profile(id) => {
+            cx.profile_subs.insert(id, (user, cid));
+            Ok(())
+        }
+        _ => Err(ChatError::NotFound),
+    }
+}
+
+pub async fn unsubscribe(cx: Context, topic: Topic, user: PathId, _: ()) -> Result<(), ChatError> {
+    match topic {
+        Topic::Chat(name) => {
+            let mut subs = cx.chat_subs.get_mut(&name).ok_or(ChatError::NotFound)?;
+            subs.remove(&user).ok_or(ChatError::NotFound).map(drop)
+        }
+        // TODO: perform access control with signature
+        Topic::Profile(id) => cx.profile_subs.remove(&id).ok_or(ChatError::NotFound).map(drop),
     }
 }
 
@@ -589,6 +636,8 @@ handlers::router! { client_router(State):
     rpcs::FETCH_PROFILE => profile::fetch_keys.restore();
     rpcs::FETCH_VAULT => profile::fetch_vault.restore();
     rpcs::FETCH_VAULT_KEY => profile::fetch_vault_key.restore();
+    rpcs::SUBSCRIBE => subscribe.restore();
+    rpcs::UNSUBSCRIBE => unsubscribe.restore();
 }
 
 handlers::router! { server_router(State):

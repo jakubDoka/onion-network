@@ -12,8 +12,8 @@ use {
         core::upgrade::ReadyUpgrade,
         swarm::{
             dial_opts::{DialOpts, PeerCondition},
-            ConnectionHandler, ConnectionId, DialError, DialFailure, NetworkBehaviour,
-            NotifyHandler, StreamUpgradeError, SubstreamProtocol,
+            ConnectionDenied, ConnectionHandler, ConnectionId, DialError, DialFailure,
+            NetworkBehaviour, NotifyHandler, StreamUpgradeError, SubstreamProtocol,
         },
         PeerId, StreamProtocol,
     },
@@ -61,11 +61,19 @@ impl Behaviour {
         }
     }
 
-    pub fn new_handler(&mut self, peer: PeerId, proto: fn() -> StreamProtocol) -> Handler {
+    pub fn new_handler(
+        &mut self,
+        peer: PeerId,
+        cid: ConnectionId,
+        proto: fn() -> StreamProtocol,
+    ) -> Result<Handler, ConnectionDenied> {
         let conn = self.connections.entry(peer).or_default();
-        conn.pending_requests += conn.new_requests;
-        conn.new_requests = 0;
-        Handler::new(conn.pending_requests, proto)
+        if conn.id.is_some() && conn.id != Some(cid) {
+            return Err(ConnectionDenied::new("duplicate connection"));
+        }
+        conn.id = Some(cid);
+        conn.pending_requests += std::mem::take(&mut conn.new_requests);
+        Ok(Handler::new(conn.pending_requests, proto))
     }
 }
 
@@ -81,22 +89,22 @@ impl NetworkBehaviour for Behaviour {
 
     fn handle_established_inbound_connection(
         &mut self,
-        _: ConnectionId,
+        cid: ConnectionId,
         peer_id: PeerId,
         _: &libp2p::Multiaddr,
         _: &libp2p::Multiaddr,
-    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(self.new_handler(peer_id, || PROTOCOL_NAME))
+    ) -> Result<libp2p::swarm::THandler<Self>, ConnectionDenied> {
+        self.new_handler(peer_id, cid, || PROTOCOL_NAME)
     }
 
     fn handle_established_outbound_connection(
         &mut self,
-        _: ConnectionId,
+        cid: ConnectionId,
         peer_id: PeerId,
         _: &libp2p::Multiaddr,
         _: libp2p::core::Endpoint,
-    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        Ok(self.new_handler(peer_id, || PROTOCOL_NAME))
+    ) -> Result<libp2p::swarm::THandler<Self>, ConnectionDenied> {
+        self.new_handler(peer_id, cid, || PROTOCOL_NAME)
     }
 
     fn on_swarm_event(&mut self, event: libp2p::swarm::FromSwarm) {
@@ -110,7 +118,7 @@ impl NetworkBehaviour for Behaviour {
                 && conn.get().id == Some(connection_id) =>
             {
                 if !matches!(error, DialError::DialPeerConditionFalse(_)) {
-                    for _ in 0..=conn.get().total_requests() {
+                    for _ in 0..conn.get().total_requests() {
                         self.events.push(Event::OutgoingStream(
                             peer_id,
                             Err(StreamUpgradeError::Io(io::Error::other(error.to_string()))),
@@ -121,7 +129,7 @@ impl NetworkBehaviour for Behaviour {
             }
             libp2p::swarm::FromSwarm::ConnectionClosed(c) => {
                 if let Entry::Occupied(conn) = self.connections.entry(c.peer_id) {
-                    for _ in 0..=conn.get().total_requests() {
+                    for _ in 0..conn.get().total_requests() {
                         self.events.push(Event::OutgoingStream(
                             c.peer_id,
                             Err(StreamUpgradeError::Io(io::ErrorKind::ConnectionReset.into())),
@@ -131,8 +139,7 @@ impl NetworkBehaviour for Behaviour {
                 }
             }
             libp2p::swarm::FromSwarm::ConnectionEstablished(c) => {
-                let conn = self.connections.entry(c.peer_id).or_default();
-                conn.id = Some(c.connection_id);
+                self.connections.entry(c.peer_id).or_default().id = Some(c.connection_id);
             }
             _ => {}
         }
@@ -146,7 +153,10 @@ impl NetworkBehaviour for Behaviour {
     ) {
         self.events.push(match event {
             HEvent::Incoming(stream) => Event::IncomingStream(peer_id, stream),
-            HEvent::Outgoing(e) => Event::OutgoingStream(peer_id, e),
+            HEvent::Outgoing(e) => {
+                self.connections.entry(peer_id).and_modify(|c| c.pending_requests -= 1);
+                Event::OutgoingStream(peer_id, e)
+            }
         });
     }
 
@@ -249,7 +259,7 @@ impl ConnectionHandler for Handler {
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }
-        self.to_request = glass;
+        self.to_request += glass;
     }
 
     fn on_connection_event(

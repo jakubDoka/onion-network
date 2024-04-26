@@ -24,7 +24,6 @@ arrayvec = "0.7.4"
 topology-wrapper = { workspace = true }
 chain-api = { workspace = true, features = ["native"] }
 chat-spec = { workspace = true }
-config = { workspace = true }
 crypto = { workspace = true }
 dht = { workspace = true }
 onion = { workspace = true }
@@ -33,6 +32,7 @@ handlers.workspace = true
 component-utils.workspace = true
 opfusk = { workspace = true }
 streaming.workspace = true
+clap = { version = "4.5.4", features = ["derive", "env"] }
 
 [lints]
 workspace = true

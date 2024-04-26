@@ -1,5 +1,5 @@
 use {
-    crate::api::{Origin},
+    crate::api::Origin,
     chain_api::NodeIdentity,
     chat_spec::ChatError,
     libp2p::futures::task::AtomicWaker,
@@ -89,16 +89,20 @@ impl Rep {
         }
     }
 
-    pub fn report_at_background(us: NodeIdentity) {
+    pub fn report_at_background(us: NodeIdentity, chain: chain_api::EnvConfig) {
         tokio::spawn(async move {
-            if let Err(err) = Self::get().report_loop(us).await {
+            if let Err(err) = Self::get().report_loop(us, chain).await {
                 log::error!("in report loop: {:?}", err);
             }
         });
     }
 
-    async fn report_loop(&'static self, us: NodeIdentity) -> anyhow::Result<!> {
-        let client = chain_api::EnvConfig::from_env()?.client().await?;
+    async fn report_loop(
+        &'static self,
+        us: NodeIdentity,
+        chain: chain_api::EnvConfig,
+    ) -> anyhow::Result<!> {
+        let client = chain.client().await?;
         loop {
             let identity = poll_fn(|cx| {
                 let mut to_punish = self.to_punish.lock().unwrap();

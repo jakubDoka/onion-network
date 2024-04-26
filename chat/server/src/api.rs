@@ -6,6 +6,7 @@ use {
     dht::U256,
     handlers::CallId,
     libp2p::PeerId,
+    onion::PathId,
     opfusk::ToPeerId,
     std::future::Future,
 };
@@ -53,6 +54,11 @@ handlers::quick_impl_from_request! {State => [
         OnlineLocation::Local(_) => return None,
         OnlineLocation::Remote(p) => p.to_peer_id(),
     },
+    PathId => |state| match state.location {
+        OnlineLocation::Local(p) => p,
+        _ => return None,
+    },
+    CallId => |state| state.id,
 ]}
 
 pub trait Handler: Sized {
@@ -109,7 +115,7 @@ where
                     }
                     !matches
                 });
-                let count = resps.len() - prev_len;
+                let count = prev_len - resps.len();
                 if count > REPLICATION_FACTOR.get() / 2 {
                     pick = Some(base);
                     crate::reputation::Rep::get().rate(peer, -1);

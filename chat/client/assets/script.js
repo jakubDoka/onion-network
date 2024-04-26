@@ -106,6 +106,7 @@ Object.assign(window, { setup_resizable_textarea, MessageCursor });
 
 function setup_resizable_textarea() {
         const mi = document.getElementById('message-input');
+        if (!mi) return;
         mi.addEventListener('input', () => resize_textarea());
 }
 
@@ -136,7 +137,7 @@ const specialKeys = {
         ["Escape"]: "<esc>",
 };
 let keyBuffer = "";
-document.addEventListener("keydown", function (e) {
+document.addEventListener("keydown", function(e) {
         const shortcutElems = document.querySelectorAll("[shortcut]");
         const matched = [];
 

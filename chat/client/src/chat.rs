@@ -203,7 +203,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 .await
                 .context("subscribint to chat")?;
             log::info!("subscribed to chat: {:?}", chat);
-            while let Some(event) = sub.next().await {
+            while let Some(event) = sub.next().await
+                && current_chat.get_untracked() == Some(chat)
+            {
                 handle_event(event, secret);
             }
 
@@ -291,12 +293,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 anyhow::bail!("chat already exists");
             }
 
-            requests()
-                .subscription_for(chat)
-                .await?
-                .create_and_save_chat(chat, state)
-                .await
-                .context("creating chat")?;
+            requests().create_and_save_chat(chat, state).await.context("creating chat")?;
 
             Ok(())
         },
@@ -319,12 +316,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 anyhow::bail!("friend or pending friend request already exists");
             }
 
-            requests()
-                .subscription_for(name)
-                .await?
-                .send_friend_request(name, state)
-                .await
-                .context("sending friend request")
+            requests().send_friend_request(name, state).await.context("sending friend request")
         },
     );
 
@@ -342,11 +334,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
             let invitee = chat_client_node::fetch_profile(my_name, name).await?;
             let chat = current_chat.get_untracked().context("no chat selected")?;
-            requests()
-                .subscription_for(chat)
-                .await?
-                .invite_member(chat, invitee.sign, state, Member::worst())
-                .await?;
+            requests().invite_member(chat, invitee.sign, state, Member::worst()).await?;
             log::info!("invited user: {:?}", name);
             Ok(())
         },

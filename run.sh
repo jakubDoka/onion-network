@@ -6,8 +6,13 @@ is_running() { pgrep -f "$1" > /dev/null; }
 ensure_dir() { test -d $1 || mkdir -p $1; }
 
 ensure_dir tmp
-echo 42069 > tmp/port
-echo 0 > tmp/nonce
+
+reset_state() {
+	echo 42069 > tmp/port
+	echo 0 > tmp/nonce
+}
+
+reset_state
 
 alloc_port() {
 	PORT=$(cat tmp/port)
@@ -125,7 +130,8 @@ run_nodes() {
 		IDENTITY=$($TARGET_DIR/chain-helper export-identity "$MNEMONIC" | jq -r '.sign')
 		ENC_HAHS=$($TARGET_DIR/chain-helper export-identity "$MNEMONIC" | jq -r '.enc')
 		$TARGET_DIR/chain-helper register-node //Alice $IDENTITY $ENC_HAHS 127.0.0.1:$PORT $CHAIN_NODES \
-			&& $TARGET_DIR/$EXE > "$TMP_DIR/logs/$EXE/$i.log" 2>&1 &
+			&& $TARGET_DIR/$EXE $PORT $WS_PORT $IDLE_TIMEOUT $RPC_TIMEOUT "$MNEMONIC" \
+				$CHAIN_NODES > "$TMP_DIR/logs/$EXE/$i.log" 2>&1 &
 	done
 }
 run_chat_servers() { run_nodes chat-server $NODE_COUNT; }

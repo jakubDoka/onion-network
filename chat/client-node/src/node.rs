@@ -48,7 +48,7 @@ fn next_call_id() -> CallId {
 
 pub struct Node {
     swarm: Swarm<Behaviour>,
-    pending_streams: HashMap<PathId, oneshot::Sender<(NodeIdentity, EncryptedStream)>>,
+    pending_streams: HashMap<(PeerId, PathId), oneshot::Sender<(NodeIdentity, EncryptedStream)>>,
     requests: mpsc::Receiver<NodeRequest>,
 }
 
@@ -245,9 +245,9 @@ impl Node {
                 stream,
                 id,
             ))) => {
-                if let Some(tx) = self.pending_streams.remove(&id) {
-                    if let Ok((stream, id)) = stream {
-                        tx.send((id.to_hash(), stream)).ok();
+                if let Ok((stream, peer)) = stream {
+                    if let Some(tx) = self.pending_streams.remove(&(peer, id)) {
+                        tx.send((peer.to_hash(), stream)).ok();
                     }
                 }
             }
@@ -261,7 +261,7 @@ impl Node {
                 let beh = self.swarm.behaviour_mut();
                 let route = pick_route(topic, &beh.key_share.keys, beh.chat_dht.table).unwrap();
                 let id = beh.onion.open_path(route);
-                self.pending_streams.insert(id, tx);
+                self.pending_streams.insert((route[0].1, id), tx);
             }
         }
     }
@@ -338,7 +338,9 @@ impl NodeHandle {
         let replicatios =
             self.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
 
-        for repl in replicatios {
+        log::debug!("replicatios: {:?}", replicatios);
+
+        for repl in replicatios.clone() {
             if let Some(sub) = self.subs.borrow().get(&NodeIdentity::from(repl)) {
                 return Ok(sub.clone());
             }
@@ -350,6 +352,7 @@ impl NodeHandle {
             .await
             .map_err(|_| io::ErrorKind::ConnectionReset)?;
         let (node, stream) = rx.await.map_err(|_| io::ErrorKind::ConnectionAborted)?;
+        debug_assert!(replicatios.contains(&node.into()));
         let sub = Subscription::new(stream, self.clone(), node);
         self.subs.borrow_mut().insert(node, sub.clone());
         Ok(sub)
@@ -457,6 +460,7 @@ impl Subscription {
             let header = RequestHeader { prefix, call_id, topic: topic.compress(), len };
             stream.write_all(header.as_bytes()).await?;
             stream.write_all(&body).await?;
+            stream.flush().await?;
             subs.insert(call_id, rc);
 
             Ok(())
@@ -492,6 +496,7 @@ impl Subscription {
                                 len: [0; 4],
                             };
                             stream.write_all(header.as_bytes()).await?;
+                            stream.flush().await?;
                         }
                     }
                     subs.insert(header.call_id, RegisteredCall::ChatSub(chat, ch));
@@ -511,6 +516,7 @@ impl Subscription {
                                 len: [0; 4],
                             };
                             stream.write_all(header.as_bytes()).await?;
+                            stream.flush().await?;
                         }
                     }
                     subs.insert(header.call_id, RegisteredCall::ProfileSub(id, ch));

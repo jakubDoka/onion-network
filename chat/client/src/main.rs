@@ -1,4 +1,5 @@
 #![feature(iter_collect_into)]
+#![feature(let_chains)]
 #![allow(non_snake_case)]
 #![feature(mem_copy_fn)]
 #![feature(macro_metavar_expr)]

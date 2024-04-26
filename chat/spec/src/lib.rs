@@ -47,6 +47,7 @@ pub mod rpcs {
         READ_MAIL;
         INSERT_TO_VAULT;
         REMOVE_FROM_VAULT;
+
         FETCH_VAULT;
         FETCH_VAULT_KEY;
 

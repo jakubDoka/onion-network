@@ -71,6 +71,11 @@ impl Cmd {
                 )
                 .await?;
 
+                if client.joined(node_dientity.0).await? {
+                    eprintln!("Node already registered");
+                    return Ok(());
+                }
+
                 let nonce = client.get_nonce().await? + nonce;
                 client.join(node_dientity.0, node_enc_hash.0, addr.into(), nonce).await?;
             }

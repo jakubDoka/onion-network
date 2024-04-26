@@ -326,6 +326,12 @@ impl<S: TransactionHandler> Client<S> {
         let nonce = self.get_nonce().await?;
         self.vote(source, target, nonce).await
     }
+
+    pub async fn joined(&self, node_dientity: NodeIdentity) -> Result<bool> {
+        let latest = self.inner.client.storage().at_latest().await?;
+        let q = chain_types::storage().chat_staker().addresses(node_dientity);
+        latest.fetch(&q).await.map(|o| o.is_some())
+    }
 }
 
 // TODO: transition to generating keys from mnemonic
@@ -375,21 +381,20 @@ impl NodeKeys {
     }
 }
 
-config::env_config! {
-    struct EnvConfig {
-        /// chain nodes to connect to, its a comma separated list for redundancy, this a rpc url
-        /// like `wss://polkadot.api.onfinality.io/public-ws`
-        chain_nodes: config::List<String>,
-        /// account which pays the stake for the node
-        mnemonic: Mnemonic,
-    }
+#[derive(clap::Parser, Clone)]
+pub struct EnvConfig {
+    /// account which pays the stake for the node
+    pub mnemonic: Mnemonic,
+    /// chain nodes to connect to, its a comma separated list for redundancy, this a rpc url
+    /// like `wss://polkadot.api.onfinality.io/public-ws`
+    chain_nodes: Vec<String>,
 }
 
 impl EnvConfig {
     pub async fn client(&self) -> anyhow::Result<Client<Keypair>> {
         let account = Keypair::from_phrase(&self.mnemonic, None)?;
 
-        for node in self.chain_nodes.0.iter() {
+        for node in self.chain_nodes.iter() {
             let Ok(client) = Client::with_signer(node, account.clone())
                 .await
                 .inspect_err(|e| log::warn!("connecting chain client: {e:#}"))
@@ -427,7 +432,7 @@ impl EnvConfig {
         let (mut chain_events_tx, stake_events) = futures::channel::mpsc::channel(0);
         let account = Keypair::from_phrase(&mnemonic, None)?;
 
-        let mut others = chain_nodes.0.into_iter();
+        let mut others = chain_nodes.into_iter();
 
         let (node_list, client) = 'a: {
             for node in others.by_ref() {

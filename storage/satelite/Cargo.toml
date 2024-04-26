@@ -31,7 +31,6 @@ chain-api = { workspace = true, features = ["native"] }
 storage-spec = { workspace = true }
 topology-wrapper = { workspace = true }
 component-utils = { workspace = true }
-config = { workspace = true }
 handlers.workspace = true
 codec.workspace = true
 opfusk.workspace = true

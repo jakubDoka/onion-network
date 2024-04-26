@@ -4,7 +4,6 @@ use {
     chain_api::NodeIdentity,
     chat_spec::*,
     codec::{Decode, DecodeOwned, Encode},
-    component_utils::PacketWriter,
     crypto::{
         enc,
         proof::{Nonce, Proof},
@@ -15,7 +14,6 @@ use {
         core::upgrade::Version,
         futures::{
             channel::{mpsc, oneshot},
-            stream::FuturesUnordered,
             AsyncReadExt, AsyncWriteExt, FutureExt, SinkExt, StreamExt,
         },
         swarm::{NetworkBehaviour, SwarmEvent},
@@ -50,9 +48,6 @@ fn next_call_id() -> CallId {
 
 pub struct Node {
     swarm: Swarm<Behaviour>,
-
-    pending_chat_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
-    _pending_rpc_requests: HashMap<CallId, oneshot::Sender<RawResponse>>,
     pending_streams: HashMap<PathId, oneshot::Sender<(NodeIdentity, EncryptedStream)>>,
     requests: mpsc::Receiver<NodeRequest>,
 }
@@ -84,8 +79,7 @@ impl Node {
         );
 
         let (commands_rx, requests) = mpsc::channel(10);
-        let mut request_dispatch =
-            NodeHandle::new(commands_rx, swarm.behaviour_mut().chat_dht.table);
+        let handle = NodeHandle::new(commands_rx, swarm.behaviour_mut().chat_dht.table);
         let chain_api = chain_node(keys.name).await?;
         let node_request = chain_api.list_chat_nodes();
         let satelite_request = chain_api.list_satelite_nodes();
@@ -231,21 +225,15 @@ impl Node {
         let _ = vault.theme.apply();
 
         let id = profile_stream_peer.to_hash();
-        let sub = Subscription::new(profile_stream, request_dispatch.clone(), id);
-        request_dispatch.subs.borrow_mut().insert(id, sub);
+        let sub = Subscription::new(profile_stream, handle.clone(), id);
+        handle.subs.borrow_mut().insert(id, sub);
 
         set_state!(ChatRun);
 
         Ok((
-            Self {
-                swarm,
-                pending_chat_requests: Default::default(),
-                _pending_rpc_requests: Default::default(),
-                pending_streams: Default::default(),
-                requests,
-            },
+            Self { swarm, pending_streams: Default::default(), requests },
             vault,
-            request_dispatch,
+            handle,
             vault_nonce,
             mail_action.max(1),
         ))
@@ -409,7 +397,13 @@ impl Subscription {
         topic: impl Into<Topic>,
         body: impl Encode,
     ) -> anyhow::Result<R> {
-        self.request_low::<Result<R, ChatError>>(prefix, topic, body).await?.map_err(Into::into)
+        crate::timeout(
+            self.request_low::<Result<R, ChatError>>(prefix, topic, body),
+            Duration::from_secs(3),
+        )
+        .await
+        .context("timeout")??
+        .map_err(Into::into)
     }
 
     pub async fn request_low<R: DecodeOwned>(

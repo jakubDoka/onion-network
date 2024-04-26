@@ -390,7 +390,7 @@ impl EnvConfig {
         let account = Keypair::from_phrase(&self.mnemonic, None)?;
 
         for node in self.chain_nodes.0.iter() {
-            let Ok(client) = Client::with_signer(&node, account.clone())
+            let Ok(client) = Client::with_signer(node, account.clone())
                 .await
                 .inspect_err(|e| log::warn!("connecting chain client: {e:#}"))
             else {
@@ -553,7 +553,7 @@ impl FromStr for ClapNodeIdentity {
 
 impl std::fmt::Display for ClapNodeIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(&self.0))
+        write!(f, "{}", hex::encode(self.0))
     }
 }
 

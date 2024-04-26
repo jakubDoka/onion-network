@@ -412,3 +412,4 @@ mod tests {
         assert_eq!(writer.guard().write(buf), None);
     }
 }
+

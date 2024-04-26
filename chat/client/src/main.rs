@@ -19,7 +19,7 @@ use {
         RequestContext, UserKeys, Vault, VaultComponentId,
     },
     chat_spec::{ChatName, UserName},
-    codec::{Decode, Reminder, ReminderOwned},
+    codec::{Decode, ReminderOwned},
     leptos::*,
     leptos_router::{Route, Router, Routes, A},
     libp2p::futures::{FutureExt, StreamExt},
@@ -105,7 +105,7 @@ fn App() -> impl IntoView {
     let state = State::default();
 
     async fn handle_mail(
-        mut mail: MailVariants,
+        mail: MailVariants,
         new_messages: &mut Vec<db::Message>,
         vault_updates: &mut Vec<VaultComponentId>,
         state: State,

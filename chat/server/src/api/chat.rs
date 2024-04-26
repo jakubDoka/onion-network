@@ -7,7 +7,7 @@ use {
     codec::{Codec, Encode, Reminder, ReminderOwned},
     crypto::proof::{NonceInt, Proof},
     dht::U256,
-    handlers::{BorDec, Dec, DecFixed},
+    handlers::{Dec, DecFixed},
     opfusk::{PeerIdExt, ToPeerId},
     std::{
         collections::{btree_map, BTreeMap, HashMap, HashSet, VecDeque},
@@ -173,7 +173,7 @@ pub async fn send_message(
         advance_nonce(&mut sender.action, proof.nonce)?;
         sender.allocate_action(Permissions::SEND)?;
 
-        let message = Message { sender: identity, nonce, content: Reminder(&msg) };
+        let message = Message { sender: identity, nonce, content: Reminder(msg) };
         let encoded_len = message.encoded_len();
 
         if chat.buffer.len() + encoded_len + 2 > UNFINALIZED_BUFFER_CAP {

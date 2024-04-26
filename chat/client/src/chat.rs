@@ -182,16 +182,17 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         }
     };
 
-    create_effect(move |prev_chat| {
+    create_effect(move |_| {
         let Some(chat) = current_chat() else {
             messages.get_untracked().unwrap().set_inner_html("");
-            return None;
+            return;
         };
 
         if is_friend.get_untracked() {
-            return None;
+            return;
         }
-        let secret = state.chat_secret(chat)?;
+
+        let Some(secret) = state.chat_secret(chat) else { return };
 
         handled_spawn_local("reading chat messages", async move {
             // TODO: make subscription avare of its topic
@@ -208,8 +209,6 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
             Ok(())
         });
-
-        Some(chat)
     });
 
     create_effect(move |_| {

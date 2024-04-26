@@ -113,7 +113,7 @@ async fn test_routing() {
 
     input.write_all(b"hello").await.unwrap();
     let mut buf = [0; 5];
-    _ = loop {
+    loop {
         let events = futures::future::select_all(swarms.iter_mut().map(|s| s.next()));
         let e = futures::select! {
             (e, ..) = events.fuse() => e,
@@ -121,7 +121,7 @@ async fn test_routing() {
             r = output.read_exact(&mut buf).fuse() => break r.unwrap(),
         };
         log::debug!("{:?}", e.unwrap());
-    };
+    }
 
     assert_eq!(&buf, b"hello");
 }
@@ -148,7 +148,7 @@ async fn test_timeout() {
             (e, i, ..) = events.fuse() => (e, i),
             _ = (&mut timeout).fuse() => panic!("{disconnected} nodes disconnected"),
             r = output.read_exact(&mut buff).fuse() => {
-                _ = r.unwrap();
+                r.unwrap();
                 input.write_all(&buff).await.unwrap();
                 continue;
             },

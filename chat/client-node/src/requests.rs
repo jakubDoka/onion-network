@@ -16,8 +16,6 @@ use {
     std::collections::HashSet,
 };
 
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 impl Subscription {
     pub async fn invite_member(
         &mut self,

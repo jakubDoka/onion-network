@@ -1,6 +1,5 @@
 use {
     crate::{reputation::Rated, Context, OnlineLocation},
-    arrayvec::ArrayVec,
     chain_api::NodeIdentity,
     chat_spec::{ChatError, ChatName, GroupVec, Identity, ReplVec, Topic, REPLICATION_FACTOR},
     codec::{DecodeOwned, Encode},
@@ -27,8 +26,6 @@ pub struct State {
     pub id: CallId,
     pub prefix: Prefix,
 }
-
-pub enum RouterContext {}
 
 handlers::quick_impl_from_request! {State => [
     Context => |state| state.context,

@@ -1,5 +1,5 @@
 use {
-    crate::api::{Origin, State},
+    crate::api::{Origin},
     chain_api::NodeIdentity,
     chat_spec::ChatError,
     libp2p::futures::task::AtomicWaker,

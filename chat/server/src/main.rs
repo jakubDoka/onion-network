@@ -25,7 +25,7 @@ use {
         rpcs, ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, ResponseHeader,
         Topic, REPLICATION_FACTOR,
     },
-    codec::{Codec, DecodeOwned, Encode},
+    codec::{DecodeOwned, Encode},
     dashmap::{mapref::entry::Entry, DashMap},
     dht::{Route, SharedRoutingTable},
     futures::channel::mpsc,
@@ -474,7 +474,7 @@ impl OwnedContext {
         body: impl Encode,
     ) -> Result<R, ChatError> {
         let topic = topic.into();
-        let mut stream = self.open_stream_with(peer.into()).await.ok_or(ChatError::NoReplicator)?;
+        let mut stream = self.open_stream_with(peer).await.ok_or(ChatError::NoReplicator)?;
         let msg = &body.to_bytes();
         let header = RequestHeader {
             prefix: send_mail,
@@ -483,7 +483,7 @@ impl OwnedContext {
             len: (msg.len() as u32).to_be_bytes(),
         };
         stream.write_all(header.as_bytes()).await?;
-        stream.write_all(&msg).await?;
+        stream.write_all(msg).await?;
 
         if std::mem::size_of::<R>() == 0 {
             return Ok(unsafe { std::mem::zeroed() });
@@ -529,7 +529,7 @@ impl OwnedContext {
             .iter_mut()
             .map(|(_, stream)| async move {
                 stream.write_all(header.as_bytes()).await?;
-                stream.write_all(&msg).await
+                stream.write_all(msg).await
             })
             .collect::<JoinAll<_>>()
             .await;

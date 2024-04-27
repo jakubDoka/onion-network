@@ -11,6 +11,7 @@ pub use {
     subxt_signer::{
         bip39::Mnemonic,
         sr25519::{Keypair, Signature},
+        SecretUri,
     },
 };
 use {
@@ -23,7 +24,6 @@ use {
     },
     futures::{SinkExt, StreamExt, TryStreamExt},
     libp2p::{multiaddr, Multiaddr, PeerId},
-    parity_scale_codec::Decode as _,
     rand_chacha::ChaChaRng,
     std::{
         fs, io,
@@ -37,12 +37,9 @@ use {
         config::ParamsFor,
         storage::{address::Yes, StorageAddress},
         tx::TxProgress,
-        utils::MultiSignature,
         OnlineClient,
     },
 };
-
-pub const USER_NAME_CAP: usize = 32;
 
 pub type Balance = u128;
 pub type AccountId = <Config as subxt::Config>::AccountId;
@@ -53,55 +50,24 @@ pub type StakeEvents<E> = futures::channel::mpsc::Receiver<Result<E>>;
 pub type Params = ParamsFor<Config>;
 pub type NodeIdentity = crypto::Hash;
 pub type NodeVec = Vec<(NodeIdentity, SocketAddr)>;
-pub type SecretUri = subxt_signer::SecretUri;
 
-#[must_use]
-pub fn immortal_era() -> String {
-    encode_then_hex(&subxt::utils::Era::Immortal)
-}
-
-pub fn to_hex(bytes: impl AsRef<[u8]>) -> String {
-    format!("0x{}", hex::encode(bytes.as_ref()))
-}
-
-pub fn encode_then_hex<E: parity_scale_codec::Encode>(input: &E) -> String {
-    format!("0x{}", hex::encode(input.encode()))
-}
-
-#[must_use]
-pub fn encode_tip(value: u128) -> String {
-    encode_then_hex(&parity_scale_codec::Compact(value))
-}
-
-pub fn new_signature(sig: Vec<u8>) -> Result<MultiSignature> {
-    MultiSignature::decode(&mut &sig[..]).map_err(|s| Error::Other(format!("{s}")))
-}
+pub const USER_NAME_CAP: usize = 32;
 
 pub async fn wait_for_in_block(
     mut progress: TxProgress<Config, OnlineClient<Config>>,
     finalized: bool,
 ) -> Result<Hash> {
+    use subxt::{error::TransactionError as TE, tx::TxStatus as TS};
+
     while let Some(event) = progress.next().await {
-        match event? {
-            subxt::tx::TxStatus::InBestBlock(b) if !finalized => {
-                return b.wait_for_success().await.map(|r| r.extrinsic_hash());
-            }
-            subxt::tx::TxStatus::InFinalizedBlock(b) => {
-                return b.wait_for_success().await.map(|r| r.extrinsic_hash());
-            }
-            subxt::tx::TxStatus::Error { message } => {
-                return Err(subxt::Error::Other(format!("tx error (try again): {message}",)));
-            }
-            subxt::tx::TxStatus::Invalid { message } => {
-                return Err(subxt::Error::Other(format!("tx invalid: {message}",)));
-            }
-            subxt::tx::TxStatus::Dropped { message } => {
-                return Err(subxt::Error::Other(
-                    format!("tx dropped, maybe try again: {message}",),
-                ));
-            }
+        return match event? {
+            TS::InBestBlock(b) if !finalized => Ok(b.wait_for_success().await?.extrinsic_hash()),
+            TS::InFinalizedBlock(b) => Ok(b.wait_for_success().await?.extrinsic_hash()),
+            TS::Error { message } => Err(Error::Transaction(TE::Error(message))),
+            TS::Invalid { message } => Err(Error::Transaction(TE::Invalid(message))),
+            TS::Dropped { message } => Err(Error::Transaction(TE::Dropped(message))),
             _ => continue,
-        }
+        };
     }
 
     log::error!("tx stream ended without result");
@@ -129,6 +95,13 @@ fn unwrap_satelite_staker(e: chain_types::Event) -> Option<SateliteStakeEvent> {
 }
 
 impl Client {
+    pub async fn get_balance(&self) -> Result<Balance> {
+        let account = self.signer.public_key().to_account_id();
+        let q = polkadot::storage().balances().account(account);
+        let fetched = self.client.storage().at_latest().await?.fetch(&q).await?;
+        fetched.ok_or_else(|| Error::Other("not found".to_string())).map(|b| b.free)
+    }
+
     pub async fn get_nonce(&self) -> Result<u64> {
         let account = self.signer.public_key().to_account_id();
         self.client.blocks().at_latest().await?.account_nonce(&account).await

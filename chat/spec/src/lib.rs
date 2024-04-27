@@ -102,8 +102,8 @@ pub enum ChatError {
     VoteNotFound,
     #[error("no permission")]
     NoPermission,
-    #[error("rate limited for next {0}ms")]
-    RateLimited(u64),
+    #[error("rate limited for next {0}")]
+    RateLimited(MsTilEnd),
     #[error("invalid response")]
     InvalidResponse,
     #[error("timeout")]
@@ -116,6 +116,23 @@ impl From<io::Error> for ChatError {
             io::ErrorKind::TimedOut => Self::Timeout,
             _ => Self::InvalidResponse,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Codec)]
+struct MsTilEnd(u64);
+
+impl PartialEq<MsTilEnd> for MsTilEnd {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.abs_diff(other.0) < 3000
+    }
+}
+
+impl Eq for MsTilEnd {}
+
+impl std::fmt::Display for MsTilEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}ms", self.0)
     }
 }
 

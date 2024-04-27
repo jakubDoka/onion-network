@@ -169,7 +169,7 @@
 	color: var(--primary-color);
 }
 
-.pc::-webkit-input-placeholder, .pc::-moz-placeholder {
+.pc::placeholder {
 	color: var(--secondary-color);
 }
 
@@ -381,11 +381,11 @@ input[disabled] {
 	opacity: 0.5;
 }
 
-input:invalid {
+:is(input, textarea):invalid {
 	background-color: var(--error-color) !important;
 }
 
-input:invalid::placeholder {
+:is(input, textarea):invalid::placeholder {
 	color: var(--primary-color);
 }
 

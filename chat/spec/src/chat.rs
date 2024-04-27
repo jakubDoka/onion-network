@@ -34,7 +34,7 @@ impl Member {
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
 
         if self.frozen_until >= current_ms {
-            return Err(ChatError::RateLimited(self.frozen_until - current_ms));
+            return Err(ChatError::RateLimited(crate::MsTilEnd(self.frozen_until - current_ms)));
         }
         self.frozen_until = current_ms + self.action_cooldown_ms as u64;
 

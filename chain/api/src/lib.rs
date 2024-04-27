@@ -16,7 +16,7 @@ pub use {
 };
 use {
     chain_types::{polkadot, Hash},
-    codec::{Codec, Decode, DecodeOwned, Encode},
+    codec::{Codec, DecodeOwned, Encode},
     crypto::{
         enc,
         rand_core::{OsRng, SeedableRng},
@@ -26,7 +26,6 @@ use {
     libp2p::{multiaddr, Multiaddr, PeerId},
     rand_chacha::ChaChaRng,
     std::{
-        fs, io,
         marker::PhantomData,
         net::{IpAddr, SocketAddr},
         str::FromStr,
@@ -80,30 +79,29 @@ pub struct Client {
     client: OnlineClient<Config>,
 }
 
-fn unwrap_chat_staker(e: chain_types::Event) -> Option<ChatStakeEvent> {
-    match e {
-        chain_types::Event::ChatStaker(e) => Some(e),
-        _ => None,
-    }
-}
-
-fn unwrap_satelite_staker(e: chain_types::Event) -> Option<SateliteStakeEvent> {
-    match e {
-        chain_types::Event::SateliteStaker(e) => Some(e),
-        _ => None,
-    }
-}
-
 impl Client {
+    pub async fn with_signer(url: &str, signer: Keypair) -> Result<Self> {
+        let client = OnlineClient::<Config>::from_url(url).await?;
+        Ok(Self { signer, client })
+    }
+
+    pub async fn without_signer(url: &str) -> Result<Self> {
+        let client = OnlineClient::<Config>::from_url(url).await?;
+        Ok(Self { signer: Keypair::from_seed(crypto::SharedSecret::default()).unwrap(), client })
+    }
+
+    pub fn account_id(&self) -> AccountId {
+        self.signer.public_key().to_account_id()
+    }
+
     pub async fn get_balance(&self) -> Result<Balance> {
-        let account = self.signer.public_key().to_account_id();
-        let q = polkadot::storage().balances().account(account);
+        let q = polkadot::storage().balances().account(&self.account_id());
         let fetched = self.client.storage().at_latest().await?.fetch(&q).await?;
         fetched.ok_or_else(|| Error::Other("not found".to_string())).map(|b| b.free)
     }
 
     pub async fn get_nonce(&self) -> Result<u64> {
-        let account = self.signer.public_key().to_account_id();
+        let account = self.account_id();
         self.client.blocks().at_latest().await?.account_nonce(&account).await
     }
 
@@ -149,16 +147,6 @@ impl Client {
         Ok(sub.then(then).try_flatten())
     }
 
-    pub async fn with_signer(url: &str, signer: Keypair) -> Result<Self> {
-        let client = OnlineClient::<Config>::from_url(url).await?;
-        Ok(Self { signer, client })
-    }
-
-    pub async fn without_signer(url: &str) -> Result<Self> {
-        let client = OnlineClient::<Config>::from_url(url).await?;
-        Ok(Self { signer: Keypair::from_seed(crypto::SharedSecret::default()).unwrap(), client })
-    }
-
     pub async fn transfere(&self, dest: AccountId, amount: Balance, nonce: Nonce) -> Result<()> {
         let transaction = polkadot::tx().balances().transfer_keep_alive(dest.into(), amount);
         self.handle(transaction, nonce).await
@@ -188,17 +176,10 @@ impl Client {
         SA: StorageAddress<IsIterable = Yes, Target = NodeAddress> + 'static,
     {
         let latest = self.client.storage().at_latest().await?;
-        latest
-            .iter(tx)
-            .await?
-            .map_ok(|kv| {
-                (
-                    parity_scale_codec::Decode::decode(&mut &kv.key_bytes[48..]).unwrap(),
-                    kv.value.into(),
-                )
-            })
-            .try_collect()
-            .await
+        let map_ok = |kv: subxt::storage::StorageKeyValuePair<SA>| {
+            (parity_scale_codec::Decode::decode(&mut &kv.key_bytes[48..]).unwrap(), kv.value.into())
+        };
+        latest.iter(tx).await?.map_ok(map_ok).try_collect().await
     }
 
     pub async fn vote(&self, me: NodeIdentity, target: NodeIdentity, nonce: Nonce) -> Result<()> {
@@ -268,12 +249,6 @@ pub struct NodeKeys {
     pub sign: sign::Keypair,
 }
 
-impl Default for NodeKeys {
-    fn default() -> Self {
-        Self { enc: enc::Keypair::new(OsRng), sign: sign::Keypair::new(OsRng) }
-    }
-}
-
 impl NodeKeys {
     pub fn identity(&self) -> NodeIdentity {
         self.sign.identity()
@@ -287,24 +262,6 @@ impl NodeKeys {
         let seed = crypto::hash::new(mnemonic.to_seed(""));
         let mut rng = ChaChaRng::from_seed(seed);
         Self { enc: enc::Keypair::new(&mut rng), sign: sign::Keypair::new(rng) }
-    }
-
-    pub fn load(path: &str) -> io::Result<(Self, bool)> {
-        let file = match fs::read(path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let nk = Self::default();
-                fs::write(path, nk.to_bytes())?;
-                return Ok((nk, true));
-            }
-            Err(e) => return Err(e),
-        };
-
-        let Some(nk) = Self::decode(&mut file.as_slice()) else {
-            return Err(io::Error::other("invalid key file"));
-        };
-
-        Ok((nk, false))
     }
 }
 
@@ -513,4 +470,18 @@ pub fn encrypt(mut data: Vec<u8>, secret: SharedSecret) -> Vec<u8> {
     let tag = crypto::encrypt(&mut data, secret, OsRng);
     data.extend(tag);
     data
+}
+
+fn unwrap_chat_staker(e: chain_types::Event) -> Option<ChatStakeEvent> {
+    match e {
+        chain_types::Event::ChatStaker(e) => Some(e),
+        _ => None,
+    }
+}
+
+fn unwrap_satelite_staker(e: chain_types::Event) -> Option<SateliteStakeEvent> {
+    match e {
+        chain_types::Event::SateliteStaker(e) => Some(e),
+        _ => None,
+    }
 }

@@ -335,9 +335,8 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         move || current_member.get().permissions.contains(chat_spec::Permissions::INVITE),
         move |name: String| async move {
             let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
-            let invitee = chat_client_node::fetch_profile(my_name, name).await?;
             let chat = current_chat.get_untracked().context("no chat selected")?;
-            requests().invite_member(chat, invitee.sign, state, Member::worst()).await?;
+            requests().invite_member(chat, name, state, Member::worst()).await?;
             log::info!("invited user: {:?}", name);
             Ok(())
         },

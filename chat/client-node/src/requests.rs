@@ -1,6 +1,6 @@
 use {
     crate::{
-        fetch_profile, ChatMeta, DowncastNonce, FriendMeta, NodeHandle, RawChatMessage,
+        ChainClientExt, ChatMeta, DowncastNonce, FriendMeta, NodeHandle, RawChatMessage,
         RecoverMail, Subscription, Theme, UserKeys, Vault, VaultComponentId,
     },
     anyhow::Context,
@@ -68,6 +68,23 @@ impl NodeHandle {
     pub async fn invite_member(
         &mut self,
         name: ChatName,
+        member: UserName,
+        ctx: impl RequestContext,
+        config: Member,
+    ) -> anyhow::Result<()> {
+        let identity = ctx
+            .with_keys(UserKeys::chain_client)?
+            .await?
+            .fetch_profile(member)
+            .await
+            .context("fetching identity")?
+            .sign;
+        self.invite_member_identity(name, identity, ctx, config).await.context("inviting member")
+    }
+
+    pub async fn invite_member_identity(
+        &mut self,
+        name: ChatName,
         member: Identity,
         ctx: impl RequestContext,
         config: Member,
@@ -94,7 +111,10 @@ impl NodeHandle {
         name: UserName,
         ctx: impl RequestContext,
     ) -> anyhow::Result<()> {
-        let identity = fetch_profile(ctx.with_keys(|k| k.name)?, name)
+        let identity = ctx
+            .with_keys(UserKeys::chain_client)?
+            .await?
+            .fetch_profile(name)
             .await
             .context("fetching identity")?
             .sign;

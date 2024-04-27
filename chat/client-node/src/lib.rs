@@ -97,6 +97,7 @@ pub struct UserKeys {
     pub sign: sign::Keypair,
     pub enc: enc::Keypair,
     pub vault: crypto::SharedSecret,
+    pub hot_wallet: crypto::SharedSecret,
 }
 
 impl UserKeys {
@@ -128,7 +129,8 @@ impl UserKeys {
         const VALUT: usize = 32;
         const ENC: usize = 64 + 32;
         const SIGN: usize = 32 + 48;
-        let mut bytes = [0; VALUT + ENC + SIGN];
+        const HOT: usize = 32;
+        let mut bytes = [0; VALUT + ENC + SIGN + HOT];
         Argon2::default()
             .hash_password_into(password.as_bytes(), &username_to_raw(name), &mut bytes)
             .unwrap();
@@ -138,7 +140,8 @@ impl UserKeys {
         let sign = sign::Keypair::new(&mut entropy);
         let enc = enc::Keypair::new(&mut entropy);
         let vault = crypto::new_secret(&mut entropy);
-        Self { name, sign, enc, vault }
+        let hot_wallet = crypto::new_secret(&mut entropy);
+        Self { name, sign, enc, vault, hot_wallet }
     }
 
     pub fn identity(&self) -> Identity {
@@ -150,6 +153,38 @@ impl UserKeys {
             sign: crypto::hash::new(self.sign.public_key()),
             enc: crypto::hash::new(self.enc.public_key()),
         }
+    }
+
+    fn chain_client(&self) -> impl Future<Output = chain_api::Result<chain::Client>> {
+        component_utils::build_env!(CHAIN_NODES);
+
+        thread_local! {
+            static CLIENT: std::cell::RefCell<Option<chain::Client>> = std::cell::RefCell::new(None);
+        }
+
+        let kp = chain_api::Keypair::from_seed(self.vault).expect("right amount of seed");
+        async move {
+            if CLIENT.with(|client| client.borrow().is_none()) {
+                let client = chain_api::Client::with_signer(CHAIN_NODES, kp).await?;
+                CLIENT.with(|cl| *cl.borrow_mut() = Some(client));
+            }
+
+            Ok(CLIENT.with(|client| client.borrow().as_ref().unwrap().clone()))
+        }
+    }
+
+    pub async fn register(&self) -> anyhow::Result<()> {
+        let client = self.chain_client().await.context("connecting to chain")?;
+        let username = username_to_raw(self.name);
+
+        if client.user_exists(username).await.context("checking if username is free")? {
+            anyhow::bail!("user with this name already exists");
+        }
+
+        let nonce = client.get_nonce().await.context("fetching nonce")?;
+        client.register(username, self.to_identity(), nonce).await.context("registering")?;
+
+        Ok(())
     }
 }
 

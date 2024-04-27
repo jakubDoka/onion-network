@@ -120,7 +120,7 @@ impl From<io::Error> for ChatError {
 }
 
 #[derive(Clone, Copy, Debug, Codec)]
-struct MsTilEnd(u64);
+pub struct MsTilEnd(u64);
 
 impl PartialEq<MsTilEnd> for MsTilEnd {
     fn eq(&self, other: &Self) -> bool {

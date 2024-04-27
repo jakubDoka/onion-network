@@ -33,7 +33,6 @@ use {
         sync::Arc,
     },
     subxt::{
-        backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
         blocks::Block,
         config::ParamsFor,
         storage::{address::Yes, StorageAddress},
@@ -148,19 +147,11 @@ pub async fn wait_for_in_block(
 #[derive(Clone)]
 pub struct InnerClient {
     pub client: OnlineClient<Config>,
-    pub legacy: LegacyRpcMethods<Config>,
 }
 
 impl InnerClient {
     pub async fn get_nonce(&self, account: &AccountId) -> Result<u64> {
-        let best_block = self
-            .legacy
-            .chain_get_block_hash(None)
-            .await?
-            .ok_or(Error::Other("Best block not found".into()))?;
-        let account_nonce =
-            self.client.blocks().at(best_block).await?.account_nonce(account).await?;
-        Ok(account_nonce)
+        self.client.blocks().at_latest().await?.account_nonce(account).await
     }
 }
 
@@ -220,11 +211,8 @@ impl<S: TransactionHandler> Client<S> {
     }
 
     pub async fn with_signer(url: &str, account: S) -> Result<Self> {
-        let rpc = RpcClient::from_url(url).await?;
-        let client = OnlineClient::<Config>::from_rpc_client(rpc.clone()).await?;
-        let legacy = LegacyRpcMethods::new(rpc);
-
-        Ok(Self { signer: account, inner: InnerClient { client, legacy } })
+        let client = OnlineClient::<Config>::from_url(url).await?;
+        Ok(Self { signer: account, inner: InnerClient { client } })
     }
 
     pub async fn transfere(&self, dest: AccountId, amount: Balance, nonce: Nonce) -> Result<()> {

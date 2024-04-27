@@ -1,5 +1,5 @@
 use {
-    crate::{chain_node, min_nodes, MailVariants, RawResponse, UserKeys, Vault},
+    crate::{min_nodes, MailVariants, RawResponse, UserKeys, Vault},
     anyhow::Context,
     chain_api::NodeIdentity,
     chat_spec::*,
@@ -80,7 +80,7 @@ impl Node {
 
         let (commands_rx, requests) = mpsc::channel(10);
         let handle = NodeHandle::new(commands_rx, swarm.behaviour_mut().chat_dht.table);
-        let chain_api = chain_node(keys.name).await?;
+        let chain_api = keys.chain_client().await?;
         let node_request = chain_api.list_chat_nodes();
         let satelite_request = chain_api.list_satelite_nodes();
         let profile_request = chain_api.get_profile_by_name(username_to_raw(keys.name));

@@ -79,26 +79,34 @@ impl<H> Handler for H {}
 
 #[derive(Clone)]
 pub struct Repl<H> {
-    pub handler: H,
+    handler: H,
 }
 
 pub type ReplArgs<A> = (Topic, Context, Prefix, A);
 
-impl<C, H, S, A, B> handlers::Handler<C, S, ReplArgs<A>, B> for Repl<H>
+impl<C, H, S, A, B, O> handlers::Handler<C, S, ReplArgs<A>, B> for Repl<H>
 where
     H: handlers::Handler<C, S, A, B>,
     S: handlers::Stream,
+    H::Future: Future<Output = Result<O>>,
     ReplArgs<A>: handlers::FromContext<C>,
     A: handlers::FromContext<C>,
     B: handlers::FromStream<S> + Encode,
     <H::Future as Future>::Output: DecodeOwned + Send + Sync + Eq,
 {
-    type Future = impl Future<Output = Result<<H::Future as Future>::Output, ChatError>> + Send;
+    type Future = impl Future<Output = Result<O, ChatError>> + Send;
 
     fn call(self, (topic, cx, prefix, args): ReplArgs<A>, req: B) -> Self::Future {
         async move {
-            let others = cx.repl_rpc::<<H::Future as Future>::Output>(topic, prefix, &req).await?;
+            let req_bytes = req.to_bytes();
             let us = self.handler.call(args, req).await;
+
+            if matches!(us, Err(ChatError::SentDirectly)) {
+                return us;
+            }
+
+            let others =
+                cx.repl_rpc_low::<<H::Future as Future>::Output>(topic, prefix, &req_bytes).await?;
             let us = (cx.local_peer_id, us);
 
             let mut resps = others.into_iter().chain(std::iter::once(us)).collect::<GroupVec<_>>();
@@ -124,7 +132,7 @@ where
                 }
             }
 
-            pick.ok_or(ChatError::NoMajority)
+            pick.ok_or(ChatError::NoMajority)?
         }
     }
 }

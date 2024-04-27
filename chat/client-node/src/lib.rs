@@ -40,6 +40,24 @@ pub fn encode_direct_chat_name(name: UserName) -> String {
     format!("{}{}", name, " ".repeat(32))
 }
 
+pub trait RecoverMail {
+    fn recover_mail(self) -> anyhow::Result<()>;
+}
+
+impl RecoverMail for anyhow::Result<()> {
+    fn recover_mail(self) -> anyhow::Result<()> {
+        self.or_else(|e| {
+            e.root_cause()
+                .downcast_ref::<ChatError>()
+                .and_then(|e| match e {
+                    ChatError::SentDirectly => Some(Ok(())),
+                    _ => None,
+                })
+                .ok_or(e)?
+        })
+    }
+}
+
 pub trait DowncastNonce<O> {
     fn downcast_nonce(self) -> anyhow::Result<Result<O, Nonce>>;
 }

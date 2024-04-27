@@ -1,7 +1,7 @@
 use {
     crate::{
         fetch_profile, ChatMeta, DowncastNonce, FriendMeta, NodeHandle, RawChatMessage,
-        Subscription, UserKeys, Vault, VaultComponentId,
+        RecoverMail, Subscription, Theme, UserKeys, Vault, VaultComponentId,
     },
     anyhow::Context,
     chain_api::Encrypted,
@@ -17,6 +17,39 @@ use {
 };
 
 impl NodeHandle {
+    pub async fn set_theme(
+        &mut self,
+        theme: Theme,
+        ctx: impl RequestContext,
+    ) -> anyhow::Result<()> {
+        ctx.with_vault(|v| v.theme = theme)?;
+        self.subscription_for(ctx.with_keys(UserKeys::identity)?)
+            .await?
+            .save_vault_components([VaultComponentId::Theme], &ctx)
+            .await
+    }
+
+    pub async fn send_frined_message(
+        &mut self,
+        name: UserName,
+        content: String,
+        ctx: impl RequestContext,
+    ) -> anyhow::Result<()> {
+        let (session, (header, ss), identity) = ctx.try_with_vault(|v| {
+            let friend = v.friends.get_mut(&name).context("friend not found")?;
+            Ok((friend.dr.sender_hash(), friend.dr.send(), friend.identity))
+        })?;
+
+        let message = FriendMessage::DirectMessage { content };
+        let mail =
+            MailVariants::FriendMessage { header, session, content: Encrypted::new(message, ss) };
+        self.subscription_for(identity)
+            .await?
+            .send_mail(identity, mail)
+            .await
+            .context("sending message")
+    }
+
     pub async fn create_and_save_chat(
         &mut self,
         name: ChatName,
@@ -152,23 +185,6 @@ impl Subscription {
             .collect())
     }
 
-    pub async fn send_frined_message(
-        &mut self,
-        name: UserName,
-        content: String,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let (session, (header, ss), identity) = ctx.try_with_vault(|v| {
-            let friend = v.friends.get_mut(&name).context("friend not found")?;
-            Ok((friend.dr.sender_hash(), friend.dr.send(), friend.identity))
-        })?;
-
-        let message = FriendMessage::DirectMessage { content };
-        let mail =
-            MailVariants::FriendMessage { header, session, content: Encrypted::new(message, ss) };
-        self.send_mail(identity, mail).await.context("sending message")
-    }
-
     pub async fn fetch_vault_key(
         &mut self,
         identity: Identity,
@@ -255,7 +271,7 @@ impl Subscription {
 
     pub async fn send_mail(&mut self, to: Identity, mail: impl Encode) -> anyhow::Result<()> {
         log::info!("sending mail to {:?}", mail.to_bytes());
-        self.request(rpcs::SEND_MAIL, Topic::Profile(to), mail).await
+        self.request(rpcs::SEND_MAIL, Topic::Profile(to), mail).await.recover_mail()
     }
 
     pub async fn read_mail(&mut self, ctx: impl RequestContext) -> anyhow::Result<ReminderOwned> {

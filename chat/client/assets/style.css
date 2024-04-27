@@ -169,6 +169,10 @@
 	color: var(--primary-color);
 }
 
+.pc::-webkit-input-placeholder, .pc::-moz-placeholder {
+	color: var(--secondary-color);
+}
+
 .sc {
 	background-color: var(--secondary-color);
 	color: var(--font-color);
@@ -379,6 +383,10 @@ input[disabled] {
 
 input:invalid {
 	background-color: var(--error-color) !important;
+}
+
+input:invalid::placeholder {
+	color: var(--primary-color);
 }
 
 :focus {

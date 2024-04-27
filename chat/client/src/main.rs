@@ -147,7 +147,8 @@ fn App() -> impl IntoView {
                 let mut new_messages = Vec::new();
                 let mut vault_updates = Vec::new();
                 for mail in chat_spec::unpack_mail(&list) {
-                    let mail = MailVariants::decode(&mut &*mail).context("decoding mail")?;
+                    let mail = MailVariants::decode(&mut &*mail)
+                        .with_context(|| format!("cant decode mail: {mail:?}"))?;
                     handle_error(
                         handle_mail(mail, &mut new_messages, &mut vault_updates, state).await,
                     );

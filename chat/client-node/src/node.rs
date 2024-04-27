@@ -428,8 +428,10 @@ impl Subscription {
     ) -> io::Result<!> {
         enum RegisteredCall {
             ChatSub(ChatName, mpsc::Sender<ChatEvent>),
+            NewChatSub(ChatName, mpsc::Sender<ChatEvent>),
             Request(oneshot::Sender<RawResponse>),
             ProfileSub(Identity, mpsc::Sender<MailVariants>),
+            NewProfileSub(Identity, mpsc::Sender<MailVariants>),
         }
 
         type Calls = HashMap<CallId, RegisteredCall>;
@@ -441,14 +443,17 @@ impl Subscription {
         ) -> io::Result<()> {
             // FIXME: Pass this tupple instead
             let (prefix, topic, body, rc) = match req {
-                SubscriptionRequest::Chat(chat, tx) => {
-                    (rpcs::SUBSCRIBE, Topic::Chat(chat), vec![], RegisteredCall::ChatSub(chat, tx))
-                }
+                SubscriptionRequest::Chat(chat, tx) => (
+                    rpcs::SUBSCRIBE,
+                    Topic::Chat(chat),
+                    vec![],
+                    RegisteredCall::NewChatSub(chat, tx),
+                ),
                 SubscriptionRequest::Profile(id, tx) => (
                     rpcs::SUBSCRIBE,
                     Topic::Profile(id),
                     vec![],
-                    RegisteredCall::ProfileSub(id, tx),
+                    RegisteredCall::NewProfileSub(id, tx),
                 ),
                 SubscriptionRequest::Request(prefic, topic, body, tx) => {
                     (prefic, topic, body, RegisteredCall::Request(tx))
@@ -486,6 +491,32 @@ impl Subscription {
             };
 
             match rc {
+                RegisteredCall::NewChatSub(chat, tx) => 'b: {
+                    let Some(res) = Result::<(), ChatError>::decode(&mut data.as_slice()) else {
+                        log::error!("invalid chat subscription response");
+                        break 'b;
+                    };
+
+                    if let Err(res) = res {
+                        log::error!("cannot subscribe to chat: {res}");
+                        break 'b;
+                    }
+
+                    subs.insert(header.call_id, RegisteredCall::ChatSub(chat, tx));
+                }
+                RegisteredCall::NewProfileSub(id, tx) => 'b: {
+                    let Some(res) = Result::<(), ChatError>::decode(&mut data.as_slice()) else {
+                        log::error!("invalid profile subscription response");
+                        break 'b;
+                    };
+
+                    if let Err(res) = res {
+                        log::error!("cannot subscribe to profile: {res}");
+                        break 'b;
+                    }
+
+                    subs.insert(header.call_id, RegisteredCall::ProfileSub(id, tx));
+                }
                 RegisteredCall::ChatSub(chat, mut ch) => {
                     if let Some(ev) = ChatEvent::decode(&mut data.as_slice()) {
                         if ch.send(ev).await.is_err() {
@@ -497,16 +528,12 @@ impl Subscription {
                             };
                             stream.write_all(header.as_bytes()).await?;
                             stream.flush().await?;
+                            return Ok(());
                         }
                     } else {
                         log::error!("invalid chat event received");
                     }
                     subs.insert(header.call_id, RegisteredCall::ChatSub(chat, ch));
-                }
-                RegisteredCall::Request(resp) => {
-                    if resp.send(data).is_err() {
-                        log::error!("cannot send response, receiver was dropped");
-                    }
                 }
                 RegisteredCall::ProfileSub(id, mut ch) => {
                     if let Some(ev) = MailVariants::decode(&mut data.as_slice()) {
@@ -519,11 +546,17 @@ impl Subscription {
                             };
                             stream.write_all(header.as_bytes()).await?;
                             stream.flush().await?;
+                            return Ok(());
                         }
                     } else {
                         log::error!("invalid mail received: {data:?}");
                     }
                     subs.insert(header.call_id, RegisteredCall::ProfileSub(id, ch));
+                }
+                RegisteredCall::Request(resp) => {
+                    if resp.send(data).is_err() {
+                        log::error!("cannot send response, receiver was dropped");
+                    }
                 }
             }
 

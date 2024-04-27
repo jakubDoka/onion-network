@@ -391,8 +391,6 @@ async fn run_client(
         let repl_rgoup =
             cx.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
 
-        log::info!("repl_group: {repl_rgoup:?}");
-
         if !repl_rgoup.contains(&cx.local_peer_id.into()) {
             log::warn!(
                 "peer {path_id:?} tried to access {topic:?} but it is not in the replication group, (prefix: {})",
@@ -504,10 +502,10 @@ impl OwnedContext {
             return Ok(unsafe { std::mem::zeroed() });
         }
 
-        let mut buf = [0; 4];
+        let mut buf = [0; std::mem::size_of::<ResponseHeader>()];
         stream.read_exact(&mut buf).await?;
-        let len = u32::from_be_bytes(buf) as usize;
-        let mut buf = vec![0; len];
+        let header = ResponseHeader::from_array(buf);
+        let mut buf = vec![0; header.get_len()];
         stream.read_exact(&mut buf).await?;
         R::decode(&mut buf.as_slice()).ok_or(ChatError::InvalidResponse)
     }
@@ -517,6 +515,15 @@ impl OwnedContext {
         topic: impl Into<Topic>,
         id: u8,
         body: impl Encode,
+    ) -> Result<ReplVec<(NodeIdentity, R)>, ChatError> {
+        self.repl_rpc_low(topic, id, &body.to_bytes()).await
+    }
+
+    async fn repl_rpc_low<R: DecodeOwned>(
+        &self,
+        topic: impl Into<Topic>,
+        id: u8,
+        msg: &[u8],
     ) -> Result<ReplVec<(NodeIdentity, R)>, ChatError> {
         let topic = topic.into();
         let Some(others) = self.get_others(topic) else { return Err(ChatError::NoReplicator) };
@@ -530,8 +537,6 @@ impl OwnedContext {
             .zip(others.into_iter())
             .filter_map(|(stream, peer)| stream.map(|stream| (peer, stream)))
             .collect::<Vec<_>>();
-
-        let msg = &body.to_bytes();
 
         let header = RequestHeader {
             prefix: id,
@@ -585,7 +590,6 @@ impl OwnedContext {
             log::error!("we tried to replicate on group where we dont belong");
             return None;
         }
-        log::info!("replicating on group: {others:?}");
         Some(others)
     }
 }

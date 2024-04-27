@@ -283,6 +283,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             confirm: "create",
             maxlength: 32,
         },
+        move || false,
         move || true,
         move |chat| async move {
             let Ok(chat) = ChatName::try_from(chat.as_str()) else {
@@ -308,6 +309,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             confirm: "send",
             maxlength: 32,
         },
+        move || false,
         move || true,
         move |name| async move {
             let name = UserName::try_from(name.as_str()).ok().context("invalid usenrame")?;
@@ -329,6 +331,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             confirm: "invite",
             maxlength: 32,
         },
+        is_friend,
         move || current_member.get().permissions.contains(chat_spec::Permissions::INVITE),
         move |name: String| async move {
             let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
@@ -369,11 +372,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let send_friend_message = move |to_user: UserName, content: String| {
         handled_spawn_local("sending hardened message", async move {
-            requests()
-                .subscription_for(to_user)
-                .await?
-                .send_frined_message(to_user, content.clone(), state)
-                .await?;
+            requests().send_frined_message(to_user, content.clone(), state).await?;
 
             append_message(my_name, content.clone());
             let message = db::Message {
@@ -460,7 +459,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 <div class="fg0 flx bm">
                     <button class="hov sf pc lsm phone-only" on:click=hide_chat>"<"</button>
                     <div class="phone-only">{get_chat}</div>
-                    <div hidden=is_friend>{invite_user_button}</div>
+                    {invite_user_button}
                     {member_list_button}
                 </div>
                 <div class="fg1 flx fdc sc pr oys fy" on:scroll=on_scroll node_ref=message_scroll>
@@ -535,8 +534,7 @@ fn member_list_poppup(
     });
 
     let button = view! {
-        <button class="hov sf pc lsm" shortcut="lm"
-            on:click=show>"members"</button>
+        <button class="hov sf pc lsm sp" shortcut="lm" on:click=show hidden=is_friend>"members"</button>
     };
     let popup = view! {
         <div class="fsc flx blr sb" hidden=hidden>
@@ -679,6 +677,7 @@ struct PoppupStyle {
 
 fn popup<F: Future<Output = anyhow::Result<()>>>(
     style: PoppupStyle,
+    button_hidden: impl Fn() -> bool + 'static + Copy,
     enabled: impl Fn() -> bool + 'static + Copy,
     on_confirm: impl Fn(String) -> F + 'static + Copy,
 ) -> (impl IntoView, impl IntoView) {
@@ -706,7 +705,7 @@ fn popup<F: Future<Output = anyhow::Result<()>>>(
 
     let button = view! {
         <button class=style.button_style shortcut=style.shortcut disabled=crate::not(enabled)
-            on:click=show> {style.button}</button>
+            on:click=show hidden=button_hidden> {style.button}</button>
     };
     let popup = view! {
         <div class="fsc flx blr sb" hidden=hidden>

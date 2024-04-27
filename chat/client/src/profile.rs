@@ -33,10 +33,10 @@ pub fn Profile(state: crate::State) -> impl IntoView {
         }
     });
 
-    let on_save = move |_| {
+    let on_save = crate::handled_async_callback("saving theme", move |_| async move {
         let them = Theme::from_current().unwrap_or_default();
-        state.vault.update(|vault| vault.theme = them);
-    };
+        state.requests.get_value().unwrap().set_theme(them, state).await
+    });
 
     view! {
         <crate::Nav my_name />

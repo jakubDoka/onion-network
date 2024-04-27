@@ -21,14 +21,15 @@ pub async fn create(
         crypto::enc::PublicKey,
     )>,
 ) -> Result<()> {
-    let vault = Vault {
+    let mut vault = Vault {
         version: proof.nonce,
         sig: proof.signature,
         values,
         merkle_tree: Default::default(),
-    }
-    .prepare(proof.pk)
-    .ok_or(ChatError::InvalidProof)?;
+    };
+    vault.recompute();
+    handlers::ensure!(vault.is_valid(proof.pk), ChatError::InvalidProof);
+
     match cx.profiles.entry(identity) {
         Entry::Vacant(entry) => {
             entry.insert(Profile {
@@ -113,7 +114,6 @@ pub async fn fetch_keys(cx: super::Context, identity: Identity, _: ()) -> Result
 }
 
 pub async fn fetch_vault(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {
-    log::info!("fetching vault for {:?}", identity);
     cx.profiles
         .get(&identity)
         .ok_or(ChatError::NotFound)

@@ -1,9 +1,8 @@
+pub use chain_api::Client;
 use {
     chain_api::Profile,
     chat_spec::{username_to_raw, UserName},
 };
-
-pub type Client = chain_api::Client<chain_api::Keypair>;
 
 pub(crate) trait ChainClientExt {
     async fn fetch_profile(&self, name: UserName) -> Result<Profile, anyhow::Error>;

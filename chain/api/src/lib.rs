@@ -77,42 +77,6 @@ pub fn new_signature(sig: Vec<u8>) -> Result<MultiSignature> {
     MultiSignature::decode(&mut &sig[..]).map_err(|s| Error::Other(format!("{s}")))
 }
 
-#[allow(async_fn_in_trait)]
-pub trait TransactionHandler: Send + Sync + 'static {
-    async fn account_id_async(&self) -> Result<AccountId>;
-    async fn handle(&self, client: &InnerClient, call: impl TxPayload, nonce: Nonce) -> Result<()>;
-}
-
-impl TransactionHandler for Keypair {
-    async fn account_id_async(&self) -> Result<AccountId> {
-        Ok(self.public_key().into())
-    }
-
-    async fn handle(&self, inner: &InnerClient, call: impl TxPayload, nonce: Nonce) -> Result<()> {
-        let mut data = ParamsFor::<Config>::default();
-        data.2 .0 = Some(nonce);
-        let progress =
-            inner.client.tx().create_signed(&call, self, data).await?.submit_and_watch().await?;
-
-        wait_for_in_block(progress, false).await.map(drop)
-    }
-}
-
-impl TransactionHandler for () {
-    async fn account_id_async(&self) -> Result<AccountId> {
-        Ok(AccountId::from([0; 32]))
-    }
-
-    async fn handle(
-        &self,
-        _inner: &InnerClient,
-        _call: impl TxPayload,
-        _nonce: Nonce,
-    ) -> Result<()> {
-        Ok(())
-    }
-}
-
 pub async fn wait_for_in_block(
     mut progress: TxProgress<Config, OnlineClient<Config>>,
     finalized: bool,
@@ -145,20 +109,9 @@ pub async fn wait_for_in_block(
 }
 
 #[derive(Clone)]
-pub struct InnerClient {
-    pub client: OnlineClient<Config>,
-}
-
-impl InnerClient {
-    pub async fn get_nonce(&self, account: &AccountId) -> Result<u64> {
-        self.client.blocks().at_latest().await?.account_nonce(account).await
-    }
-}
-
-#[derive(Clone)]
-pub struct Client<S: TransactionHandler> {
-    signer: S,
-    inner: InnerClient,
+pub struct Client {
+    signer: Keypair,
+    client: OnlineClient<Config>,
 }
 
 fn unwrap_chat_staker(e: chain_types::Event) -> Option<ChatStakeEvent> {
@@ -175,7 +128,12 @@ fn unwrap_satelite_staker(e: chain_types::Event) -> Option<SateliteStakeEvent> {
     }
 }
 
-impl<S: TransactionHandler> Client<S> {
+impl Client {
+    pub async fn get_nonce(&self) -> Result<u64> {
+        let account = self.signer.public_key().to_account_id();
+        self.client.blocks().at_latest().await?.account_nonce(&account).await
+    }
+
     pub async fn chat_event_stream(
         &self,
     ) -> Result<impl futures::Stream<Item = Result<ChatStakeEvent>>> {
@@ -186,6 +144,14 @@ impl<S: TransactionHandler> Client<S> {
         &self,
     ) -> Result<impl futures::Stream<Item = Result<SateliteStakeEvent>>> {
         self.node_event_stream("sateliteStaker", unwrap_satelite_staker).await
+    }
+
+    async fn handle(&self, call: impl TxPayload, nonce: Nonce) -> Result<()> {
+        let mut data = ParamsFor::<Config>::default();
+        data.2 .0 = Some(nonce);
+        let signed = self.client.tx().create_signed(&call, &self.signer, data).await?;
+        let progress = signed.submit_and_watch().await?;
+        wait_for_in_block(progress, false).await.map(drop)
     }
 
     async fn node_event_stream<E: 'static>(
@@ -206,18 +172,23 @@ impl<S: TransactionHandler> Client<S> {
                 });
             Ok::<_, Error>(futures::stream::iter(iter))
         };
-        let sub = self.inner.client.blocks().subscribe_finalized().await?;
+        let sub = self.client.blocks().subscribe_finalized().await?;
         Ok(sub.then(then).try_flatten())
     }
 
-    pub async fn with_signer(url: &str, account: S) -> Result<Self> {
+    pub async fn with_signer(url: &str, signer: Keypair) -> Result<Self> {
         let client = OnlineClient::<Config>::from_url(url).await?;
-        Ok(Self { signer: account, inner: InnerClient { client } })
+        Ok(Self { signer, client })
+    }
+
+    pub async fn without_signer(url: &str) -> Result<Self> {
+        let client = OnlineClient::<Config>::from_url(url).await?;
+        Ok(Self { signer: Keypair::from_seed(crypto::SharedSecret::default()).unwrap(), client })
     }
 
     pub async fn transfere(&self, dest: AccountId, amount: Balance, nonce: Nonce) -> Result<()> {
         let transaction = polkadot::tx().balances().transfer_keep_alive(dest.into(), amount);
-        self.signer.handle(&self.inner, transaction, nonce).await
+        self.handle(transaction, nonce).await
     }
 
     pub async fn join(
@@ -228,7 +199,7 @@ impl<S: TransactionHandler> Client<S> {
         nonce: Nonce,
     ) -> Result<()> {
         let tx = chain_types::tx().chat_staker().join(data, enc, addr, 0);
-        self.signer.handle(&self.inner, tx, nonce).await
+        self.handle(tx, nonce).await
     }
 
     pub async fn list_chat_nodes(&self) -> Result<NodeVec> {
@@ -243,7 +214,7 @@ impl<S: TransactionHandler> Client<S> {
     where
         SA: StorageAddress<IsIterable = Yes, Target = NodeAddress> + 'static,
     {
-        let latest = self.inner.client.storage().at_latest().await?;
+        let latest = self.client.storage().at_latest().await?;
         latest
             .iter(tx)
             .await?
@@ -259,50 +230,45 @@ impl<S: TransactionHandler> Client<S> {
 
     pub async fn vote(&self, me: NodeIdentity, target: NodeIdentity, nonce: Nonce) -> Result<()> {
         let tx = chain_types::tx().chat_staker().vote(me, target);
-        self.signer.handle(&self.inner, tx, nonce).await
+        self.handle(tx, nonce).await
     }
 
     pub async fn reclaim(&self, me: NodeIdentity, nonce: Nonce) -> Result<()> {
-        self.signer.handle(&self.inner, chain_types::tx().chat_staker().reclaim(me), nonce).await
+        self.handle(chain_types::tx().chat_staker().reclaim(me), nonce).await
     }
 
     pub async fn register(&self, name: RawUserName, data: Profile, nonce: Nonce) -> Result<()> {
         let tx = chain_types::tx().user_manager().register_with_name(data, name);
-        self.signer.handle(&self.inner, tx, nonce).await
+        self.handle(tx, nonce).await
     }
 
     pub async fn get_profile_by_name(&self, name: RawUserName) -> Result<Option<Profile>> {
-        let latest = self.inner.client.storage().at_latest().await?;
+        let latest = self.client.storage().at_latest().await?;
         let tx = chain_types::storage().user_manager().username_to_owner(name);
         let Some(account_id) = latest.fetch(&tx).await? else { return Ok(None) };
         latest.fetch(&chain_types::storage().user_manager().identities(account_id)).await
     }
 
     pub async fn user_exists(&self, name: RawUserName) -> Result<bool> {
-        let latest = self.inner.client.storage().at_latest().await?;
+        let latest = self.client.storage().at_latest().await?;
         let tx = chain_types::storage().user_manager().username_to_owner(name);
         latest.fetch(&tx).await.map(|o| o.is_some())
     }
 
     pub async fn get_username(&self, id: crypto::Hash) -> Result<Option<RawUserName>> {
-        let latest = self.inner.client.storage().at_latest().await?;
+        let latest = self.client.storage().at_latest().await?;
         latest.fetch(&chain_types::storage().user_manager().identity_to_username(id)).await
     }
 
-    pub async fn get_nonce(&self) -> Result<u64> {
-        let id = self.signer.account_id_async().await?;
-        self.inner.get_nonce(&id).await
-    }
-
     pub async fn vote_if_possible(&self, source: NodeIdentity, target: NodeIdentity) -> Result<()> {
-        let latest = self.inner.client.storage().at_latest().await?;
+        let latest = self.client.storage().at_latest().await?;
 
         let vote_q = chain_types::storage().chat_staker().votes(target);
         if latest.fetch(&vote_q).await?.is_some_and(|v| v.contains(&source)) {
             return Ok(());
         }
 
-        let block_num = self.inner.client.blocks().at_latest().await?.number();
+        let block_num = self.client.blocks().at_latest().await?.number();
         let stake_q = chain_types::storage().chat_staker().stakes(target);
         let Some(stake) = latest.fetch(&stake_q).await? else {
             return Ok(());
@@ -316,7 +282,7 @@ impl<S: TransactionHandler> Client<S> {
     }
 
     pub async fn joined(&self, node_dientity: NodeIdentity) -> Result<bool> {
-        let latest = self.inner.client.storage().at_latest().await?;
+        let latest = self.client.storage().at_latest().await?;
         let q = chain_types::storage().chat_staker().addresses(node_dientity);
         latest.fetch(&q).await.map(|o| o.is_some())
     }
@@ -379,7 +345,7 @@ pub struct EnvConfig {
 }
 
 impl EnvConfig {
-    pub async fn client(&self) -> anyhow::Result<Client<Keypair>> {
+    pub async fn client(&self) -> anyhow::Result<Client> {
         let account = Keypair::from_phrase(&self.mnemonic, None)?;
 
         for node in self.chain_nodes.iter() {

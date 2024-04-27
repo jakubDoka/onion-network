@@ -1,4 +1,4 @@
-use {chain_api::TransactionHandler, clap::Parser, std::net::SocketAddr};
+use {clap::Parser, std::net::SocketAddr};
 
 #[derive(Parser)]
 pub enum Cmd {
@@ -62,7 +62,10 @@ impl Cmd {
                 }
             }
             Cmd::AccountIdOf { secret } => {
-                println!("{}", chain_api::Keypair::from_uri(&secret.0)?.account_id_async().await?)
+                println!(
+                    "{}",
+                    chain_api::Keypair::from_uri(&secret.0)?.public_key().to_account_id()
+                )
             }
             Cmd::RegisterNode { signer, chain_node, addr, node_dientity, node_enc_hash, nonce } => {
                 let client = chain_api::Client::with_signer(

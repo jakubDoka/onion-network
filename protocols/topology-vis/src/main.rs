@@ -399,7 +399,7 @@ async fn main() {
     );
 
     spawn_local(async move {
-        let nodes = chain_api::Client::with_signer(&chain_node(), ())
+        let nodes = chain_api::Client::without_signer(&chain_node())
             .await
             .unwrap()
             .list_chat_nodes()

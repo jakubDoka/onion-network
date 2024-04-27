@@ -85,7 +85,6 @@ cleanup_files() {
 	rm -rf tmp
 }
 generate_falcon() { (cd $FALCON_ROOT && sh transpile.sh || exit 1); }
-init_npm() { (cd $WALLET_INTEGRATION && npm i || exit 1); }
 
 rebuild_native() {
 		cargo build $FLAGS --workspace \
@@ -148,8 +147,6 @@ run_chain() {
 	subxt metadata > $METADATA_FILE
 	$TARGET_DIR/chain-helper bulk-transfer $BALANCE $CHAIN_NODES //Bob $TEST_WALLETS || exit 1 &
 }
-
-test -d $WALLET_INTEGRATION/node_modules || init_npm
 
 case $1 in
 	"just")

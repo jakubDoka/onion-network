@@ -87,12 +87,13 @@ pub struct DecFixed<T>(pub T);
 impl<T: DecodeOwned + Send + Sync + 'static, S: Stream> FromStream<S> for DecFixed<T> {
     fn from_context(
         stream: &mut Option<S>,
-        _len: usize,
+        len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
             let stream = stream.as_mut().ok_or(io::ErrorKind::InvalidInput)?;
             let mut result = std::mem::MaybeUninit::<T>::uninit();
             let bytes = codec::uninit_to_zeroed_slice(&mut result);
+            debug_assert_eq!(bytes.len(), len);
             stream.read_exact(bytes).await?;
             Ok(DecFixed(T::decode(&mut &*bytes).ok_or(io::ErrorKind::InvalidData)?))
         }
@@ -102,8 +103,9 @@ impl<T: DecodeOwned + Send + Sync + 'static, S: Stream> FromStream<S> for DecFix
 impl<S: Stream> FromStream<S> for () {
     fn from_context(
         _stream: &mut Option<S>,
-        _len: usize,
+        len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
+        debug_assert_eq!(len, 0);
         async move { Ok(()) }
     }
 }

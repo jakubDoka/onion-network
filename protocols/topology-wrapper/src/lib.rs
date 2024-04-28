@@ -431,6 +431,14 @@ pub mod muxer {
             std::task::Poll::Ready(self.closing_res.take().unwrap())
         }
     }
+
+    impl<T> Drop for Substream<T> {
+        fn drop(&mut self) {
+            if let Some(meta) = self.meta.take() {
+                self.sender.packets.try_send((meta, PacketKind::Closed)).unwrap();
+            }
+        }
+    }
 }
 
 #[cfg(feature = "disabled")]
@@ -456,7 +464,7 @@ pub mod report {
             PeerId, StreamProtocol,
         },
         std::{
-            collections::{HashMap, HashSet},
+            collections::{hash_map::Entry, HashMap},
             convert::Infallible,
             io,
         },
@@ -488,7 +496,7 @@ pub mod report {
 
     pub struct Behaviour {
         listeners: FuturesUnordered<UpdateStream>,
-        topology: HashMap<PeerIdWrapper, HashMap<usize, HashSet<String>>>,
+        topology: HashMap<PeerIdWrapper, HashMap<usize, HashMap<String, usize>>>,
         recv: EventReceiver,
     }
 
@@ -532,7 +540,8 @@ pub mod report {
 
             for (peer, connections) in &self.topology {
                 for (connection, protocols) in connections {
-                    for protocol in protocols {
+                    for (protocol, val) in protocols {
+                        debug_assert!(*val > 0);
                         let update = Update {
                             event: Event::Stream(protocol.as_str()),
                             peer: *peer,
@@ -572,12 +581,14 @@ pub mod report {
 
                 match extra {
                     ExtraEvent::Stream(p) => {
-                        self.topology
+                        *self
+                            .topology
                             .entry(peer)
                             .or_default()
                             .entry(connection)
                             .or_default()
-                            .insert(p);
+                            .entry(p)
+                            .or_default() += 1;
                     }
                     ExtraEvent::Disconnected => {
                         let peer_state = self.topology.entry(peer).or_default();
@@ -603,12 +614,20 @@ pub mod report {
                 }
 
                 if matches!(kind, crate::PacketKind::Closed) {
-                    self.topology
+                    let entry = self
+                        .topology
                         .entry(peer)
                         .or_default()
                         .entry(connection)
                         .or_default()
-                        .remove(proto.as_str());
+                        .entry(proto);
+
+                    if let Entry::Occupied(mut o) = entry {
+                        *o.get_mut() -= 1;
+                        if *o.get() == 0 {
+                            o.remove();
+                        }
+                    }
                 }
             }
 
@@ -756,8 +775,8 @@ mod impls {
 
     #[must_use]
     pub fn channel() -> (EventSender, EventReceiver) {
-        let (events_sender, events_receiver) = libp2p::futures::channel::mpsc::channel(5);
-        let (packets_sender, packets_receiver) = libp2p::futures::channel::mpsc::channel(5);
+        let (events_sender, events_receiver) = libp2p::futures::channel::mpsc::channel(30);
+        let (packets_sender, packets_receiver) = libp2p::futures::channel::mpsc::channel(30);
         (EventSender { events: events_sender, packets: packets_sender }, EventReceiver {
             events: events_receiver,
             packets: packets_receiver,

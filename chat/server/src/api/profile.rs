@@ -178,7 +178,7 @@ pub async fn send_mail(
 
 pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
     let profile = cx
-        .repl_rpc::<Result<Profile>>(identity, rpcs::FETCH_PROFILE_FULL, identity)
+        .repl_rpc::<Result<Profile>>(identity, rpcs::FETCH_PROFILE_FULL, ())
         .await?
         .into_iter()
         .filter_map(|(_, r)| r.ok())

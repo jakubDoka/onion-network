@@ -188,6 +188,10 @@ impl Default for World {
             protocols: vec![
                 Protocol { name: "/onion/rot/0.1.0".into(), color: Color::from_hex(0x0066_00cc) },
                 Protocol { name: "/onion/ksr/0.1.0".into(), color: Color::from_hex(0x00cc_ccff) },
+                Protocol {
+                    name: "/streaming/streaming/0.1.0".into(),
+                    color: Color::from_hex(0x0000_ffff),
+                },
             ],
             center_node: Node::new(0.0, 0.0, PeerId::random()),
         }

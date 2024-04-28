@@ -1,3 +1,4 @@
+#![feature(type_alias_impl_trait)]
 #![feature(iter_advance_by)]
 #![feature(never_type)]
 #![feature(lazy_cell)]
@@ -18,6 +19,7 @@ use {
     crate::api::State,
     anyhow::Context as _,
     api::FullReplGroup,
+    arrayvec::ArrayVec,
     chain_api::{ChatStakeEvent, NodeIdentity, NodeKeys, NodeVec, StakeEvents},
     chat_spec::{
         ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, ResponseHeader, Topic,
@@ -33,6 +35,7 @@ use {
         futures::{
             channel::{mpsc, oneshot},
             future::{Either, JoinAll, TryJoinAll},
+            stream::FuturesUnordered,
             AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt, TryFutureExt,
         },
         swarm::{NetworkBehaviour, SwarmEvent},
@@ -42,8 +45,14 @@ use {
     opfusk::{PeerIdExt, ToPeerId},
     rand_core::OsRng,
     std::{
-        collections::HashMap, future::Future, io, net::Ipv4Addr, ops::DerefMut, sync::Arc,
-        task::Poll, time::Duration,
+        collections::HashMap,
+        future::Future,
+        io,
+        net::Ipv4Addr,
+        ops::DerefMut,
+        sync::Arc,
+        task::Poll,
+        time::{Duration, Instant},
     },
     tokio::sync::RwLock,
     topology_wrapper::BuildWrapped,
@@ -54,6 +63,8 @@ mod db;
 mod reputation;
 #[cfg(test)]
 mod tests;
+
+const STREAM_POOL_STREAM_LIFETIME: Duration = Duration::from_secs(5);
 
 type Context = &'static OwnedContext;
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
@@ -70,6 +81,16 @@ async fn main() -> anyhow::Result<()> {
     Server::new(node_config, keys, node_list, stake_events).await?.await;
 
     Ok(())
+}
+
+type PooledStream = impl Future<Output = io::Result<(libp2p::Stream, RequestHeader, NodeIdentity)>>;
+
+fn pool_stream(peer: NodeIdentity, mut stream: libp2p::Stream) -> PooledStream {
+    async move {
+        let mut buf = [0; std::mem::size_of::<RequestHeader>()];
+        tokio::time::timeout(STREAM_POOL_STREAM_LIFETIME, stream.read_exact(&mut buf)).await??;
+        Ok((stream, RequestHeader::from_array(buf), peer))
+    }
 }
 
 #[derive(Parser)]
@@ -92,6 +113,8 @@ struct Server {
     stake_events: StakeEvents<ChatStakeEvent>,
     stream_requests: mpsc::Receiver<(NodeIdentity, oneshot::Sender<libp2p::Stream>)>,
     penidng_stream_requests: HashMap<NodeIdentity, Vec<oneshot::Sender<libp2p::Stream>>>,
+    recycled_streams: mpsc::Receiver<(NodeIdentity, libp2p::Stream)>,
+    stream_pool: FuturesUnordered<PooledStream>,
 }
 
 impl Server {
@@ -143,7 +166,7 @@ impl Server {
                     .include_in_vis(sender.clone()),
                 dht: dht::Behaviour::new(chain_api::filter_incoming),
                 report: topology_wrapper::report::new(receiver),
-                streaming: streaming::Behaviour::new(),
+                streaming: streaming::Behaviour::new().include_in_vis(sender),
             },
             keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_tokio_executor()
@@ -172,6 +195,7 @@ impl Server {
         swarm.behaviour_mut().dht.table.write().bulk_insert(node_data);
 
         let stream_requests = mpsc::channel(100);
+        let recycled_streams = mpsc::channel(100);
 
         Ok(Self {
             context: Box::leak(Box::new(OwnedContext {
@@ -182,53 +206,21 @@ impl Server {
                 clients: Default::default(),
                 profile_subs: Default::default(),
                 stream_requests: stream_requests.0,
+                recycled_streams: recycled_streams.0,
+                stream_cache: StreamCache::default(),
                 local_peer_id: swarm.local_peer_id().to_hash(),
                 dht: swarm.behaviour_mut().dht.table,
             })),
+            stream_pool: Default::default(),
             swarm,
             stake_events,
             stream_requests: stream_requests.1,
+            recycled_streams: recycled_streams.1,
             penidng_stream_requests: Default::default(),
         })
     }
 
     fn swarm_event(&mut self, event: SE) {
-        async fn handle_server_request(
-            mut stream: libp2p::Stream,
-            cx: Context,
-            id: PeerId,
-        ) -> io::Result<()> {
-            let identity = id.to_hash();
-
-            let mut num_buf = [0u8; std::mem::size_of::<RequestHeader>()];
-            stream.read_exact(&mut num_buf).await?;
-            let header = RequestHeader::from_array(num_buf);
-            let len = header.get_len();
-
-            let topic = Topic::decompress(header.topic);
-            let repl_group =
-                cx.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
-
-            if !repl_group.contains(&identity.into()) {
-                reputation::Rep::get().rate(identity, 100);
-                return Err(io::ErrorKind::InvalidInput.into());
-            }
-
-            let state = State {
-                location: OnlineLocation::Remote(identity),
-                context: cx,
-                id: header.call_id,
-                topic,
-                prefix: header.prefix,
-            };
-
-            api::server_router([0; 4], header.prefix, len, state, stream)
-                .await
-                .ok_or(io::ErrorKind::PermissionDenied)??
-                .ok_or(io::ErrorKind::ConnectionAborted.into())
-                .map(drop)
-        }
-
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Onion(onion::Event::InboundStream(
                 stream,
@@ -266,7 +258,7 @@ impl Server {
             ))) => {
                 let ctx = self.context;
                 tokio::spawn(async move {
-                    if let Err(err) = handle_server_request(stream, ctx, id).await {
+                    if let Err(err) = Self::server_request(stream, ctx, id).await {
                         log::warn!("failed to handle incoming stream: {err}");
                     }
                 });
@@ -287,6 +279,49 @@ impl Server {
         self.swarm.behaviour_mut().streaming.create_stream(id.to_peer_id());
         self.penidng_stream_requests.entry(id).or_default().push(sender);
     }
+
+    async fn server_request(mut stream: libp2p::Stream, cx: Context, id: PeerId) -> io::Result<()> {
+        let identity = id.to_hash();
+
+        let mut num_buf = [0u8; std::mem::size_of::<RequestHeader>()];
+        stream.read_exact(&mut num_buf).await?;
+        let header = RequestHeader::from_array(num_buf);
+
+        Self::server_response(cx, (stream, header, identity)).await
+    }
+
+    async fn server_response(
+        cx: Context,
+        (stream, header, identity): (libp2p::Stream, RequestHeader, NodeIdentity),
+    ) -> io::Result<()> {
+        let len = header.get_len();
+
+        let topic = Topic::decompress(header.topic);
+        let repl_group =
+            cx.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
+
+        if !repl_group.contains(&identity.into()) {
+            reputation::Rep::get().rate(identity, 100);
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "not in replication group",
+            ));
+        }
+
+        let state = State {
+            location: OnlineLocation::Remote(identity),
+            context: cx,
+            id: header.call_id,
+            topic,
+            prefix: header.prefix,
+        };
+
+        api::server_router([0; 4], header.prefix, len, state, stream)
+            .await
+            .ok_or(io::ErrorKind::Unsupported)??
+            .ok_or(io::ErrorKind::ConnectionAborted.into())
+            .map(|s| _ = cx.recycled_streams.clone().try_send((identity, s)))
+    }
 }
 
 impl Future for Server {
@@ -304,6 +339,21 @@ impl Future for Server {
             .stream(f!(mut swarm), Self::swarm_event)
             .try_stream(f!(mut stake_events), Self::stake_event, log_stake)
             .stream(f!(mut stream_requests), Self::stream_request)
+            .stream(f!(mut recycled_streams), |this, (peer, stream)| {
+                this.stream_pool.push(pool_stream(peer, stream));
+            })
+            .try_stream(
+                f!(mut stream_pool),
+                |s, dt| {
+                    let cx = s.context;
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::server_response(cx, dt).await {
+                            log::warn!("failed to handle incoming stream: {e}");
+                        }
+                    });
+                },
+                |_, _| {},
+            )
             .done()
         {}
 
@@ -323,7 +373,7 @@ pub struct Behaviour {
     dht: dht::Behaviour,
     report: topology_wrapper::report::Behaviour,
     key_share: topology_wrapper::Behaviour<key_share::Behaviour>,
-    streaming: streaming::Behaviour,
+    streaming: topology_wrapper::Behaviour<streaming::Behaviour>,
 }
 
 pub enum ClientEvent {
@@ -432,6 +482,29 @@ pub enum OnlineLocation {
     Remote(NodeIdentity),
 }
 
+const STREAM_CACHE_SIZE: usize = 10;
+
+#[derive(Default)]
+pub struct StreamCache {
+    recycled: DashMap<NodeIdentity, ArrayVec<(libp2p::Stream, Instant), STREAM_CACHE_SIZE>>,
+}
+
+impl StreamCache {
+    fn recycle(&self, peer: NodeIdentity, stream: libp2p::Stream) {
+        _ = self.recycled.entry(peer).or_default().try_push((stream, Instant::now()));
+    }
+
+    fn reuse(&self, peer: NodeIdentity) -> Option<libp2p::Stream> {
+        let mut slot = self.recycled.get_mut(&peer)?;
+        slot.retain(|(_, time)| {
+            time.elapsed() < STREAM_POOL_STREAM_LIFETIME - Duration::from_secs(2)
+        });
+        slot.pop().map(|(stream, _)| stream)
+    }
+}
+
+unsafe impl Sync for StreamCache {}
+
 // TODO: switch to lmdb
 // TODO: remove recovery locks, ommit response instead
 pub struct OwnedContext {
@@ -441,7 +514,9 @@ pub struct OwnedContext {
     chat_subs: DashMap<ChatName, HashMap<PathId, CallId>>,
     profile_subs: DashMap<Identity, (PathId, CallId)>,
     stream_requests: mpsc::Sender<(NodeIdentity, oneshot::Sender<libp2p::Stream>)>,
+    recycled_streams: mpsc::Sender<(NodeIdentity, libp2p::Stream)>,
     clients: DashMap<PathId, Client>,
+    stream_cache: StreamCache,
     local_peer_id: NodeIdentity,
     dht: SharedRoutingTable,
 }
@@ -471,6 +546,10 @@ impl OwnedContext {
     }
 
     async fn open_stream_with(&self, node: NodeIdentity) -> Option<libp2p::Stream> {
+        if let Some(stream) = self.stream_cache.reuse(node) {
+            return Some(stream);
+        }
+
         let (sender, recv) = oneshot::channel();
         self.stream_requests.clone().send((node, sender)).await.ok()?;
         recv.await.ok()
@@ -497,6 +576,7 @@ impl OwnedContext {
         stream.flush().await?;
 
         if std::mem::size_of::<R>() == 0 {
+            self.stream_cache.recycle(peer, stream);
             return Ok(unsafe { std::mem::zeroed() });
         }
 
@@ -505,6 +585,7 @@ impl OwnedContext {
         let header = ResponseHeader::from_array(buf);
         let mut buf = vec![0; header.get_len()];
         stream.read_exact(&mut buf).await?;
+        self.stream_cache.recycle(peer, stream);
         R::decode(&mut buf.as_slice()).ok_or(ChatError::InvalidResponse)
     }
 
@@ -553,6 +634,9 @@ impl OwnedContext {
             .await;
 
         if std::mem::size_of::<R>() == 0 {
+            for (id, stream) in streams {
+                self.stream_cache.recycle(id.into(), stream);
+            }
             return Ok(ReplVec::default());
         }
 
@@ -565,6 +649,7 @@ impl OwnedContext {
                     let header = ResponseHeader::from_array(buf);
                     let mut buf = vec![0; header.get_len()];
                     stream.read_exact(&mut buf).await?;
+                    self.stream_cache.recycle(id.into(), stream);
                     Ok::<_, ChatError>((
                         id.into(),
                         R::decode(&mut buf.as_slice()).ok_or(ChatError::InvalidResponse)?,

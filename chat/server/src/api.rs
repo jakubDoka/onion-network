@@ -177,8 +177,7 @@ where
                 return us;
             }
 
-            let others =
-                cx.repl_rpc_low::<<H::Future as Future>::Output>(topic, prefix, &req_bytes).await?;
+            let others = cx.repl_rpc_low::<Result<O>>(topic, prefix, &req_bytes).await?;
             let us = (cx.local_peer_id, us);
 
             let mut resps = others.into_iter().chain(std::iter::once(us)).collect::<GroupVec<_>>();

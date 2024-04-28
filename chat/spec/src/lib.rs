@@ -108,14 +108,13 @@ pub enum ChatError {
     InvalidResponse,
     #[error("timeout")]
     Timeout,
+    #[error("io error: {0}")]
+    Io(io::ErrorKind),
 }
 
 impl From<io::Error> for ChatError {
     fn from(e: io::Error) -> Self {
-        match e.kind() {
-            io::ErrorKind::TimedOut => Self::Timeout,
-            _ => Self::InvalidResponse,
-        }
+        Self::Io(e.kind())
     }
 }
 
@@ -209,7 +208,7 @@ pub fn advance_nonce(current: &mut Nonce, new: Nonce) -> bool {
 }
 
 #[repr(packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RequestHeader {
     pub prefix: u8,
     pub call_id: [u8; 4],

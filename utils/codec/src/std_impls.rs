@@ -143,6 +143,42 @@ impl<'a, T: Decode<'a>> Decode<'a> for std::collections::VecDeque<T> {
     }
 }
 
+const ERROR_LIST: &'static [io::ErrorKind] = &[
+    io::ErrorKind::NotFound,
+    io::ErrorKind::PermissionDenied,
+    io::ErrorKind::ConnectionRefused,
+    io::ErrorKind::ConnectionReset,
+    io::ErrorKind::ConnectionAborted,
+    io::ErrorKind::NotConnected,
+    io::ErrorKind::AddrInUse,
+    io::ErrorKind::AddrNotAvailable,
+    io::ErrorKind::BrokenPipe,
+    io::ErrorKind::AlreadyExists,
+    io::ErrorKind::WouldBlock,
+    io::ErrorKind::InvalidInput,
+    io::ErrorKind::InvalidData,
+    io::ErrorKind::TimedOut,
+    io::ErrorKind::WriteZero,
+    io::ErrorKind::Interrupted,
+    io::ErrorKind::Unsupported,
+    io::ErrorKind::UnexpectedEof,
+    io::ErrorKind::OutOfMemory,
+    io::ErrorKind::Other,
+];
+
+impl Encode for io::ErrorKind {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        ERROR_LIST.iter().position(|e| e == self).unwrap_or(127).encode(buffer)
+    }
+}
+
+impl<'a> Decode<'a> for io::ErrorKind {
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let idx = usize::decode(buffer)?;
+        ERROR_LIST.get(idx).copied()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ReminderOwned(pub Vec<u8>);
 

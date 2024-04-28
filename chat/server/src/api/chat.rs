@@ -393,7 +393,7 @@ pub async fn recover(cx: crate::Context, name: ChatName) -> Result<()> {
     let chat = cx.chats.entry(name).or_default().clone();
 
     let mut repl_chat_data = cx
-        .repl_rpc::<Result<MinimalChatData>>(name, rpcs::FETCH_CHAT_DATA, name)
+        .repl_rpc::<Result<MinimalChatData>>(name, rpcs::FETCH_CHAT_DATA, ())
         .await?
         .into_iter()
         .filter_map(|(p, s)| s.ok().map(|s| (p, s)))

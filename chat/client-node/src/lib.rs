@@ -155,7 +155,7 @@ impl UserKeys {
         }
     }
 
-    fn chain_client(&self) -> impl Future<Output = chain_api::Result<chain::Client>> {
+    pub fn chain_client(&self) -> impl Future<Output = chain_api::Result<chain::Client>> {
         component_utils::build_env!(CHAIN_NODES);
 
         thread_local! {

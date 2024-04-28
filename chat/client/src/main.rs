@@ -17,9 +17,9 @@ use {
     chain_api::Nonce,
     chat_client_node::{
         encode_direct_chat_name, BootPhase, FriendMessage, MailVariants, Node, NodeHandle,
-        RequestContext, UserKeys, Vault, VaultComponentId,
+        RequestContext, Subscription, UserKeys, Vault, VaultComponentId,
     },
-    chat_spec::{ChatName, UserName},
+    chat_spec::{ChatName, Topic},
     codec::{Decode, ReminderOwned},
     leptos::*,
     leptos_router::{Route, Router, Routes, A},
@@ -84,6 +84,15 @@ impl RequestContext for State {
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
         self.mail_action.try_update_value(action).with_context(rc_error("mail action"))
     }
+
+    fn subscription_for(&self, t: impl Into<Topic>) -> impl Future<Output = Result<Subscription>> {
+        let fut = self
+            .requests
+            .try_with_value(|r| r.as_ref().map(|r| r.subscription_for(t)))
+            .flatten()
+            .context("dispatch closed");
+        async { fut?.await.map_err(Into::into) }
+    }
 }
 
 impl State {
@@ -111,9 +120,8 @@ fn App() -> impl IntoView {
         vault_updates: &mut Vec<VaultComponentId>,
         state: State,
     ) -> Result<()> {
-        let dispatch = state.requests.get_value().context("no dispatch")?;
         let mut messages = Vec::new();
-        mail.handle(&state, dispatch, vault_updates, &mut messages).await?;
+        mail.handle(&state, vault_updates, &mut messages).await?;
         if let Some((sender, FriendMessage::DirectMessage { content })) = messages.pop() {
             let message = db::Message {
                 sender,
@@ -135,7 +143,7 @@ fn App() -> impl IntoView {
         handled_spawn_local("initializing node", async move {
             let identity = keys.identity();
             navigate_to("/");
-            let (node, vault, mut dispatch, vault_version, mail_action) =
+            let (node, vault, dispatch, vault_version, mail_action) =
                 Node::new(keys, |s| wboot_phase(Some(s)))
                     .await
                     .inspect_err(|_| navigate_to("/login"))?;
@@ -161,25 +169,25 @@ fn App() -> impl IntoView {
 
             let mut profile_sub_clone = profile_sub.clone();
             let listen = async move {
-                let mut account = profile_sub_clone
-                    .subscribe_to_profile(identity)
-                    .await
-                    .context("subscribint to account")?;
                 let mut vault_updates = Vec::new();
                 let mut new_messages = Vec::new();
-                while let Some(mail) = account.next().await {
-                    let task = async {
-                        handle_mail(mail, &mut new_messages, &mut vault_updates, state).await?;
-                        db::save_messages(&new_messages).await?;
-                        profile_sub_clone
-                            .save_vault_components(vault_updates.drain(..), &state)
-                            .await
-                    };
-                    handle_error(task.await);
-                    new_messages.clear();
+                loop {
+                    let mut account = profile_sub_clone
+                        .subscribe_to_profile(identity)
+                        .await
+                        .context("subscribin to account")?;
+                    while let Some(mail) = account.next().await {
+                        let task = async {
+                            handle_mail(mail, &mut new_messages, &mut vault_updates, state).await?;
+                            db::save_messages(&new_messages).await?;
+                            profile_sub_clone
+                                .save_vault_components(vault_updates.drain(..), &state)
+                                .await
+                        };
+                        handle_error(task.await);
+                        new_messages.clear();
+                    }
                 }
-
-                anyhow::Result::Ok(())
             };
 
             state.requests.set_value(Some(dispatch));
@@ -189,7 +197,7 @@ fn App() -> impl IntoView {
             navigate_to("/chat");
 
             let res = libp2p::futures::select! {
-                _ = node.fuse() => Err(anyhow::anyhow!("local node terminated")),
+                _ = node.fuse() => return Ok(()),
                 e = listen.fuse() => e,
             };
             navigate_to("/login");
@@ -290,16 +298,27 @@ fn Boot(rboot_phase: ReadSignal<Option<BootPhase>>) -> impl IntoView {
 }
 
 #[component]
-fn Nav(my_name: UserName) -> impl IntoView {
+fn Nav(keys: RwSignal<Option<UserKeys>>) -> impl IntoView {
     let menu = create_node_ref::<html::Div>();
+    let balance = create_rw_signal(0u128);
+
     let on_menu_toggle = move |_| {
         let menu = menu.get_untracked().unwrap();
         menu.set_hidden(!menu.hidden());
     };
+    let reload_balance = handled_async_closure("reloading balance", move || async move {
+        let keys = keys.get_untracked().context("no keys")?;
+        let b = keys.chain_client().await?.get_balance().await?;
+        balance.set(b);
+        Ok(())
+    });
 
-    let uname = move || my_name.to_string();
+    reload_balance();
 
-    view! {
+    let uname = move || keys.get_untracked().as_ref().map_or("", |k| &k.name).to_owned();
+    let balance = move || chain_api::format_balance(balance());
+
+    Some(view! {
         <nav class="sc flx fdc fg0 phone-only">
             <div class="flx jcsb">
                 <button class="rsb hov sc nav-menu-button" on:click=on_menu_toggle>/menu</button>
@@ -318,9 +337,10 @@ fn Nav(my_name: UserName) -> impl IntoView {
                 <A class="bf hov bp sc sb" href="/profile">/profile</A>
                 <A class="bf hov bp sc sb" href="/login">/logout</A>
             </div>
+            <div class="bp bf hc" on:click=move |_| reload_balance()>{balance}</div>
             <div class="bp bf hc lsb">{uname}</div>
         </nav>
-    }
+    })
 }
 
 fn get_value(elem: NodeRef<html::Input>) -> String {

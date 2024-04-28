@@ -2,7 +2,10 @@ use {
     crate::{handled_async_callback, State, UserKeys},
     anyhow::Context,
     chat_spec::UserName,
-    leptos::{html::Input, *},
+    leptos::{
+        html::{Div, Input},
+        *,
+    },
     leptos_router::A,
     web_sys::SubmitEvent,
 };
@@ -18,9 +21,16 @@ pub fn Login(state: State) -> impl IntoView {
 }
 
 fn form(state: State, register: bool) -> impl IntoView {
+    state.requests.set_value(None);
+
+    let action = if register { "register" } else { "login" };
+
+    let prev_account_id = create_rw_signal(chain_api::AccountId::from([0; 32]));
+    let hint = create_node_ref::<Div>();
     let username = create_node_ref::<Input>();
     let password = create_node_ref::<Input>();
-    let on_login = handled_async_callback("logging in", move |e: SubmitEvent| async move {
+
+    let on_login = handled_async_callback(action, move |e: SubmitEvent| async move {
         e.prevent_default();
 
         let username = crate::get_value(username);
@@ -30,6 +40,18 @@ fn form(state: State, register: bool) -> impl IntoView {
         let keys = UserKeys::new(username, password.as_str());
 
         if register {
+            let account_id = keys.chain_client().await?.account_id();
+            if account_id != prev_account_id.get_untracked() {
+                let msg = format!(
+                    "your hot wallet adress is {account_id} \
+                    transfere funds here to pay for registration\
+                    (TODO: hint amount)"
+                );
+                hint.get_untracked().unwrap().set_text_content(Some(&msg));
+                prev_account_id.set(account_id);
+                return Ok(());
+            }
+
             keys.register().await?;
         }
 
@@ -37,7 +59,6 @@ fn form(state: State, register: bool) -> impl IntoView {
         Ok(())
     });
 
-    let action = if register { "register" } else { "login" };
     view! {
         <div class="sc flx fdc bp ma">
             <Nav/>
@@ -47,6 +68,7 @@ fn form(state: State, register: bool) -> impl IntoView {
                 <input class="pc hov bp tbm" type="password" style:width="250px"
                     node_ref=password placeholder="password" />
                 <input class="pc hov bp tbm" type="submit" value=action />
+                <div hidden=!register node_ref=hint>"Registration is not free!"</div>
             </form>
         </div>
     }

@@ -73,6 +73,10 @@ pub async fn wait_for_in_block(
     Err(subxt::Error::Unknown(vec![]))
 }
 
+pub fn format_balance(amount: Balance) -> String {
+    format!("{:.2} BORN", amount as f64 / 1_000_000_000_000.0)
+}
+
 #[derive(Clone)]
 pub struct Client {
     signer: Keypair,
@@ -95,9 +99,9 @@ impl Client {
     }
 
     pub async fn get_balance(&self) -> Result<Balance> {
-        let q = polkadot::storage().balances().account(&self.account_id());
+        let q = chain_types::storage().system().account(self.account_id());
         let fetched = self.client.storage().at_latest().await?.fetch(&q).await?;
-        fetched.ok_or_else(|| Error::Other("not found".to_string())).map(|b| b.free)
+        fetched.ok_or_else(|| Error::Other("not found".to_string())).map(|b| b.data.free)
     }
 
     pub async fn get_nonce(&self) -> Result<u64> {

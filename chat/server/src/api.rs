@@ -1,7 +1,9 @@
 use {
-    crate::{reputation::Rated, Context, OnlineLocation},
+    crate::{rate_map, reputation::Rated, Context, OnlineLocation},
     chain_api::NodeIdentity,
-    chat_spec::{ChatError, ChatName, GroupVec, Identity, ReplVec, Topic, REPLICATION_FACTOR},
+    chat_spec::{
+        rpcs, ChatError, ChatName, GroupVec, Identity, ReplVec, Topic, REPLICATION_FACTOR,
+    },
     codec::{DecodeOwned, Encode},
     dht::U256,
     handlers::CallId,
@@ -19,6 +21,76 @@ pub type ReplGroup = ReplVec<U256>;
 pub type FullReplGroup = GroupVec<U256>;
 pub type Prefix = u8;
 pub type Origin = PeerId;
+
+pub async fn subscribe(
+    cx: Context,
+    topic: Topic,
+    user: PathId,
+    cid: CallId,
+    _: (),
+) -> Result<(), ChatError> {
+    match topic {
+        Topic::Chat(name) if cx.chats.contains_key(&name) => {
+            cx.chat_subs.entry(name).or_default().insert(user, cid);
+            Ok(())
+        }
+        Topic::Profile(id) => {
+            cx.profile_subs.insert(id, (user, cid));
+            Ok(())
+        }
+        _ => Err(ChatError::NotFound),
+    }
+}
+
+pub async fn unsubscribe(cx: Context, topic: Topic, user: PathId, _: ()) -> Result<(), ChatError> {
+    match topic {
+        Topic::Chat(name) => {
+            let mut subs = cx.chat_subs.get_mut(&name).ok_or(ChatError::NotFound)?;
+            subs.remove(&user).ok_or(ChatError::NotFound).map(drop)
+        }
+        // TODO: perform access control with signature
+        Topic::Profile(id) => cx.profile_subs.remove(&id).ok_or(ChatError::NotFound).map(drop),
+    }
+}
+
+handlers::router! { pub client_router(State):
+    rpcs::CREATE_CHAT => chat::create.repl();
+    rpcs::ADD_MEMBER => chat::add_member.repl().restore();
+    rpcs::KICK_MEMBER => chat::kick_member.repl().restore();
+    rpcs::SEND_MESSAGE => chat::send_message.repl().restore();
+    rpcs::FETCH_MESSAGES => chat::fetch_messages.restore();
+    rpcs::FETCH_MEMBERS => chat::fetch_members.restore();
+    rpcs::CREATE_PROFILE => profile::create.repl();
+    rpcs::SEND_MAIL => profile::send_mail.repl().restore();
+    rpcs::READ_MAIL => profile::read_mail.repl().restore();
+    rpcs::INSERT_TO_VAULT => profile::insert_to_vault.repl().restore();
+    rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.repl().restore();
+    rpcs::FETCH_PROFILE => profile::fetch_keys.restore();
+    rpcs::FETCH_VAULT => profile::fetch_vault.restore();
+    rpcs::FETCH_VAULT_KEY => profile::fetch_vault_key.restore();
+    rpcs::SUBSCRIBE => subscribe.restore();
+    rpcs::UNSUBSCRIBE => unsubscribe.restore();
+}
+
+handlers::router! { pub server_router(State):
+     rpcs::CREATE_CHAT => chat::create;
+     rpcs::ADD_MEMBER => chat::add_member.restore();
+     rpcs::KICK_MEMBER => chat::kick_member.restore();
+     rpcs::SEND_BLOCK => chat::handle_message_block
+         .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
+         .restore();
+     rpcs::FETCH_CHAT_DATA => chat::fetch_chat_data.rated(rate_map!(20));
+     rpcs::SEND_MESSAGE => chat::send_message.restore();
+     rpcs::VOTE_BLOCK => chat::vote
+         .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 })
+         .restore();
+     rpcs::CREATE_PROFILE => profile::create;
+     rpcs::SEND_MAIL => profile::send_mail.restore();
+     rpcs::READ_MAIL => profile::read_mail.restore();
+     rpcs::INSERT_TO_VAULT => profile::insert_to_vault.restore();
+     rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.restore();
+     rpcs::FETCH_PROFILE_FULL => profile::fetch_full.rated(rate_map!(20));
+}
 
 pub struct State {
     pub location: OnlineLocation,

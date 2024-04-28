@@ -1,12 +1,10 @@
-use {chat_client_node::Theme, leptos::*, leptos_router::Redirect};
+use {
+    chat_client_node::{RequestContext, Theme},
+    leptos::*,
+};
 
 #[component]
 pub fn Profile(state: crate::State) -> impl IntoView {
-    let Some(keys) = state.keys.get_untracked() else {
-        return view! { <Redirect path="/login"/> }.into_view();
-    };
-    let my_name = keys.name;
-
     let colors = Theme::KEYS;
     let style = web_sys::window()
         .unwrap()
@@ -35,11 +33,11 @@ pub fn Profile(state: crate::State) -> impl IntoView {
 
     let on_save = crate::handled_async_callback("saving theme", move |_| async move {
         let them = Theme::from_current().unwrap_or_default();
-        state.requests.get_value().unwrap().set_theme(them, state).await
+        state.set_theme(them).await
     });
 
     view! {
-        <crate::Nav my_name />
+        <crate::Nav keys=state.keys />
         <main class="tbm fg1 sc bp">
             <div class="flx">
                 <form id="theme-form" class="flx fg0 fdc bp pc">

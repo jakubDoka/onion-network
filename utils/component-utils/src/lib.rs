@@ -183,6 +183,26 @@ impl<'a, 'b, C> Selector<'a, 'b, C> {
         self
     }
 
+    pub fn stream_catch_closed<S, SF, F>(mut self, mut stream: SF, mut f: F) -> Result<Self, ()>
+    where
+        SF: FnMut(&mut C) -> &mut S,
+        S: Stream + Unpin + StreamIsEmpty,
+        F: FnMut(&mut C, S::Item),
+    {
+        if stream.is_empty() {
+            return Ok(self);
+        }
+
+        while let std::task::Poll::Ready(event) = stream(self.context).poll_next_unpin(self.cx) {
+            let event = event.ok_or(())?;
+
+            f(self.context, event);
+            self.progressed = true;
+        }
+
+        Ok(self)
+    }
+
     pub fn try_stream<S, O, E>(
         self,
         stream: impl FnMut(&mut C) -> &mut S,

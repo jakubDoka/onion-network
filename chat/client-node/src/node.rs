@@ -30,7 +30,7 @@ use {
         io,
         ops::DerefMut,
         pin,
-        rc::Rc,
+        rc::{self, Rc},
         task::Poll,
     },
 };
@@ -50,6 +50,8 @@ pub struct Node {
     swarm: Swarm<Behaviour>,
     pending_streams: HashMap<(PeerId, PathId), oneshot::Sender<(NodeIdentity, EncryptedStream)>>,
     requests: mpsc::Receiver<NodeRequest>,
+    #[allow(dead_code)]
+    subs: Rc<Subs>,
 }
 
 impl Node {
@@ -79,7 +81,8 @@ impl Node {
         );
 
         let (commands_rx, requests) = mpsc::channel(10);
-        let handle = NodeHandle::new(commands_rx, swarm.behaviour_mut().chat_dht.table);
+        let subs = Rc::new(Subs::default());
+        let handle = NodeHandle::new(commands_rx, &subs, swarm.behaviour_mut().chat_dht.table);
         let chain_api = keys.chain_client().await?;
         let node_request = chain_api.list_chat_nodes();
         let satelite_request = chain_api.list_satelite_nodes();
@@ -134,7 +137,7 @@ impl Node {
                             let remining =
                                 node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance;
                             set_state!(CollecringKeys(remining));
-                            if remining == 0 || swarm.behaviour_mut().key_share.keys.len() >= 8 {
+                            if remining == 0 {
                                 break;
                             }
                         }
@@ -225,13 +228,13 @@ impl Node {
         let _ = vault.theme.apply();
 
         let id = profile_stream_peer.to_hash();
-        let sub = Subscription::new(profile_stream, handle.clone(), id);
-        handle.subs.borrow_mut().insert(id, sub);
+        let sub = Subscription::new(profile_stream, handle.subs.clone(), id);
+        subs.borrow_mut().insert(id, sub);
 
         set_state!(ChatRun);
 
         Ok((
-            Self { swarm, pending_streams: Default::default(), requests },
+            Self { swarm, pending_streams: Default::default(), requests, subs },
             vault,
             handle,
             vault_nonce,
@@ -278,7 +281,7 @@ impl Future for Node {
 
         while component_utils::Selector::new(self.deref_mut(), cx)
             .stream(f!(mut swarm), Self::swarm_event)
-            .stream(f!(mut requests), Self::request)
+            .stream_catch_closed(f!(mut requests), Self::request)?
             .done()
         {}
 
@@ -308,8 +311,8 @@ fn pick_route(
     multiple.try_into().ok()
 }
 
-#[allow(deprecated)]
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
+type Subs = RefCell<HashMap<NodeIdentity, Subscription>>;
 
 enum SubscriptionRequest {
     Chat(ChatName, mpsc::Sender<ChatEvent>),
@@ -321,41 +324,64 @@ pub enum NodeRequest {
     Subscribe(Topic, oneshot::Sender<(NodeIdentity, EncryptedStream)>),
 }
 
-#[derive(Clone)]
 pub struct NodeHandle {
-    subs: Rc<RefCell<HashMap<NodeIdentity, Subscription>>>,
+    subs: rc::Weak<Subs>,
     requests: mpsc::Sender<NodeRequest>,
     dht: dht::SharedRoutingTable,
 }
 
 impl NodeHandle {
-    pub fn new(requests: mpsc::Sender<NodeRequest>, dht: dht::SharedRoutingTable) -> Self {
-        Self { requests, subs: Default::default(), dht }
+    fn new(
+        requests: mpsc::Sender<NodeRequest>,
+        subs: &Rc<Subs>,
+        dht: dht::SharedRoutingTable,
+    ) -> Self {
+        Self { requests, subs: Rc::downgrade(subs), dht }
     }
 
-    pub async fn subscription_for(&mut self, topic: impl Into<Topic>) -> io::Result<Subscription> {
+    fn upgrade(&self) -> io::Result<Rc<RefCell<HashMap<NodeIdentity, Subscription>>>> {
+        self.subs.upgrade().ok_or(io::ErrorKind::ConnectionReset.into())
+    }
+
+    pub fn subscription_for(
+        &self,
+        topic: impl Into<Topic>,
+    ) -> impl Future<Output = io::Result<Subscription>> {
+        let subs = self.upgrade();
+        let mut rqs = self.requests.clone();
         let topic = topic.into();
         let replicatios =
             self.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
 
-        log::debug!("replicatios: {:?}", replicatios);
+        async move {
+            let subs = subs?;
+            log::debug!("replicatios: {:?}", replicatios);
 
-        for repl in replicatios.clone() {
-            if let Some(sub) = self.subs.borrow().get(&NodeIdentity::from(repl)) {
-                return Ok(sub.clone());
+            for repl in replicatios.clone() {
+                if let Some(sub) = subs.borrow().get(&NodeIdentity::from(repl)) {
+                    return Ok(sub.clone());
+                }
             }
-        }
 
-        let (tx, rx) = oneshot::channel();
-        self.requests
-            .send(NodeRequest::Subscribe(topic, tx))
-            .await
-            .map_err(|_| io::ErrorKind::ConnectionReset)?;
-        let (node, stream) = rx.await.map_err(|_| io::ErrorKind::ConnectionAborted)?;
-        debug_assert!(replicatios.contains(&node.into()));
-        let sub = Subscription::new(stream, self.clone(), node);
-        self.subs.borrow_mut().insert(node, sub.clone());
-        Ok(sub)
+            let (tx, rx) = oneshot::channel();
+            rqs.send(NodeRequest::Subscribe(topic, tx))
+                .await
+                .map_err(|_| io::ErrorKind::ConnectionReset)?;
+            let (node, stream) = rx.await.map_err(|_| io::ErrorKind::ConnectionAborted)?;
+            debug_assert!(replicatios.contains(&node.into()));
+            let sub = Subscription::new(stream, Rc::downgrade(&subs), node);
+            subs.borrow_mut().insert(node, sub.clone());
+            Ok(sub)
+        }
+    }
+}
+
+impl Drop for NodeHandle {
+    fn drop(&mut self) {
+        if let Ok(subs) = self.upgrade() {
+            subs.borrow_mut().clear();
+        }
+        self.requests.close_channel();
     }
 }
 
@@ -365,7 +391,7 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub fn new(stream: EncryptedStream, subscriptions: NodeHandle, id: NodeIdentity) -> Self {
+    pub fn new(stream: EncryptedStream, subscriptions: rc::Weak<Subs>, id: NodeIdentity) -> Self {
         let (requests, inner_requests) = mpsc::channel(10);
 
         wasm_bindgen_futures::spawn_local(async move {
@@ -373,7 +399,9 @@ impl Subscription {
                 log::error!("subscription error: {e}");
             }
 
-            subscriptions.subs.borrow_mut().remove(&id);
+            if let Some(u) = subscriptions.upgrade() {
+                u.borrow_mut().remove(&id);
+            }
         });
 
         Self { requests }
@@ -438,9 +466,11 @@ impl Subscription {
 
         async fn handle_request(
             stream: &mut EncryptedStream,
-            req: SubscriptionRequest,
+            req: Option<SubscriptionRequest>,
             subs: &mut Calls,
         ) -> io::Result<()> {
+            let req = req.ok_or(io::ErrorKind::UnexpectedEof)?;
+
             // FIXME: Pass this tupple instead
             let (prefix, topic, body, rc) = match req {
                 SubscriptionRequest::Chat(chat, tx) => (
@@ -567,9 +597,18 @@ impl Subscription {
         let mut buf = [0u8; std::mem::size_of::<ResponseHeader>()];
         loop {
             futures::select! {
-                req = requests.select_next_some() => handle_request(&mut stream, req, &mut chat_subs).await?,
-                res = stream.read_exact(&mut buf).fuse() => handle_response(&mut stream, res, buf, &mut chat_subs).await?,
+                req = requests.next() => handle_request(&mut stream, req, &mut chat_subs).await?,
+                res = stream.read_exact(&mut buf).fuse() =>
+                    handle_response(&mut stream, res, buf, &mut chat_subs).await?,
             }
+        }
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        for peer in self.swarm.connected_peers().copied().collect::<Vec<_>>() {
+            self.swarm.disconnect_peer_id(peer).unwrap();
         }
     }
 }

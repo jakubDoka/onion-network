@@ -13,142 +13,10 @@ use {
     },
     double_ratchet::{DoubleRatchet, MessageHeader},
     rand::rngs::OsRng,
-    std::collections::HashSet,
+    std::{collections::HashSet, future::Future},
 };
 
-impl NodeHandle {
-    pub async fn set_theme(
-        &mut self,
-        theme: Theme,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        ctx.with_vault(|v| v.theme = theme)?;
-        self.subscription_for(ctx.with_keys(UserKeys::identity)?)
-            .await?
-            .save_vault_components([VaultComponentId::Theme], &ctx)
-            .await
-    }
-
-    pub async fn send_frined_message(
-        &mut self,
-        name: UserName,
-        content: String,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let (session, (header, ss), identity) = ctx.try_with_vault(|v| {
-            let friend = v.friends.get_mut(&name).context("friend not found")?;
-            Ok((friend.dr.sender_hash(), friend.dr.send(), friend.identity))
-        })?;
-
-        let message = FriendMessage::DirectMessage { content };
-        let mail =
-            MailVariants::FriendMessage { header, session, content: Encrypted::new(message, ss) };
-        self.subscription_for(identity)
-            .await?
-            .send_mail(identity, mail)
-            .await
-            .context("sending message")
-    }
-
-    pub async fn create_and_save_chat(
-        &mut self,
-        name: ChatName,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let my_id = ctx.with_keys(UserKeys::identity)?;
-        ctx.try_with_vault(|v| Ok(v.chats.insert(name, ChatMeta::new())))?;
-        self.subscription_for(my_id)
-            .await?
-            .save_vault_components([VaultComponentId::Chats], &ctx)
-            .await
-            .context("saving vault")?;
-        self.subscription_for(name).await?.create_chat(name, my_id).await
-    }
-
-    pub async fn invite_member(
-        &mut self,
-        name: ChatName,
-        member: UserName,
-        ctx: impl RequestContext,
-        config: Member,
-    ) -> anyhow::Result<()> {
-        let identity = ctx
-            .with_keys(UserKeys::chain_client)?
-            .await?
-            .fetch_profile(member)
-            .await
-            .context("fetching identity")?
-            .sign;
-        self.invite_member_identity(name, identity, ctx, config).await.context("inviting member")
-    }
-
-    pub async fn invite_member_identity(
-        &mut self,
-        name: ChatName,
-        member: Identity,
-        ctx: impl RequestContext,
-        config: Member,
-    ) -> anyhow::Result<()> {
-        let mut them = self.subscription_for(member).await?;
-        let keys = them.fetch_keys(member).await?;
-
-        let (invite, proof) = ctx.try_with_vault(|vault| {
-            let chat_meta =
-                vault.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
-            let cp =
-                ctx.with_keys(|k| k.enc.encapsulate_choosen(&keys.enc, chat_meta.secret, OsRng))?;
-            let proof =
-                ctx.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, name, OsRng))?;
-            Ok((MailVariants::ChatInvite { chat: name, cp }, proof))
-        })?;
-
-        them.send_mail(member, invite).await.context("sending invite")?;
-        self.subscription_for(name).await?.add_member(proof, member, config).await
-    }
-
-    pub async fn send_friend_request(
-        &mut self,
-        name: UserName,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let identity = ctx
-            .with_keys(UserKeys::chain_client)?
-            .await?
-            .fetch_profile(name)
-            .await
-            .context("fetching identity")?
-            .sign;
-        self.send_friend_request_to_identity(name, identity, ctx)
-            .await
-            .context("sending friend request")
-    }
-
-    pub async fn send_friend_request_to_identity(
-        &mut self,
-        name: UserName,
-        identity: Identity,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let mut them = self.subscription_for(identity).await?;
-        let keys = them.fetch_keys(identity).await.context("fetching keys")?;
-        let (cp, ss) = ctx.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
-        let (dr, init, id) = DoubleRatchet::sender(ss, OsRng);
-
-        let us = ctx.with_keys(UserKeys::identity)?;
-
-        let request = FriendRequest { username: ctx.with_keys(|k| k.name)?, identity: us, init };
-        let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
-        them.send_mail(identity, mail).await.context("sending friend request")?;
-
-        let friend = FriendMeta { dr, identity, id };
-        ctx.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;
-        ctx.with_vault(|v| v.friends.insert(name, friend))?;
-        let changes = [VaultComponentId::Friend(name), VaultComponentId::FriendNames];
-        self.subscription_for(us).await?.save_vault_components(changes, &ctx).await?;
-
-        Ok(())
-    }
-}
+impl NodeHandle {}
 
 impl Subscription {
     pub async fn send_encrypted_message(
@@ -538,7 +406,8 @@ impl Subscription {
     // }
 }
 
-pub trait RequestContext {
+#[allow(async_fn_in_trait)]
+pub trait RequestContext: Sized {
     fn try_with_vault<R>(
         &self,
         action: impl FnOnce(&mut Vault) -> anyhow::Result<R>,
@@ -547,6 +416,125 @@ pub trait RequestContext {
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> anyhow::Result<R>;
     fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R>;
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R>;
+    fn subscription_for(
+        &self,
+        topic: impl Into<Topic>,
+    ) -> impl Future<Output = anyhow::Result<Subscription>>;
+
+    async fn set_theme(&self, theme: Theme) -> anyhow::Result<()> {
+        self.with_vault(|v| v.theme = theme)?;
+        self.subscription_for(self.with_keys(UserKeys::identity)?)
+            .await?
+            .save_vault_components([VaultComponentId::Theme], self)
+            .await
+    }
+
+    async fn send_frined_message(&self, name: UserName, content: String) -> anyhow::Result<()> {
+        let (session, (header, ss), identity) = self.try_with_vault(|v| {
+            let friend = v.friends.get_mut(&name).context("friend not found")?;
+            Ok((friend.dr.sender_hash(), friend.dr.send(), friend.identity))
+        })?;
+
+        self.subscription_for(self.with_keys(UserKeys::identity)?)
+            .await?
+            .save_vault_components([VaultComponentId::Friend(name)], self)
+            .await?;
+
+        let message = FriendMessage::DirectMessage { content };
+        let mail =
+            MailVariants::FriendMessage { header, session, content: Encrypted::new(message, ss) };
+        self.subscription_for(identity)
+            .await?
+            .send_mail(identity, mail)
+            .await
+            .context("sending message")
+    }
+
+    async fn create_and_save_chat(&self, name: ChatName) -> anyhow::Result<()> {
+        let my_id = self.with_keys(UserKeys::identity)?;
+        self.try_with_vault(|v| Ok(v.chats.insert(name, ChatMeta::new())))?;
+        self.subscription_for(my_id)
+            .await?
+            .save_vault_components([VaultComponentId::Chats], &self)
+            .await
+            .context("saving vault")?;
+        self.subscription_for(name).await?.create_chat(name, my_id).await
+    }
+
+    async fn invite_member(
+        &self,
+        name: ChatName,
+        member: UserName,
+        config: Member,
+    ) -> anyhow::Result<()> {
+        let identity = self
+            .with_keys(UserKeys::chain_client)?
+            .await?
+            .fetch_profile(member)
+            .await
+            .context("fetching identity")?
+            .sign;
+        self.invite_member_identity(name, identity, config).await.context("inviting member")
+    }
+
+    async fn invite_member_identity(
+        &self,
+        name: ChatName,
+        member: Identity,
+        config: Member,
+    ) -> anyhow::Result<()> {
+        let mut them = self.subscription_for(member).await?;
+        let keys = them.fetch_keys(member).await?;
+
+        let (invite, proof) = self.try_with_vault(|vault| {
+            let chat_meta =
+                vault.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
+            let cp =
+                self.with_keys(|k| k.enc.encapsulate_choosen(&keys.enc, chat_meta.secret, OsRng))?;
+            let proof =
+                self.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, name, OsRng))?;
+            Ok((MailVariants::ChatInvite { chat: name, cp }, proof))
+        })?;
+
+        them.send_mail(member, invite).await.context("sending invite")?;
+        self.subscription_for(name).await?.add_member(proof, member, config).await
+    }
+
+    async fn send_friend_request(&self, name: UserName) -> anyhow::Result<()> {
+        let identity = self
+            .with_keys(UserKeys::chain_client)?
+            .await?
+            .fetch_profile(name)
+            .await
+            .context("fetching identity")?
+            .sign;
+        self.send_friend_request_to_identity(name, identity).await.context("sending friend request")
+    }
+
+    async fn send_friend_request_to_identity(
+        &self,
+        name: UserName,
+        identity: Identity,
+    ) -> anyhow::Result<()> {
+        let mut them = self.subscription_for(identity).await?;
+        let keys = them.fetch_keys(identity).await.context("fetching keys")?;
+        let (cp, ss) = self.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
+        let (dr, init, id) = DoubleRatchet::sender(ss, OsRng);
+
+        let us = self.with_keys(UserKeys::identity)?;
+
+        let request = FriendRequest { username: self.with_keys(|k| k.name)?, identity: us, init };
+        let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
+        them.send_mail(identity, mail).await.context("sending friend request")?;
+
+        let friend = FriendMeta { dr, identity, id };
+        self.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;
+        self.with_vault(|v| v.friends.insert(name, friend))?;
+        let changes = [VaultComponentId::Friend(name), VaultComponentId::FriendNames];
+        self.subscription_for(us).await?.save_vault_components(changes, self).await?;
+
+        Ok(())
+    }
 }
 
 impl<T: RequestContext> RequestContext for &T {
@@ -571,6 +559,13 @@ impl<T: RequestContext> RequestContext for &T {
 
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R> {
         (*self).with_mail_action(action)
+    }
+
+    fn subscription_for(
+        &self,
+        topic: impl Into<Topic>,
+    ) -> impl Future<Output = anyhow::Result<Subscription>> {
+        (*self).subscription_for(topic)
     }
 }
 
@@ -621,7 +616,6 @@ impl MailVariants {
     pub async fn handle(
         self,
         ctx: &impl RequestContext,
-        _requests: NodeHandle,
         updates: &mut Vec<VaultComponentId>,
         messages: &mut Vec<(UserName, FriendMessage)>,
     ) -> anyhow::Result<()> {
@@ -650,7 +644,7 @@ impl MailVariants {
                 ctx.with_vault(|v| v.friends.insert(username, friend))?;
             }
             MailVariants::FriendMessage { header, session, mut content } => {
-                let message = ctx.try_with_vault(|v| {
+                let message @ (name, _) = ctx.try_with_vault(|v| {
                     let nm = *v.friend_index.get(&session).context("friend not found")?;
                     let friend = v.friends.get_mut(&nm).context("friend not found, wath?")?;
 
@@ -666,7 +660,7 @@ impl MailVariants {
                     Ok((nm, message))
                 })?;
 
-                updates.push(VaultComponentId::Friend(message.0));
+                updates.push(VaultComponentId::Friend(name));
                 messages.push(message);
             }
         }

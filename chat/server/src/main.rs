@@ -15,25 +15,23 @@
 
 use {
     self::api::chat::Chat,
-    crate::api::{chat, profile, Handler as _, State},
+    crate::api::State,
     anyhow::Context as _,
     api::FullReplGroup,
     chain_api::{ChatStakeEvent, NodeIdentity, NodeKeys, NodeVec, StakeEvents},
     chat_spec::{
-        rpcs, ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, ResponseHeader,
-        Topic, REPLICATION_FACTOR,
+        ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, ResponseHeader, Topic,
+        REPLICATION_FACTOR,
     },
     clap::Parser,
     codec::{DecodeOwned, Encode},
     dashmap::{mapref::entry::Entry, DashMap},
     dht::{Route, SharedRoutingTable},
-    futures::channel::mpsc,
     handlers::CallId,
     libp2p::{
         core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
         futures::{
-            self,
-            channel::oneshot,
+            channel::{mpsc, oneshot},
             future::{Either, JoinAll, TryJoinAll},
             AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt, TryFutureExt,
         },
@@ -224,7 +222,7 @@ impl Server {
                 prefix: header.prefix,
             };
 
-            server_router([0; 4], header.prefix, len, state, stream)
+            api::server_router([0; 4], header.prefix, len, state, stream)
                 .await
                 .ok_or(io::ErrorKind::PermissionDenied)??
                 .ok_or(io::ErrorKind::ConnectionAborted.into())
@@ -407,7 +405,7 @@ async fn run_client(
             prefix: header.prefix,
         };
 
-        client_router(header.call_id, header.prefix, len, state, stream)
+        api::client_router(header.call_id, header.prefix, len, state, stream)
             .await
             .ok_or(io::ErrorKind::PermissionDenied)
             .inspect_err(|_| {
@@ -592,74 +590,4 @@ impl OwnedContext {
         }
         Some(others)
     }
-}
-
-pub async fn subscribe(
-    cx: Context,
-    topic: Topic,
-    user: PathId,
-    cid: CallId,
-    _: (),
-) -> Result<(), ChatError> {
-    match topic {
-        Topic::Chat(name) if cx.chats.contains_key(&name) => {
-            cx.chat_subs.entry(name).or_default().insert(user, cid);
-            Ok(())
-        }
-        Topic::Profile(id) => {
-            cx.profile_subs.insert(id, (user, cid));
-            Ok(())
-        }
-        _ => Err(ChatError::NotFound),
-    }
-}
-
-pub async fn unsubscribe(cx: Context, topic: Topic, user: PathId, _: ()) -> Result<(), ChatError> {
-    match topic {
-        Topic::Chat(name) => {
-            let mut subs = cx.chat_subs.get_mut(&name).ok_or(ChatError::NotFound)?;
-            subs.remove(&user).ok_or(ChatError::NotFound).map(drop)
-        }
-        // TODO: perform access control with signature
-        Topic::Profile(id) => cx.profile_subs.remove(&id).ok_or(ChatError::NotFound).map(drop),
-    }
-}
-
-handlers::router! { client_router(State):
-    rpcs::CREATE_CHAT => chat::create.repl();
-    rpcs::ADD_MEMBER => chat::add_member.repl().restore();
-    rpcs::KICK_MEMBER => chat::kick_member.repl().restore();
-    rpcs::SEND_MESSAGE => chat::send_message.repl().restore();
-    rpcs::FETCH_MESSAGES => chat::fetch_messages.restore();
-    rpcs::FETCH_MEMBERS => chat::fetch_members.restore();
-    rpcs::CREATE_PROFILE => profile::create.repl();
-    rpcs::SEND_MAIL => profile::send_mail.repl().restore();
-    rpcs::READ_MAIL => profile::read_mail.repl().restore();
-    rpcs::INSERT_TO_VAULT => profile::insert_to_vault.repl().restore();
-    rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.repl().restore();
-    rpcs::FETCH_PROFILE => profile::fetch_keys.restore();
-    rpcs::FETCH_VAULT => profile::fetch_vault.restore();
-    rpcs::FETCH_VAULT_KEY => profile::fetch_vault_key.restore();
-    rpcs::SUBSCRIBE => subscribe.restore();
-    rpcs::UNSUBSCRIBE => unsubscribe.restore();
-}
-
-handlers::router! { server_router(State):
-     rpcs::CREATE_CHAT => chat::create;
-     rpcs::ADD_MEMBER => chat::add_member.restore();
-     rpcs::KICK_MEMBER => chat::kick_member.restore();
-     rpcs::SEND_BLOCK => chat::handle_message_block
-         .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
-         .restore();
-     rpcs::FETCH_CHAT_DATA => chat::fetch_chat_data.rated(rate_map!(20));
-     rpcs::SEND_MESSAGE => chat::send_message.restore();
-     rpcs::VOTE_BLOCK => chat::vote
-         .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 })
-         .restore();
-     rpcs::CREATE_PROFILE => profile::create;
-     rpcs::SEND_MAIL => profile::send_mail.restore();
-     rpcs::READ_MAIL => profile::read_mail.restore();
-     rpcs::INSERT_TO_VAULT => profile::insert_to_vault.restore();
-     rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.restore();
-     rpcs::FETCH_PROFILE_FULL => profile::fetch_full.rated(rate_map!(20));
 }

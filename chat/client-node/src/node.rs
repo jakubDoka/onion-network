@@ -1,5 +1,5 @@
 use {
-    crate::{min_nodes, MailVariants, RawResponse, UserKeys, Vault},
+    crate::{min_nodes, Cache, MailVariants, RawResponse, UserKeys, Vault},
     anyhow::Context,
     chain_api::NodeIdentity,
     chat_spec::*,
@@ -113,15 +113,24 @@ impl Node {
         swarm.behaviour_mut().satelite_dht.table.write().bulk_insert(satelites);
 
         let routes = swarm.behaviour_mut().chat_dht.table.read();
-        for route in { routes }.iter().map(Route::peer_id) {
-            reminimg -= swarm.dial(route).is_err() as usize;
+        for route in { routes }.iter() {
+            if let Some(keys) = Cache::get::<enc::PublicKey>(NodeIdentity::from(route.id)) {
+                swarm.behaviour_mut().key_share.keys.insert(route.peer_id(), keys);
+                reminimg -= 1;
+                continue;
+            }
+            reminimg -= swarm.dial(route.peer_id()).is_err() as usize;
         }
 
         _ = crate::timeout(Duration::from_secs(10), async {
             while reminimg > 0 {
                 match swarm.select_next_some().await {
-                    SwarmEvent::Behaviour(BehaviourEvent::KeyShare(..))
-                    | SwarmEvent::OutgoingConnectionError { .. } => {
+                    SwarmEvent::Behaviour(BehaviourEvent::KeyShare((peer, key))) => {
+                        reminimg -= 1;
+                        set_state!(CollecringKeys(reminimg));
+                        Cache::insert(peer.to_hash(), &key);
+                    }
+                    SwarmEvent::OutgoingConnectionError { .. } => {
                         reminimg -= 1;
                         set_state!(CollecringKeys(reminimg));
                     }

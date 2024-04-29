@@ -26,6 +26,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
     derive_for_type(
         path = "pallet_node_staker::pallet::NodeAddress",
         derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash"
+    ),
+    derive_for_type(
+        path = "pallet_user_manager::pallet::Profile",
+        derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, codec::Codec"
     )
 )]
 mod polkadot {}

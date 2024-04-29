@@ -19,7 +19,7 @@ sod NODE_COUNT         15
 sod SATELITE_COUNT     3
 sod STORAGE_NODE_COUNT 20
 sod IDLE_TIMEOUT       2000
-sod FRONTEND_PORT      7777
+sod CLIENT_PORT        7777
 sod TOPOLOGY_PORT      8888
 sod RUST_LOG           "info"
 sod RUST_BACKTRACE     1

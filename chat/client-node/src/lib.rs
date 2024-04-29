@@ -1,4 +1,5 @@
 #![feature(slice_take)]
+#![feature(let_chains)]
 #![feature(never_type)]
 #![feature(type_alias_impl_trait)]
 
@@ -145,14 +146,11 @@ impl UserKeys {
     }
 
     pub fn identity(&self) -> Identity {
-        crypto::hash::new(self.sign.public_key())
+        self.sign.identity()
     }
 
     pub fn to_identity(&self) -> Profile {
-        Profile {
-            sign: crypto::hash::new(self.sign.public_key()),
-            enc: crypto::hash::new(self.enc.public_key()),
-        }
+        Profile { sign: self.sign.identity(), enc: crypto::hash::new(self.enc.public_key()) }
     }
 
     pub fn chain_client(&self) -> impl Future<Output = chain_api::Result<chain::Client>> {

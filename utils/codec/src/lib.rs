@@ -14,6 +14,10 @@ mod std_impls;
 #[cfg(feature = "std")]
 pub use std_impls::*;
 
+pub trait Codec: Encode + DecodeOwned {}
+
+impl<T: Encode + DecodeOwned> Codec for T {}
+
 pub mod unsafe_as_raw_bytes {
     pub fn encode<T>(value: &T, buffer: &mut impl super::Buffer) -> Option<()> {
         buffer.extend_from_slice(unsafe {

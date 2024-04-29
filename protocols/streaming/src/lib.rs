@@ -57,6 +57,7 @@ impl Behaviour {
     pub fn create_stream(&mut self, with: PeerId) {
         self.connections.entry(with).or_default().new_requests += 1;
         if let Some(waker) = self.waker.take() {
+            log::info!("waking up");
             waker.wake();
         }
     }

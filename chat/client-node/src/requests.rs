@@ -1,7 +1,7 @@
 use {
     crate::{
-        ChainClientExt, ChatMeta, DowncastNonce, FriendMeta, RawChatMessage, RecoverMail, Sub,
-        Theme, UserKeys, Vault, VaultComponentId,
+        Cache, ChainClientExt, ChatMeta, DowncastNonce, FriendMeta, RawChatMessage, RecoverMail,
+        Sub, Theme, UserKeys, Vault, VaultComponentId,
     },
     anyhow::Context,
     chain_api::Encrypted,
@@ -46,7 +46,7 @@ impl Sub<Identity> {
     }
 
     pub async fn fetch_keys(&mut self) -> anyhow::Result<FetchProfileResp> {
-        self.sub.request(rpcs::FETCH_PROFILE, self.topic, ()).await.map_err(Into::into)
+        Cache::get_or_insert(self.topic, |k| self.sub.request(rpcs::FETCH_PROFILE, k, ())).await
     }
 
     pub async fn send_mail(&mut self, mail: impl Encode) -> anyhow::Result<()> {

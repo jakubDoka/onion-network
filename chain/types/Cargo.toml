@@ -12,6 +12,7 @@ description = "isolated macros generating loads of code"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+codec.workspace = true
 subxt = { version = "0.35.0", default-features = false }
 subxt-signer = { version = "0.35.0", default-features = false }
 

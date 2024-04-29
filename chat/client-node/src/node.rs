@@ -59,12 +59,12 @@ impl Node {
         keys: UserKeys,
         mut wboot_phase: impl FnMut(BootPhase),
     ) -> anyhow::Result<(Self, Vault, NodeHandle, Nonce, Nonce)> {
-        macro_rules! set_state { ($($t:tt)*) => {_ = wboot_phase(BootPhase::$($t)*)}; }
+        macro_rules! set_state { ($($t:tt)*) => {wboot_phase(BootPhase::$($t)*)}; }
 
         set_state!(FetchNodesAndProfile);
 
         let mut swarm = libp2p::Swarm::new(
-            libp2p::websocket_websys::Transport::default()
+            websocket_websys::Transport::default()
                 .upgrade(Version::V1)
                 .authenticate(opfusk::Config::new(OsRng, keys.sign))
                 .multiplex(libp2p::yamux::Config::default())
@@ -97,13 +97,8 @@ impl Node {
             "profile hash does not match our account"
         );
 
-        set_state!(InitiateConnection);
-
-        let node_count = node_data.len();
-        let tolerance = 0;
-        set_state!(CollecringKeys(
-            node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance
-        ));
+        let mut reminimg = node_data.len() - swarm.behaviour_mut().key_share.keys.len();
+        set_state!(CollecringKeys(reminimg));
 
         let nodes = node_data.into_iter().map(|(id, addr)| {
             let addr = chain_api::unpack_addr_offset(addr, 1);
@@ -117,39 +112,28 @@ impl Node {
         });
         swarm.behaviour_mut().satelite_dht.table.write().bulk_insert(satelites);
 
-        let routes = swarm
-            .behaviour_mut()
-            .chat_dht
-            .table
-            .read()
-            .iter()
-            .map(Route::peer_id)
-            .collect::<Vec<_>>();
-        for route in routes {
-            _ = swarm.dial(route);
+        let routes = swarm.behaviour_mut().chat_dht.table.read();
+        for route in { routes }.iter().map(Route::peer_id) {
+            reminimg -= swarm.dial(route).is_err() as usize;
         }
 
-        _ = crate::timeout(
-            async {
-                loop {
-                    match swarm.select_next_some().await {
-                        SwarmEvent::Behaviour(BehaviourEvent::KeyShare(..)) => {
-                            let remining =
-                                node_count - swarm.behaviour_mut().key_share.keys.len() - tolerance;
-                            set_state!(CollecringKeys(remining));
-                            if remining == 0 {
-                                break;
-                            }
-                        }
-                        e => log::debug!("{:?}", e),
+        _ = crate::timeout(Duration::from_secs(10), async {
+            while reminimg > 0 {
+                match swarm.select_next_some().await {
+                    SwarmEvent::Behaviour(BehaviourEvent::KeyShare(..))
+                    | SwarmEvent::OutgoingConnectionError { .. } => {
+                        reminimg -= 1;
+                        set_state!(CollecringKeys(reminimg));
                     }
+                    e => log::debug!("{:?}", e),
                 }
-            },
-            Duration::from_secs(10),
-        )
+            }
+        })
         .await;
 
-        let nodes = &swarm.behaviour_mut().key_share.keys;
+        let beh = swarm.behaviour_mut();
+
+        let nodes = &beh.key_share.keys;
         anyhow::ensure!(
             nodes.len() >= min_nodes(),
             "not enough nodes in network, needed {}, got {}",
@@ -157,34 +141,16 @@ impl Node {
             nodes.len(),
         );
 
-        let beh = swarm.behaviour_mut();
-
         set_state!(ProfileOpen);
         let route = pick_route(profile_hash.sign, &beh.key_share.keys, beh.chat_dht.table)
             .context("cannot find route to profile")?;
-        let pid = swarm.behaviour_mut().onion.open_path(route);
+        let pid = beh.onion.open_path(route);
         let (mut profile_stream, profile_stream_peer) = loop {
             match swarm.select_next_some().await {
                 SwarmEvent::Behaviour(BehaviourEvent::Onion(onion::Event::OutboundStream(
                     stream,
                     id,
                 ))) if id == pid => break stream.context("opening profile route")?,
-                SwarmEvent::ConnectionClosed {
-                    peer_id,
-                    connection_id,
-                    endpoint,
-                    num_established,
-                    cause,
-                } => {
-                    log::debug!(
-                        "connection closed: {:?} {:?} {:?} {:?} {}",
-                        peer_id,
-                        connection_id,
-                        endpoint,
-                        num_established,
-                        cause.unwrap()
-                    );
-                }
                 e => log::debug!("{:?}", e),
             }
         };
@@ -206,8 +172,6 @@ impl Node {
                     Default::default()
                 }
             };
-
-        log::debug!("{:?}", vault);
 
         let vault = if vault.is_empty() && vault_nonce == 0 {
             set_state!(ProfileCreate);
@@ -429,8 +393,8 @@ impl Subscription {
         body: impl Encode,
     ) -> anyhow::Result<R> {
         crate::timeout(
-            self.request_low::<Result<R, ChatError>>(prefix, topic, body),
             Duration::from_secs(3),
+            self.request_low::<Result<R, ChatError>>(prefix, topic, body),
         )
         .await
         .context("timeout")??
@@ -628,8 +592,6 @@ struct Behaviour {
 pub enum BootPhase {
     #[error("fetching nodes and profile from chain...")]
     FetchNodesAndProfile,
-    #[error("initiating orion connection...")]
-    InitiateConnection,
     #[error("collecting server keys... ({0} left)")]
     CollecringKeys(usize),
     #[error("opening route to profile...")]
@@ -638,8 +600,6 @@ pub enum BootPhase {
     VaultLoad,
     #[error("creating new profile...")]
     ProfileCreate,
-    #[error("searching chats...")]
-    ChatSearch,
     #[error("ready")]
     ChatRun,
 }

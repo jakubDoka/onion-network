@@ -188,7 +188,7 @@ impl UserKeys {
     }
 }
 
-pub async fn timeout<F: Future>(f: F, duration: Duration) -> Option<F::Output> {
+pub async fn timeout<F: Future>(duration: Duration, f: F) -> Option<F::Output> {
     let mut fut = pin::pin!(f);
     let mut callback = None::<(Closure<dyn FnMut()>, i32)>;
     let until = instant::Instant::now() + duration;
@@ -230,8 +230,8 @@ pub async fn send_request<R: DecodeOwned>(
     req: impl Encode,
 ) -> anyhow::Result<R> {
     timeout(
-        send_request_low::<Result<R, ChatError>>(stream, id, topic, req),
         Duration::from_secs(5),
+        send_request_low::<Result<R, ChatError>>(stream, id, topic, req),
     )
     .await
     .context("timeout")??

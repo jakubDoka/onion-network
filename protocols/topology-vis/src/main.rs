@@ -385,7 +385,7 @@ async fn main() {
 
     let kp = crypto::sign::Keypair::new(OsRng);
     let peer_id = kp.to_peer_id();
-    let transport = libp2p::websocket_websys::Transport::default()
+    let transport = websocket_websys::Transport::default()
         .upgrade(Version::V1)
         .authenticate(opfusk::Config::new(OsRng, kp))
         .multiplex(libp2p::yamux::Config::default())

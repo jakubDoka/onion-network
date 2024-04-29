@@ -69,9 +69,8 @@ if [ "$PROFILE" = "release" ]; then
 	TARGET_DIR="target/native-optimized"
 fi
 
-creq trunk
-creq live-server
-creq subxt
+
+cargo default nightly
 
 
 load_mnemonic() {

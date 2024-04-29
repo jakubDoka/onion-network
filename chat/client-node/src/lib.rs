@@ -253,15 +253,11 @@ pub async fn send_request_low<R: DecodeOwned>(
         len: (len as u32).to_be_bytes(),
     };
     stream.write_all(header.as_bytes()).await?;
-    log::debug!("");
     stream.write_all(&req.to_bytes()).await?;
-    log::debug!("");
     stream.flush().await?;
-    log::debug!("");
 
     let mut header = [0; std::mem::size_of::<ResponseHeader>()];
     stream.read_exact(&mut header).await?;
-    log::debug!("header: {:?}", header);
     let header = ResponseHeader::from_array(header);
     let mut buf = vec![0; header.get_len()];
     stream.read_exact(&mut buf).await?;

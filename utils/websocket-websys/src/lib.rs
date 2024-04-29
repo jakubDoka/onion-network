@@ -142,8 +142,8 @@ type CloseCallback = Closure<dyn FnMut(CloseEvent)>;
 type ReadCallback = Closure<dyn FnMut(MessageEvent)>;
 
 struct ConnectionState {
-    _close_closure: CloseCallback,
-    close_waker: Cell<Option<Waker>>,
+    _state_closure: CloseCallback,
+    state_waker: Cell<Option<Waker>>,
 
     _read_closure: ReadCallback,
     read_waker: Cell<Option<Waker>>,
@@ -158,10 +158,11 @@ impl ConnectionState {
         Rc::<Self>::new_cyclic(|state| {
             let close_state = state.clone();
             let _close_closure = Closure::<dyn FnMut(CloseEvent)>::new(move |_| {
-                if let Some(waker) = close_state.upgrade().and_then(|s| s.close_waker.take()) {
+                if let Some(waker) = close_state.upgrade().and_then(|s| s.state_waker.take()) {
                     waker.wake();
                 }
             });
+            ws.set_onopen(Some(_close_closure.as_ref().unchecked_ref()));
             ws.set_onclose(Some(_close_closure.as_ref().unchecked_ref()));
             ws.set_onerror(Some(_close_closure.as_ref().unchecked_ref()));
 
@@ -182,8 +183,8 @@ impl ConnectionState {
             ws.set_onmessage(Some(_read_closure.as_ref().unchecked_ref()));
 
             Self {
-                _close_closure,
-                close_waker: Cell::new(None),
+                _state_closure: _close_closure,
+                state_waker: Cell::new(None),
                 _read_closure,
                 read_waker: Cell::new(None),
                 read_buf: Cell::new(Vec::new()),
@@ -204,22 +205,8 @@ impl Connection {
         let sock = WebSocket::new(url)?;
         sock.set_binary_type(web_sys::BinaryType::Arraybuffer);
         let state = ConnectionState::new(sock.clone());
-        let waker = Rc::new(Cell::new(None::<Waker>));
-
-        let wake_closure = Closure::<dyn FnMut()>::new({
-            let waker = waker.clone();
-            move || match waker.take() {
-                Some(waker) => waker.wake(),
-                None => {}
-            }
-        });
-
-        sock.set_onopen(Some(wake_closure.as_ref().unchecked_ref()));
-        sock.set_onerror(Some(wake_closure.as_ref().unchecked_ref()));
-        sock.set_onclose(Some(wake_closure.as_ref().unchecked_ref()));
-
         let conn = Some(Self { inner: sock, state, trottle_period });
-        Ok(ConnectionFut { conn, wake_closure, waker })
+        Ok(ConnectionFut(conn))
     }
 }
 
@@ -301,7 +288,7 @@ impl futures::AsyncWrite for Connection {
             WebSocket::CLOSING | WebSocket::CLOSED => Poll::Ready(Ok(())),
             WebSocket::CONNECTING | WebSocket::OPEN => {
                 self.inner.close().unwrap();
-                self.state.close_waker.set(Some(cx.waker().clone()));
+                self.state.state_waker.set(Some(cx.waker().clone()));
                 Poll::Pending
             }
             _ => unreachable!(),
@@ -314,62 +301,38 @@ unsafe impl Sync for Connection {}
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        clear_ws(&self.inner);
+        self.inner.set_onopen(None);
+        self.inner.set_onclose(None);
+        self.inner.set_onerror(None);
+        self.inner.set_onmessage(None);
         if matches!(self.inner.ready_state(), WebSocket::OPEN | WebSocket::CONNECTING) {
             self.inner.close().unwrap();
         }
     }
 }
 
-fn clear_ws(ws: &WebSocket) {
-    ws.set_onopen(None);
-    ws.set_onclose(None);
-    ws.set_onerror(None);
-    ws.set_onmessage(None);
-}
-
-pub struct ConnectionFut {
-    conn: Option<Connection>,
-    #[allow(dead_code)]
-    wake_closure: Closure<dyn FnMut()>,
-    waker: Rc<Cell<Option<Waker>>>,
-}
+pub struct ConnectionFut(Option<Connection>);
 
 impl Future for ConnectionFut {
     type Output = Result<Connection, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let s = &mut *self;
-        let Some(conn) = s.conn.take() else {
+        let Some(conn) = s.0.take() else {
             return Poll::Pending;
         };
 
         match conn.inner.ready_state() {
-            WebSocket::OPEN => {
-                clear_ws(&conn.inner);
-                Poll::Ready(Ok(conn))
-            }
+            WebSocket::OPEN => Poll::Ready(Ok(conn)),
             WebSocket::CLOSING | WebSocket::CLOSED => {
                 Poll::Ready(Err(Error(JsValue::from_str("connection aborted"))))
             }
             WebSocket::CONNECTING => {
-                s.waker.set(Some(cx.waker().clone()));
-                s.conn = Some(conn);
+                conn.state.state_waker.set(Some(cx.waker().clone()));
+                s.0 = Some(conn);
                 Poll::Pending
             }
             _ => unreachable!(),
         }
     }
 }
-
-impl Drop for ConnectionFut {
-    fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            clear_ws(&conn.inner);
-            conn.inner.close().unwrap();
-        }
-    }
-}
-
-unsafe impl Send for ConnectionFut {}
-unsafe impl Sync for ConnectionFut {}

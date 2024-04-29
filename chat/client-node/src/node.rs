@@ -319,7 +319,6 @@ impl NodeHandle {
 
         async move {
             let subs = subs?;
-            log::debug!("replicatios: {:?}", replicatios);
 
             for repl in replicatios.clone() {
                 if let Some(sub) = subs.borrow().get(&NodeIdentity::from(repl)) {

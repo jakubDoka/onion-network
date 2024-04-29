@@ -70,7 +70,7 @@ if [ "$PROFILE" = "release" ]; then
 fi
 
 
-cargo default nightly
+rustup default nightly
 
 
 load_mnemonic() {

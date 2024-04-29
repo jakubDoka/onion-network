@@ -51,7 +51,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     let current_chat = create_rw_signal(selected);
     let (current_member, set_current_member) = create_signal(Member::best());
     let (show_chat, set_show_chat) = create_signal(false);
-    let (is_friend, set_is_hardened) = create_signal(false);
+    let (is_friend, set_is_friend) = create_signal(false);
     let messages = create_node_ref::<leptos::html::Div>();
     let (cursor, set_cursor) = create_signal(Cursor::Normal(chat_spec::Cursor::INIT));
     let (red_all_messages, set_red_all_messages) = create_signal(false);
@@ -192,7 +192,6 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         let Some(secret) = state.chat_secret(chat) else { return };
 
         handled_spawn_local("reading chat messages", async move {
-            // TODO: make subscription avare of its topic
             let mut sub = state
                 .subscription_for(chat)
                 .await?
@@ -225,9 +224,9 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         append_message(message.sender, message.content);
     });
 
-    let side_chat = move |chat: ChatName, hardened: bool| {
+    let side_chat = move |chat: ChatName, if_friend: bool| {
         let select_chat = handled_async_callback("switching chat", move |_| async move {
-            let my_user = if hardened {
+            let my_user = if if_friend {
                 Member::best()
             } else {
                 let m = state
@@ -248,12 +247,13 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 state.set_chat_nonce(chat, m.action + 1);
                 m
             };
+
             set_current_member(my_user);
             set_show_chat(true);
             set_red_all_messages(false);
             set_cursor(Cursor::Normal(chat_spec::Cursor::INIT));
+            set_is_friend(if_friend);
             current_chat.set(Some(chat));
-            set_is_hardened(hardened);
             crate::navigate_to(format_args!("/chat/{chat}"));
             let messages = messages.get_untracked().expect("universe to work");
             messages.set_inner_html("");
@@ -262,7 +262,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             Ok(())
         });
         let selected = move || current_chat.get() == Some(chat);
-        let shortcut_prefix = if hardened { "sf" } else { "sn" };
+        let shortcut_prefix = if if_friend { "sf" } else { "sn" };
         view! {
             <div class="sb tac bp toe" class:hc=selected
                 shortcut=format!("{shortcut_prefix}{chat}")

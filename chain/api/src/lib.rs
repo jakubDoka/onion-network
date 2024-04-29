@@ -246,7 +246,6 @@ impl Client {
     }
 }
 
-// TODO: transition to generating keys from mnemonic
 #[derive(Clone, Codec)]
 pub struct NodeKeys {
     pub enc: enc::Keypair,

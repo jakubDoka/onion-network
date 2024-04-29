@@ -1,7 +1,7 @@
 use {
     crate::{
-        ChainClientExt, ChatMeta, DowncastNonce, FriendMeta, NodeHandle, RawChatMessage,
-        RecoverMail, Subscription, Theme, UserKeys, Vault, VaultComponentId,
+        ChainClientExt, ChatMeta, DowncastNonce, FriendMeta, RawChatMessage, RecoverMail, Sub,
+        Theme, UserKeys, Vault, VaultComponentId,
     },
     anyhow::Context,
     chain_api::Encrypted,
@@ -16,123 +16,9 @@ use {
     std::{collections::HashSet, future::Future},
 };
 
-impl NodeHandle {}
-
-impl Subscription {
-    pub async fn send_encrypted_message(
-        &mut self,
-        name: ChatName,
-        mut message: Vec<u8>,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let proof = ctx.try_with_vault(|vault| {
-            let chat_meta =
-                vault.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
-            let tag = crypto::encrypt(&mut message, chat_meta.secret, OsRng);
-            message.extend(tag);
-            let msg = Reminder(&message);
-            let proof =
-                ctx.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, msg, OsRng))?;
-            Ok(proof)
-        })?;
-        let nonce = match self.send_message(proof, name).await.downcast_nonce()? {
-            Err(nonce) => nonce,
-            Ok(r) => return Ok(r),
-        };
-        log::info!("foo bar {nonce} {}", proof.nonce);
-        let proof = ctx.with_keys(|k| Proof::new(&k.sign, &mut { nonce }, proof.context, OsRng))?;
-        ctx.try_with_vault(|v| {
-            v.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?.action_no =
-                nonce + 1;
-            Ok(())
-        })?;
-        self.send_message(proof, name).await.map_err(Into::into)
-    }
-
-    pub async fn fetch_and_decrypt_messages(
-        &mut self,
-        name: ChatName,
-        cursor: &mut Cursor,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<Vec<RawChatMessage>> {
-        let chat_meta = ctx.try_with_vault(|v| {
-            v.chats.get(&name).context("we are not part of the chat").copied()
-        })?;
-
-        let (new_cusor, ReminderOwned(mesages)) = self.fetch_messages(name, *cursor).await?;
-        *cursor = new_cusor;
-
-        Ok(unpack_messages_ref(&mesages)
-            .filter_map(|message| {
-                let message = chat_spec::Message::decode(&mut &message[..])?;
-                let mut content = message.content.0.to_owned();
-                let content = crypto::decrypt(&mut content, chat_meta.secret)?;
-                RawChatMessage::decode(&mut &*content)
-                    .map(|m| RawChatMessage { identity: message.sender, ..m })
-            })
-            .collect())
-    }
-
-    pub async fn fetch_vault_key(
-        &mut self,
-        identity: Identity,
-        key: crypto::Hash,
-    ) -> anyhow::Result<ReminderOwned> {
-        self.request(rpcs::FETCH_VAULT_KEY, Topic::Profile(identity), key).await.map_err(Into::into)
-    }
-
-    pub async fn update_member(
-        &mut self,
-        name: ChatName,
-        member: Identity,
-        config: Member,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let proof = ctx.try_with_vault(|v| {
-            let chat_meta =
-                v.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
-            let action_no = &mut chat_meta.action_no;
-            let proof = ctx.with_keys(|k| Proof::new(&k.sign, action_no, name, OsRng))?;
-            Ok(proof)
-        })?;
-        self.add_member(proof, member, config).await
-    }
-
-    pub async fn add_member(
-        &mut self,
-        proof: Proof<ChatName>,
-        member: Identity,
-        config: Member,
-    ) -> anyhow::Result<()> {
-        let msg = (&proof, member, config);
-        self.request(rpcs::ADD_MEMBER, Topic::Chat(proof.context), msg).await.map_err(Into::into)
-    }
-
-    pub async fn kick_member(
-        &mut self,
-        from: ChatName,
-        identity: Identity,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let proof = ctx.try_with_vault(|v| {
-            let chat_meta =
-                v.chats.get_mut(&from).with_context(|| format!("could not find '{from}'"))?;
-            let action_no = &mut chat_meta.action_no;
-            let proof = ctx.with_keys(|k| Proof::new(&k.sign, action_no, from, OsRng))?;
-            Ok(proof)
-        })?;
-
-        self.request(rpcs::KICK_MEMBER, Topic::Chat(proof.context), (proof, identity))
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn fetch_messages(
-        &mut self,
-        name: ChatName,
-        cursor: Cursor,
-    ) -> anyhow::Result<(Cursor, ReminderOwned)> {
-        self.request(rpcs::FETCH_MESSAGES, Topic::Chat(name), cursor).await.map_err(Into::into)
+impl Sub<Identity> {
+    pub async fn fetch_vault_key(&mut self, key: crypto::Hash) -> anyhow::Result<ReminderOwned> {
+        self.sub.request(rpcs::FETCH_VAULT_KEY, self.topic, key).await.map_err(Into::into)
     }
 
     pub async fn insert_to_vault(
@@ -140,7 +26,9 @@ impl Subscription {
         proof: Proof<crypto::Hash>,
         changes: Vec<(crypto::Hash, Vec<u8>)>,
     ) -> anyhow::Result<()> {
-        self.request(rpcs::INSERT_TO_VAULT, proof.topic(), (proof, changes))
+        debug_assert_eq!(proof.topic(), self.topic.into());
+        self.sub
+            .request(rpcs::INSERT_TO_VAULT, self.topic, (proof, changes))
             .await
             .map_err(Into::into)
     }
@@ -150,57 +38,27 @@ impl Subscription {
         proof: Proof<crypto::Hash>,
         key: crypto::Hash,
     ) -> anyhow::Result<()> {
-        self.request(rpcs::REMOVE_FROM_VAULT, proof.topic(), (proof, key)).await.map_err(Into::into)
+        debug_assert_eq!(proof.topic(), self.topic.into());
+        self.sub
+            .request(rpcs::REMOVE_FROM_VAULT, self.topic, (proof, key))
+            .await
+            .map_err(Into::into)
     }
 
-    pub async fn fetch_keys(&mut self, identity: Identity) -> anyhow::Result<FetchProfileResp> {
-        self.request(rpcs::FETCH_PROFILE, Topic::Profile(identity), ()).await.map_err(Into::into)
+    pub async fn fetch_keys(&mut self) -> anyhow::Result<FetchProfileResp> {
+        self.sub.request(rpcs::FETCH_PROFILE, self.topic, ()).await.map_err(Into::into)
     }
 
-    pub async fn send_mail(&mut self, to: Identity, mail: impl Encode) -> anyhow::Result<()> {
-        log::info!("sending mail to {:?}", mail.to_bytes());
-        self.request(rpcs::SEND_MAIL, Topic::Profile(to), mail).await.recover_mail()
+    pub async fn send_mail(&mut self, mail: impl Encode) -> anyhow::Result<()> {
+        self.sub.request(rpcs::SEND_MAIL, self.topic, mail).await.recover_mail()
     }
 
     pub async fn read_mail(&mut self, ctx: impl RequestContext) -> anyhow::Result<ReminderOwned> {
         let proof = ctx.with_mail_action(|nonce| {
             ctx.with_keys(|k| Proof::new(&k.sign, nonce, Mail, OsRng))
         })??;
-        self.request(rpcs::READ_MAIL, proof.topic(), proof).await
-    }
-
-    pub async fn fetch_members(
-        &mut self,
-        name: ChatName,
-        from: Identity,
-        limit: u32,
-    ) -> anyhow::Result<Vec<(Identity, Member)>> {
-        self.request(rpcs::FETCH_MEMBERS, Topic::Chat(name), (from, limit)).await
-    }
-
-    pub async fn fetch_my_member(
-        &mut self,
-        name: ChatName,
-        me: Identity,
-    ) -> anyhow::Result<Member> {
-        let mebers = self.fetch_members(name, me, 1).await?;
-        mebers
-            .into_iter()
-            .next()
-            .and_then(|(id, m)| (id == me).then_some(m))
-            .context("member not found")
-    }
-
-    async fn create_chat(&mut self, name: ChatName, me: Identity) -> anyhow::Result<()> {
-        self.request(rpcs::CREATE_CHAT, name, me).await
-    }
-
-    async fn send_message<'a>(
-        &'a mut self,
-        proof: Proof<Reminder<'_>>,
-        name: ChatName,
-    ) -> anyhow::Result<()> {
-        self.request(rpcs::SEND_MESSAGE, name, proof).await
+        debug_assert_eq!(proof.topic(), self.topic.into());
+        self.sub.request(rpcs::READ_MAIL, self.topic, proof).await
     }
 
     pub async fn save_vault_components(
@@ -220,6 +78,138 @@ impl Subscription {
             ctx.with_vault_version(|nonce| Proof::new(&k.sign, nonce, total_hash, OsRng))
         })??;
         self.insert_to_vault(proof, chnages).await
+    }
+}
+
+impl Sub<ChatName> {
+    pub async fn send_encrypted_message(
+        &mut self,
+        mut message: Vec<u8>,
+        ctx: impl RequestContext,
+    ) -> anyhow::Result<()> {
+        let name = self.topic;
+        let proof = ctx.try_with_vault(|vault| {
+            let chat_meta =
+                vault.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
+            let tag = crypto::encrypt(&mut message, chat_meta.secret, OsRng);
+            message.extend(tag);
+            let msg = Reminder(&message);
+            let proof =
+                ctx.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, msg, OsRng))?;
+            Ok(proof)
+        })?;
+        let nonce = match self.send_message(proof).await.downcast_nonce()? {
+            Err(nonce) => nonce,
+            Ok(r) => return Ok(r),
+        };
+        log::info!("foo bar {nonce} {}", proof.nonce);
+        let proof = ctx.with_keys(|k| Proof::new(&k.sign, &mut { nonce }, proof.context, OsRng))?;
+        ctx.try_with_vault(|v| {
+            v.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?.action_no =
+                nonce + 1;
+            Ok(())
+        })?;
+        self.send_message(proof).await.map_err(Into::into)
+    }
+
+    pub async fn fetch_and_decrypt_messages(
+        &mut self,
+        cursor: &mut Cursor,
+        ctx: impl RequestContext,
+    ) -> anyhow::Result<Vec<RawChatMessage>> {
+        let name = self.topic;
+        let chat_meta = ctx.try_with_vault(|v| {
+            v.chats.get(&name).context("we are not part of the chat").copied()
+        })?;
+
+        let (new_cusor, ReminderOwned(mesages)) = self.fetch_messages(*cursor).await?;
+        *cursor = new_cusor;
+
+        Ok(unpack_messages_ref(&mesages)
+            .filter_map(|message| {
+                let message = chat_spec::Message::decode(&mut &message[..])?;
+                let mut content = message.content.0.to_owned();
+                let content = crypto::decrypt(&mut content, chat_meta.secret)?;
+                RawChatMessage::decode(&mut &*content)
+                    .map(|m| RawChatMessage { identity: message.sender, ..m })
+            })
+            .collect())
+    }
+
+    pub async fn update_member(
+        &mut self,
+        member: Identity,
+        config: Member,
+        ctx: impl RequestContext,
+    ) -> anyhow::Result<()> {
+        let name = self.topic;
+        let proof = ctx.try_with_vault(|v| {
+            let chat_meta =
+                v.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
+            let action_no = &mut chat_meta.action_no;
+            let proof = ctx.with_keys(|k| Proof::new(&k.sign, action_no, name, OsRng))?;
+            Ok(proof)
+        })?;
+        self.add_member(proof, member, config).await
+    }
+
+    pub async fn add_member(
+        &mut self,
+        proof: Proof<ChatName>,
+        member: Identity,
+        config: Member,
+    ) -> anyhow::Result<()> {
+        debug_assert_eq!(proof.context, self.topic);
+        let msg = (&proof, member, config);
+        self.sub.request(rpcs::ADD_MEMBER, self.topic, msg).await.map_err(Into::into)
+    }
+
+    pub async fn kick_member(
+        &mut self,
+        identity: Identity,
+        ctx: impl RequestContext,
+    ) -> anyhow::Result<()> {
+        let from = self.topic;
+        let proof = ctx.try_with_vault(|v| {
+            let chat_meta =
+                v.chats.get_mut(&from).with_context(|| format!("could not find '{from}'"))?;
+            let action_no = &mut chat_meta.action_no;
+            let proof = ctx.with_keys(|k| Proof::new(&k.sign, action_no, from, OsRng))?;
+            Ok(proof)
+        })?;
+        self.sub.request(rpcs::KICK_MEMBER, from, (proof, identity)).await.map_err(Into::into)
+    }
+
+    pub async fn fetch_messages(
+        &mut self,
+        cursor: Cursor,
+    ) -> anyhow::Result<(Cursor, ReminderOwned)> {
+        self.sub.request(rpcs::FETCH_MESSAGES, self.topic, cursor).await.map_err(Into::into)
+    }
+
+    pub async fn fetch_members(
+        &mut self,
+        from: Identity,
+        limit: u32,
+    ) -> anyhow::Result<Vec<(Identity, Member)>> {
+        self.sub.request(rpcs::FETCH_MEMBERS, self.topic, (from, limit)).await
+    }
+
+    pub async fn fetch_my_member(&mut self, me: Identity) -> anyhow::Result<Member> {
+        let mebers = self.fetch_members(me, 1).await?;
+        mebers
+            .into_iter()
+            .next()
+            .and_then(|(id, m)| (id == me).then_some(m))
+            .context("member not found")
+    }
+
+    async fn create_chat(&mut self, me: Identity) -> anyhow::Result<()> {
+        self.sub.request(rpcs::CREATE_CHAT, self.topic, me).await
+    }
+
+    async fn send_message<'a>(&'a mut self, proof: Proof<Reminder<'_>>) -> anyhow::Result<()> {
+        self.sub.request(rpcs::SEND_MESSAGE, self.topic, proof).await
     }
 
     // pub async fn request_storage_stream(
@@ -329,7 +319,7 @@ impl Subscription {
     //     addr: SocketAddr,
     //     proof: Proof<StoreContext>,
     // ) -> Result<libp2p::Stream, ChatError> {
-    //     self.request_storage_stream(identity, addr, srpcs::STORE_FILE, proof).await
+    //     self.sub.request_storage_stream(identity, addr, srpcs::STORE_FILE, proof).await
     // }
 
     // async fn allocate_file(
@@ -349,7 +339,7 @@ impl Subscription {
     //     };
 
     //     let proof = context.with_keys(|k| Proof::new(&k.sign, &mut { nonce }, satelite, OsRng))?;
-    //     self.request_satelite_request(satelite, srpcs::ALLOCATE_FILE, (size, proof)).await
+    //     self.sub.request_satelite_request(satelite, srpcs::ALLOCATE_FILE, (size, proof)).await
     // }
 
     // pub async fn request_storage_request<'a, R: Codec<'a>>(
@@ -416,10 +406,10 @@ pub trait RequestContext: Sized {
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> anyhow::Result<R>;
     fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R>;
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R>;
-    fn subscription_for(
+    fn subscription_for<T: Into<Topic> + Clone>(
         &self,
-        topic: impl Into<Topic>,
-    ) -> impl Future<Output = anyhow::Result<Subscription>>;
+        topic: T,
+    ) -> impl Future<Output = anyhow::Result<Sub<T>>>;
 
     async fn set_theme(&self, theme: Theme) -> anyhow::Result<()> {
         self.with_vault(|v| v.theme = theme)?;
@@ -443,11 +433,7 @@ pub trait RequestContext: Sized {
         let message = FriendMessage::DirectMessage { content };
         let mail =
             MailVariants::FriendMessage { header, session, content: Encrypted::new(message, ss) };
-        self.subscription_for(identity)
-            .await?
-            .send_mail(identity, mail)
-            .await
-            .context("sending message")
+        self.subscription_for(identity).await?.send_mail(mail).await.context("sending message")
     }
 
     async fn create_and_save_chat(&self, name: ChatName) -> anyhow::Result<()> {
@@ -458,7 +444,7 @@ pub trait RequestContext: Sized {
             .save_vault_components([VaultComponentId::Chats], &self)
             .await
             .context("saving vault")?;
-        self.subscription_for(name).await?.create_chat(name, my_id).await
+        self.subscription_for(name).await?.create_chat(my_id).await
     }
 
     async fn invite_member(
@@ -484,7 +470,7 @@ pub trait RequestContext: Sized {
         config: Member,
     ) -> anyhow::Result<()> {
         let mut them = self.subscription_for(member).await?;
-        let keys = them.fetch_keys(member).await?;
+        let keys = them.fetch_keys().await?;
 
         let (invite, proof) = self.try_with_vault(|vault| {
             let chat_meta =
@@ -496,7 +482,7 @@ pub trait RequestContext: Sized {
             Ok((MailVariants::ChatInvite { chat: name, cp }, proof))
         })?;
 
-        them.send_mail(member, invite).await.context("sending invite")?;
+        them.send_mail(invite).await.context("sending invite")?;
         self.subscription_for(name).await?.add_member(proof, member, config).await
     }
 
@@ -517,7 +503,7 @@ pub trait RequestContext: Sized {
         identity: Identity,
     ) -> anyhow::Result<()> {
         let mut them = self.subscription_for(identity).await?;
-        let keys = them.fetch_keys(identity).await.context("fetching keys")?;
+        let keys = them.fetch_keys().await.context("fetching keys")?;
         let (cp, ss) = self.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
         let (dr, init, id) = DoubleRatchet::sender(ss, OsRng);
 
@@ -525,7 +511,7 @@ pub trait RequestContext: Sized {
 
         let request = FriendRequest { username: self.with_keys(|k| k.name)?, identity: us, init };
         let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
-        them.send_mail(identity, mail).await.context("sending friend request")?;
+        them.send_mail(mail).await.context("sending friend request")?;
 
         let friend = FriendMeta { dr, identity, id };
         self.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;
@@ -537,7 +523,7 @@ pub trait RequestContext: Sized {
     }
 }
 
-impl<T: RequestContext> RequestContext for &T {
+impl<RC: RequestContext> RequestContext for &RC {
     fn try_with_vault<R>(
         &self,
         action: impl FnOnce(&mut Vault) -> anyhow::Result<R>,
@@ -561,10 +547,10 @@ impl<T: RequestContext> RequestContext for &T {
         (*self).with_mail_action(action)
     }
 
-    fn subscription_for(
+    fn subscription_for<T: Into<Topic> + Clone>(
         &self,
-        topic: impl Into<Topic>,
-    ) -> impl Future<Output = anyhow::Result<Subscription>> {
+        topic: T,
+    ) -> impl Future<Output = anyhow::Result<Sub<T>>> {
         (*self).subscription_for(topic)
     }
 }

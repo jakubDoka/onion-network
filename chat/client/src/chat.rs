@@ -111,7 +111,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 for message in state
                     .subscription_for(chat)
                     .await?
-                    .fetch_and_decrypt_messages(chat, &mut cursor, state)
+                    .fetch_and_decrypt_messages(&mut cursor, state)
                     .await?
                 {
                     prepend_message(message.sender, message.content);
@@ -196,7 +196,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             let mut sub = state
                 .subscription_for(chat)
                 .await?
-                .subscribe_to_chat(chat)
+                .subscribe()
                 .await
                 .context("subscribint to chat")?;
             log::info!("subscribed to chat: {:?}", chat);
@@ -233,7 +233,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 let m = state
                     .subscription_for(chat)
                     .await?
-                    .fetch_my_member(chat, my_id)
+                    .fetch_my_member(my_id)
                     .await
                     .inspect_err(|e| {
                         if !matches!(
@@ -356,11 +356,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         handled_spawn_local("sending normal message", async move {
             let content = RawChatMessage { sender: my_name, content, identity: Default::default() }
                 .to_bytes();
-            state
-                .subscription_for(chat)
-                .await?
-                .send_encrypted_message(chat, content, state)
-                .await?;
+            state.subscription_for(chat).await?.send_encrypted_message(content, state).await?;
             clear_input();
             Ok(())
         });
@@ -497,7 +493,7 @@ fn member_list_poppup(
         let name = name_sig.get_untracked().context("no chat selected")?;
         let last_identity = cursor.get_value();
         let fetched_members =
-            state.subscription_for(name).await?.fetch_members(name, last_identity, 31).await?;
+            state.subscription_for(name).await?.fetch_members(last_identity, 31).await?;
         set_exhausted(fetched_members.len() < 31);
 
         let members = members.get_untracked().expect("layout invariants");
@@ -606,7 +602,7 @@ fn editable_member(
 
     let kick = handled_async_callback(kick_ctx, move |_| async move {
         let name = name_sig.get_untracked().context("no chat selected")?;
-        state.subscription_for(name).await?.kick_member(name, identity, state).await?;
+        state.subscription_for(name).await?.kick_member(identity, state).await?;
         root.get_untracked().unwrap().remove();
         Ok(())
     });
@@ -626,11 +622,7 @@ fn editable_member(
             crate::get_value(action_cooldown_ms).parse::<u32>().context("parsing cooldown")?;
         let updated_member = Member { rank, permissions, action_cooldown_ms, ..m };
 
-        state
-            .subscription_for(name)
-            .await?
-            .update_member(name, identity, updated_member, state)
-            .await?;
+        state.subscription_for(name).await?.update_member(identity, updated_member, state).await?;
 
         cancel();
 

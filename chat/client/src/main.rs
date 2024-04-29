@@ -17,7 +17,7 @@ use {
     chain_api::Nonce,
     chat_client_node::{
         encode_direct_chat_name, BootPhase, FriendMessage, MailVariants, Node, NodeHandle,
-        RequestContext, Subscription, UserKeys, Vault, VaultComponentId,
+        RequestContext, Sub, UserKeys, Vault, VaultComponentId,
     },
     chat_spec::{ChatName, Topic},
     codec::{Decode, ReminderOwned},
@@ -85,7 +85,10 @@ impl RequestContext for State {
         self.mail_action.try_update_value(action).with_context(rc_error("mail action"))
     }
 
-    fn subscription_for(&self, t: impl Into<Topic>) -> impl Future<Output = Result<Subscription>> {
+    fn subscription_for<T: Into<Topic> + Clone>(
+        &self,
+        t: T,
+    ) -> impl Future<Output = Result<Sub<T>>> {
         let fut = self
             .requests
             .try_with_value(|r| r.as_ref().map(|r| r.subscription_for(t)))
@@ -148,10 +151,9 @@ fn App() -> impl IntoView {
                     .await
                     .inspect_err(|_| navigate_to("/login"))?;
 
-            let profile_sub = dispatch.subscription_for(identity).await?;
-            let mut profile_sub_clone = profile_sub.clone();
             handled_spawn_local("reading mail", async move {
-                let ReminderOwned(list) = profile_sub_clone.read_mail(state).await?;
+                let mut profile_sub = state.subscription_for(identity).await?;
+                let ReminderOwned(list) = profile_sub.read_mail(state).await?;
                 let mut new_messages = Vec::new();
                 let mut vault_updates = Vec::new();
                 for mail in chat_spec::unpack_mail(&list) {
@@ -164,25 +166,21 @@ fn App() -> impl IntoView {
                 db::save_messages(&new_messages).await?;
                 vault_updates.sort_unstable();
                 vault_updates.dedup();
-                profile_sub_clone.save_vault_components(vault_updates, &state).await
+                profile_sub.save_vault_components(vault_updates, &state).await
             });
 
-            let mut profile_sub_clone = profile_sub.clone();
             let listen = async move {
                 let mut vault_updates = Vec::new();
                 let mut new_messages = Vec::new();
                 loop {
-                    let mut account = profile_sub_clone
-                        .subscribe_to_profile(identity)
-                        .await
-                        .context("subscribin to account")?;
+                    let mut profile_sub = state.subscription_for(identity).await?;
+                    let mut account =
+                        profile_sub.subscribe().await.context("subscribin to account")?;
                     while let Some(mail) = account.next().await {
                         let task = async {
                             handle_mail(mail, &mut new_messages, &mut vault_updates, state).await?;
                             db::save_messages(&new_messages).await?;
-                            profile_sub_clone
-                                .save_vault_components(vault_updates.drain(..), &state)
-                                .await
+                            profile_sub.save_vault_components(vault_updates.drain(..), &state).await
                         };
                         handle_error(task.await);
                         new_messages.clear();

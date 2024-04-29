@@ -192,7 +192,7 @@ impl Node {
         let _ = vault.theme.apply();
 
         let id = profile_stream_peer.to_hash();
-        let sub = Subscription::new(profile_stream, handle.subs.clone(), id);
+        let sub = RawSub::new(profile_stream, handle.subs.clone(), id);
         subs.borrow_mut().insert(id, sub);
 
         set_state!(ChatRun);
@@ -276,7 +276,7 @@ fn pick_route(
 }
 
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
-type Subs = RefCell<HashMap<NodeIdentity, Subscription>>;
+type Subs = RefCell<HashMap<NodeIdentity, RawSub>>;
 
 enum SubscriptionRequest {
     Chat(ChatName, mpsc::Sender<ChatEvent>),
@@ -303,38 +303,38 @@ impl NodeHandle {
         Self { requests, subs: Rc::downgrade(subs), dht }
     }
 
-    fn upgrade(&self) -> io::Result<Rc<RefCell<HashMap<NodeIdentity, Subscription>>>> {
+    fn upgrade(&self) -> io::Result<Rc<RefCell<HashMap<NodeIdentity, RawSub>>>> {
         self.subs.upgrade().ok_or(io::ErrorKind::ConnectionReset.into())
     }
 
-    pub fn subscription_for(
+    pub fn subscription_for<T: Into<Topic> + Clone>(
         &self,
-        topic: impl Into<Topic>,
-    ) -> impl Future<Output = io::Result<Subscription>> {
+        topic: T,
+    ) -> impl Future<Output = io::Result<Sub<T>>> {
         let subs = self.upgrade();
         let mut rqs = self.requests.clone();
-        let topic = topic.into();
+        let raw_topic = topic.clone().into();
         let replicatios =
-            self.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
+            self.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(raw_topic.as_bytes());
 
         async move {
             let subs = subs?;
 
             for repl in replicatios.clone() {
                 if let Some(sub) = subs.borrow().get(&NodeIdentity::from(repl)) {
-                    return Ok(sub.clone());
+                    return Ok(Sub { topic, sub: sub.clone() });
                 }
             }
 
             let (tx, rx) = oneshot::channel();
-            rqs.send(NodeRequest::Subscribe(topic, tx))
+            rqs.send(NodeRequest::Subscribe(raw_topic, tx))
                 .await
                 .map_err(|_| io::ErrorKind::ConnectionReset)?;
             let (node, stream) = rx.await.map_err(|_| io::ErrorKind::ConnectionAborted)?;
             debug_assert!(replicatios.contains(&node.into()));
-            let sub = Subscription::new(stream, Rc::downgrade(&subs), node);
+            let sub = RawSub::new(stream, Rc::downgrade(&subs), node);
             subs.borrow_mut().insert(node, sub.clone());
-            Ok(sub)
+            Ok(Sub { topic, sub })
         }
     }
 }
@@ -349,11 +349,33 @@ impl Drop for NodeHandle {
 }
 
 #[derive(Clone)]
-pub struct Subscription {
+pub struct Sub<T> {
+    pub(crate) topic: T,
+    pub(crate) sub: RawSub,
+}
+
+impl Sub<ChatName> {
+    pub async fn subscribe(&mut self) -> Option<mpsc::Receiver<ChatEvent>> {
+        let (tx, rx) = mpsc::channel(10);
+        self.sub.requests.send(SubscriptionRequest::Chat(self.topic, tx)).await.ok()?;
+        Some(rx)
+    }
+}
+
+impl Sub<Identity> {
+    pub async fn subscribe(&mut self) -> Option<mpsc::Receiver<MailVariants>> {
+        let (tx, rx) = mpsc::channel(10);
+        self.sub.requests.send(SubscriptionRequest::Profile(self.topic, tx)).await.ok()?;
+        Some(rx)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RawSub {
     requests: mpsc::Sender<SubscriptionRequest>,
 }
 
-impl Subscription {
+impl RawSub {
     pub fn new(stream: EncryptedStream, subscriptions: rc::Weak<Subs>, id: NodeIdentity) -> Self {
         let (requests, inner_requests) = mpsc::channel(10);
 
@@ -368,21 +390,6 @@ impl Subscription {
         });
 
         Self { requests }
-    }
-
-    pub async fn subscribe_to_chat(&mut self, chat: ChatName) -> Option<mpsc::Receiver<ChatEvent>> {
-        let (tx, rx) = mpsc::channel(10);
-        self.requests.send(SubscriptionRequest::Chat(chat, tx)).await.ok()?;
-        Some(rx)
-    }
-
-    pub async fn subscribe_to_profile(
-        &mut self,
-        id: Identity,
-    ) -> Option<mpsc::Receiver<MailVariants>> {
-        let (tx, rx) = mpsc::channel(10);
-        self.requests.send(SubscriptionRequest::Profile(id, tx)).await.ok()?;
-        Some(rx)
     }
 
     pub async fn request<R: DecodeOwned>(

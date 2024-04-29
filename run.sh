@@ -5,28 +5,6 @@ sod() { export "$1"="${!1:-$2}"; }
 is_running() { pgrep -f "$1" > /dev/null; }
 ensure_dir() { test -d $1 || mkdir -p $1; }
 
-ensure_dir tmp
-
-reset_state() {
-	echo 42069 > tmp/port
-	echo 0 > tmp/nonce
-}
-
-reset_state
-
-alloc_port() {
-	PORT=$(cat tmp/port)
-	PORT=$((PORT + 1))
-	echo $PORT > tmp/port
-	echo $((PORT - 1))
-}
-
-alloc_nonce() {
-	NONCE=$(cat tmp/nonce)
-	NONCE=$((NONCE + 1))
-	echo $NONCE > tmp/nonce
-	echo $((NONCE - 1))
-}
 
 # args
 sod PROFILE          ""
@@ -62,6 +40,8 @@ WALLET_INTEGRATION="chat/client/wallet-integration"
 FALCON_ROOT="crypto/falcon"
 TARGET_DIR="target/debug"
 CLIENT_ROOT="chat/client"
+TOPOLOGY_DIST="$(pwd)/target/dist/topology"
+CLIENT_DIST="$(pwd)/target/dist/client"
 SILENCE=""
 if [ "$PROFILE" = "release" ]; then
 	FLAGS="--profile native-optimized"
@@ -69,23 +49,39 @@ if [ "$PROFILE" = "release" ]; then
 	TARGET_DIR="target/native-optimized"
 fi
 
+ensure_dir tmp
 
-rustup default nightly
+reset_state() { # reset the port and nonce counters
+	echo 42069 > tmp/port
+	echo 0 > tmp/nonce
+}
+
+alloc_port() { # allocate a port for a node
+	PORT=$(cat tmp/port)
+	PORT=$((PORT + 1))
+	echo $PORT > tmp/port
+	echo $((PORT - 1))
+}
+
+alloc_nonce() { # allocate a nonce for a node
+	NONCE=$(cat tmp/nonce)
+	NONCE=$((NONCE + 1))
+	echo $NONCE > tmp/nonce
+	echo $((NONCE - 1))
+}
 
 
-load_mnemonic() {
+load_mnemonic() { # <name> - load or generate a mnemonic for a node
 	ensure_dir $TMP_DIR/node_mnemonics
 	FILE_NAME="$TMP_DIR/node_mnemonics/$1.mnem"
 	test -f $FILE_NAME || $TARGET_DIR/chain-helper gen-mnemonic 24 > $FILE_NAME
 	echo $(cat $FILE_NAME)
 }
 
-cleanup_files() {
-	rm -rf tmp
-}
+cleanup_files() { rm -rf tmp; }
 generate_falcon() { (cd $FALCON_ROOT && sh transpile.sh || exit 1); }
 
-rebuild_native() {
+build_native() { # rebuild the native part of the project (all executables)
 		cargo build $FLAGS --workspace \
 			--exclude chat-client \
 			--exclude chat-client-node \
@@ -93,23 +89,26 @@ rebuild_native() {
 			--exclude websocket-websys \
 			|| exit 1
 }
-rebuild_topology() { creq trunk; (cd $TOPOLOGY_ROOT && ./build.sh "$PROFILE" || exit 1); }
-rebuild_chain() { (cd chain/substrate-tests && cargo build --release); }
-rebuild_client() { creq trunk; (cd chat/client && trunk build $WASM_FLAGS --features building || exit 1); }
-
-rebuild_all() {
-	rebuild_native
-	rebuild_topology
-	rebuild_client
+build_topology() { # rebuild the topology, if `run_wasm` is called, it will trigger hotreload
+	creq trunk
+	ensure_dir $TOPOLOGY_DIST
+	(cd $TOPOLOGY_ROOT && ./build.sh "$PROFILE" "$TOPOLOGY_DIST" || exit 1)
 }
+build_chain() { (cd chain/substrate-tests && cargo build --release); }
+build_client() { # rebuild the client, if `run_wasm` is called, it will trigger hotreload
+	creq trunk
+	ensure_dir $CLIENT_DIST
+	(cd chat/client && trunk build $WASM_FLAGS --features building -d $CLIENT_DIST || exit 1)
+}
+build_all() { build_native; build_topology; build_client; }
 
-run_wasm() {
+run_wasm() { # run the wasm frontends (topology and client)
 	creq live-server
 	killall live-server
-	(cd $TOPOLOGY_ROOT/dist && live-server --host 127.0.0.1 --port $TOPOLOGY_PORT > /dev/null 2>&1 &)
-	(cd $CLIENT_ROOT/dist && live-server --host 127.0.0.1 --port $FRONTEND_PORT > /dev/null 2>&1 &)
+	(cd $TOPOLOGY_DIST && live-server --host 127.0.0.1 --port $TOPOLOGY_PORT > /dev/null 2>&1 &)
+	(cd $CLIENT_DIST && live-server --host 127.0.0.1 --port $CLIENT_PORT > /dev/null 2>&1 &)
 }
-run_nodes() {
+run_nodes() { # <exe> <count> - run nodes of a certain type
 	EXE=$1
 	COUNT=$2
 
@@ -133,9 +132,8 @@ run_nodes() {
 	done
 }
 run_chat_servers() { run_nodes chat-server $NODE_COUNT; }
-#run_satelites() { run_nodes storage-satelite $SATELITE_COUNT; }
-#run_storage_nodes() { run_nodes storage-node $STORAGE_NODE_COUNT; }
-run_chain() {
+run_servers() { reset_state; run_chat_servers; }
+run_chain() { # run local chain node
 	killall $CHAIN_NAME
 	$CHAIN_PATH --dev > /dev/null 2>&1 &
 
@@ -147,35 +145,46 @@ run_chain() {
 	$TARGET_DIR/chain-helper bulk-transfer $BALANCE $CHAIN_NODES //Bob $TEST_WALLETS || exit 1 &
 }
 
-case $1 in
-	"just")
-		shift
-		$@
-		exit 0
-		;;
-	"local")
-		test -e $CHAIN_PATH && ! $REBUILD_CHAIN || rebuild_chain
+repl() { # make a repl inside this script
+	echo "begins shell from the scope of this script:"
+	while read -p '$ ' -r line; do $line; done
+}
 
-		test -d $FALCON_ROOT/falcon              || generate_falcon
+boot_local() { # boot local chain nodes and frontends for testing
+	test -e $CHAIN_PATH && ! $REBUILD_CHAIN || build_chain
 
-		is_running $CHAIN_NAME || run_chain
+	test -d $FALCON_ROOT/falcon              || generate_falcon
 
-		test -e $TARGET_DIR/chat-server && ! $REBUILD_NATIVE   || rebuild_native
-		test -d $TOPOLOGY_ROOT/dist     && ! $REBUILD_TOPOLOGY || rebuild_topology
-		test -d $CLIENT_ROOT/dist       && ! $REBUILD_CLIENT   || rebuild_client
+	is_running $CHAIN_NAME || run_chain
 
-		is_running chat-server      || run_chat_servers
-		#is_running storage-satelite || run_satelites
-		#is_running storage-node     || run_storage_nodes
-		is_running live-server      || run_wasm
+	test -e $TARGET_DIR/chat-server && ! $REBUILD_NATIVE   || build_native
+	test -d $TOPOLOGY_DIST     && ! $REBUILD_TOPOLOGY || build_topology
+	test -d $CLIENT_DIST       && ! $REBUILD_CLIENT   || build_client
 
-		;;
-	"born")
-		export CHAIN_NODES=wss://rpc-1.born.orionmessenger.io
-		rebuild_client
-		rebuild_topology
-		is_running live-server      || run_wasm
-esac
+	reset_state
 
-echo "begins shell from the scope of this script:"
-while read -p '$ ' -r line; do $line; done
+	is_running chat-server      || run_chat_servers
+	#is_running storage-satelite || run_satelites
+	#is_running storage-node     || run_storage_nodes
+	is_running live-server      || run_wasm
+
+	repl
+}
+
+boot_born() { # boot frontend to connect to born deployment
+	export CHAIN_NODES=wss://rpc-1.born.orionmessenger.io
+	build_client
+	build_topology
+	is_running live-server      || run_wasm
+
+	repl
+}
+
+help() { # print help
+	echo "Usage: run.sh <command> [args...]"
+	echo "when using repl, its recommended to call this with 'rlwrap'"
+	echo "Commands:"
+	grep -E '^[a-z_]+?\(\) \{' $0 | sed 's/() { #/ -/' | sort | sed 's/^/  /'
+}
+
+$@ || help

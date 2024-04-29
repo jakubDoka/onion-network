@@ -2,13 +2,13 @@
 
 creq() { [ -x "$(command -v $1)" ] || cargo install $1; }
 
-creq wasm-opt
 creq wasm-bindgen-cli
 
 sod() { export "$1"="${!1:-$2}"; }
 
 sod BOOT_NODE "/ip4/127.0.0.1/tcp/8900/ws"
-sod OUT_DIR "dist"
+
+OUT_DIR="$2"
 
 TARGET_DIR="debug"
 if [ "$1" = "release" ]; then
@@ -75,6 +75,7 @@ mkdir -p $OUT_DIR
 cargo build --target wasm32-unknown-unknown $FLAGS --features building
 wasm-bindgen "$WASM_PATH" --out-dir $OUT_DIR --target web --no-typescript
 if [ "$RELEASE" = "yes" ]; then
+    creq wasm-opt
     wasm-opt -Oz -o $OUT_DIR/topology-vis_bg.wasm $OUT_DIR/topology-vis_bg.wasm 
 fi
 

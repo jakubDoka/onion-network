@@ -1,5 +1,5 @@
 use {
-    crate::{Identity, Nonce},
+    crate::{ChatError, Identity, Nonce},
     arrayvec::ArrayString,
     chain_api::{RawUserName, USER_NAME_CAP},
     codec::{Codec, DecodeOwned},
@@ -52,17 +52,21 @@ impl Vault {
             self.values.iter().map(|(&k, v)| hash::combine(k, hash::new(v))).collect();
     }
 
-    pub fn try_remove(&mut self, key: crypto::Hash, proof: Proof<crypto::Hash>) -> bool {
+    pub fn try_remove(
+        &mut self,
+        key: crypto::Hash,
+        proof: Proof<crypto::Hash>,
+    ) -> Result<(), ChatError> {
         if !proof.verify() {
-            return false;
+            return Err(ChatError::InvalidProof);
         }
 
         if proof.nonce <= self.version {
-            return false;
+            return Err(ChatError::InvalidAction(self.version + 1));
         }
 
         let Some(v) = self.values.remove(&key) else {
-            return false;
+            return Err(ChatError::NotFound);
         };
 
         // TODO: we might be able to avoid full recompute and update smartly
@@ -71,26 +75,26 @@ impl Vault {
         if proof.context != *self.merkle_tree.root() {
             self.values.insert(key, v);
             self.recompute();
-            return false;
+            return Err(ChatError::InvalidProofContext);
         }
 
         self.version = proof.nonce;
         self.sig = proof.signature;
 
-        true
+        Ok(())
     }
 
     pub fn try_insert_bulk(
         &mut self,
         changes: Vec<(Identity, Vec<u8>)>,
         proof: Proof<Identity>,
-    ) -> bool {
+    ) -> Result<(), ChatError> {
         if !proof.verify() {
-            return false;
+            return Err(ChatError::InvalidProof);
         }
 
         if proof.nonce <= self.version {
-            return false;
+            return Err(ChatError::InvalidAction(self.version + 1));
         }
 
         let prevs = changes
@@ -110,13 +114,13 @@ impl Vault {
             }
             self.recompute();
 
-            return false;
+            return Err(ChatError::InvalidProofContext);
         }
 
         self.version = proof.nonce;
         self.sig = proof.signature;
 
-        true
+        Ok(())
     }
 
     pub fn try_insert(
@@ -124,7 +128,7 @@ impl Vault {
         key: crypto::Hash,
         value: Vec<u8>,
         proof: Proof<crypto::Hash>,
-    ) -> bool {
+    ) -> Result<(), ChatError> {
         self.try_insert_bulk(vec![(key, value)], proof)
     }
 

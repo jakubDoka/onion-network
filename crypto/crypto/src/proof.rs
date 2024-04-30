@@ -15,7 +15,7 @@ impl NonceInt for Nonce {
     }
 
     fn advance_to(&mut self, to: Self) -> bool {
-        if *self + 1 == to {
+        if *self < to {
             *self = to;
             true
         } else {

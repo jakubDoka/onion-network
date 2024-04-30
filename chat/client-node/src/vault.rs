@@ -19,7 +19,7 @@ pub struct VaultValue(Vec<u8>);
 #[derive(Codec)]
 pub struct VaultChanges(BTreeSet<crypto::Hash>);
 
-#[derive(Codec)]
+#[derive(Codec, Default)]
 pub struct VaultHeader {
     pub version: Nonce,
     pub keys: BTreeSet<crypto::Hash>,
@@ -38,7 +38,21 @@ pub struct Vault {
 
 impl Default for Vault {
     fn default() -> Self {
-        Self::deserialize(Default::default(), Default::default())
+        Self {
+            chats: Default::default(),
+            friend_index: Default::default(),
+            friends: Default::default(),
+            theme: Default::default(),
+            last_update: instant::Instant::now(),
+            change_count: Default::default(),
+            changed_keys: Default::default(),
+            raw: chat_spec::Vault {
+                values: Default::default(),
+                merkle_tree: Default::default(),
+                sig: unsafe { std::mem::zeroed() },
+                version: Default::default(),
+            },
+        }
     }
 }
 
@@ -158,13 +172,6 @@ impl Vault {
 
     pub fn update(&mut self, id: VaultComponentId, key: SharedSecret) -> Option<()> {
         use VaultComponentId as VCI;
-        let hash = match id {
-            VCI::Chats => chats(),
-            VCI::Theme => theme(),
-            VCI::FriendNames => friends(),
-            VCI::Friend(name) => self.friends.get(&name).map(|f| f.id)?,
-        };
-
         let value = match id {
             VCI::Chats => self.chats.to_bytes(),
             VCI::Theme => self.theme.to_bytes(),
@@ -172,6 +179,15 @@ impl Vault {
             VCI::FriendNames => {
                 self.friends.iter().map(|(&n, f)| (n, f.id)).collect::<Vec<_>>().to_bytes()
             }
+        };
+
+        log::info!("updating {:?} with {:?}", id, value);
+
+        let hash = match id {
+            VCI::Chats => chats(),
+            VCI::Theme => theme(),
+            VCI::FriendNames => friends(),
+            VCI::Friend(name) => self.friends.get(&name).map(|f| f.id)?,
         };
 
         let value = match id {
@@ -186,7 +202,7 @@ impl Vault {
         let value = VaultValue(value);
         Cache::insert(hash, &value);
         if self.raw.values.insert(hash, value.0).is_none() {
-            let mut header = Cache::get::<VaultHeader>([])?;
+            let mut header = Cache::get::<VaultHeader>([]).unwrap_or_default();
             header.keys.insert(hash);
             Cache::insert([], &header);
         }
@@ -200,8 +216,7 @@ impl Vault {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-#[allow(clippy::large_enum_variant)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum VaultComponentId {
     Chats,
     Friend(UserName),

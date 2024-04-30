@@ -81,7 +81,7 @@ impl Cache {
         key: K,
         or_compute: impl FnOnce(K) -> F,
     ) -> anyhow::Result<Option<T>> {
-        let hash = crypto::hash::with_nonce(key.as_ref(), T::NONCE);
+        let hash = Self::compute_key::<T>(&key);
 
         if let Some(res) = Self::get_low::<T>(hash) {
             return Ok(Some(res));
@@ -94,22 +94,27 @@ impl Cache {
         Ok(res)
     }
 
+    #[track_caller]
     pub fn get<T: Cached>(key: impl AsRef<[u8]>) -> Option<T> {
         Self::get_low::<T>(Self::compute_key::<T>(key))
     }
 
+    #[track_caller]
     pub fn insert<T: Cached>(key: impl AsRef<[u8]>, value: &T) {
         Self::insert_low(Self::compute_key::<T>(key), value);
     }
 
+    #[track_caller]
     fn compute_key<T: Cached>(key: impl AsRef<[u8]>) -> crypto::Hash {
-        crypto::xor_secrets(
-            crypto::hash::with_nonce(key.as_ref(), T::NONCE),
-            INSTANCE.with(|i| i.borrow().id),
-        )
+        let id = INSTANCE.with(|i| i.borrow().id);
+        debug_assert_ne!(id, Identity::default());
+
+        crypto::xor_secrets(crypto::hash::with_nonce(key.as_ref(), T::NONCE), id)
     }
 
     fn get_low<T: Codec>(key: crypto::Hash) -> Option<T> {
+        log::info!("getting from cache: {} {}", encode_base64(&key), std::any::type_name::<T>());
+
         if let Some(entry) = INSTANCE.with(|i| i.borrow().hot_entries.get(&key).cloned())
             && let Some(res) = T::decode(&mut entry.as_slice())
         {
@@ -134,6 +139,11 @@ impl Cache {
         if let Some(win) = web_sys::window()
             && let Some(local_storage) = win.local_storage().unwrap()
         {
+            log::info!(
+                "inserting into cache: {} {}",
+                encode_base64(&key),
+                std::any::type_name::<T>()
+            );
             local_storage.set(&encode_base64(&key), &encode_base64(&value)).unwrap();
         }
     }

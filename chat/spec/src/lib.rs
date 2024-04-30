@@ -63,14 +63,14 @@ pub use {chat::*, profile::*};
 pub enum ChatError {
     #[error("invalid proof")]
     InvalidProof,
+    #[error("invalid proof context")]
+    InvalidProofContext,
     #[error("not found")]
     NotFound,
     #[error("outdated")]
     Outdated,
     #[error("already exists")]
     AlreadyExists,
-    #[error("invalid action")]
-    InvalidAction,
     #[error("sent directly")]
     SentDirectly,
     #[error("sending to self is not allowed")]
@@ -82,7 +82,7 @@ pub enum ChatError {
     #[error("member already exists")]
     AlreadyMember,
     #[error("invalid action, expected nonce higher then {0}")]
-    InvalidChatAction(Nonce),
+    InvalidAction(Nonce),
     #[error("message too large")]
     MessageTooLarge,
     #[error("latest message block is still being finalized")]

@@ -151,27 +151,23 @@ fn App() -> impl IntoView {
                     .await
                     .inspect_err(|_| navigate_to("/login"))?;
 
-            handled_spawn_local("reading mail", async move {
-                let ReminderOwned(list) = state.read_mail().await?;
-                let mut new_messages = Vec::new();
-                let mut vault_updates = Vec::new();
-                for mail in chat_spec::unpack_mail(&list) {
-                    let mail = MailVariants::decode(&mut &*mail)
-                        .with_context(|| format!("cant decode mail: {mail:?}"))?;
-                    handle_error(
-                        handle_mail(mail, &mut new_messages, &mut vault_updates, state).await,
-                    );
-                }
-                db::save_messages(&new_messages).await?;
-                vault_updates.sort_unstable();
-                vault_updates.dedup();
-                state.save_vault_components(vault_updates).await
-            });
-
             let listen = async move {
                 let mut vault_updates = Vec::new();
                 let mut new_messages = Vec::new();
                 loop {
+                    let ReminderOwned(list) = state.read_mail().await?;
+                    for mail in chat_spec::unpack_mail(&list) {
+                        let mail = MailVariants::decode(&mut &*mail)
+                            .with_context(|| format!("cant decode mail: {mail:?}"))?;
+                        handle_error(
+                            handle_mail(mail, &mut new_messages, &mut vault_updates, state).await,
+                        );
+                    }
+                    db::save_messages(&new_messages).await?;
+                    vault_updates.sort_unstable();
+                    vault_updates.dedup();
+                    state.save_vault_components(vault_updates.drain(..)).await?;
+
                     let mut profile_sub = state.subscription_for(identity).await?;
                     let mut account =
                         profile_sub.subscribe().await.context("subscribin to account")?;

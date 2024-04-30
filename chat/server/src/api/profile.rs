@@ -57,13 +57,7 @@ pub async fn insert_to_vault(
     identity: Identity,
     Dec((proof, changes)): Dec<(Proof<crypto::Hash>, Vec<(crypto::Hash, Vec<u8>)>)>,
 ) -> Result<()> {
-    cx.profiles
-        .get_mut(&identity)
-        .ok_or(ChatError::NotFound)?
-        .vault
-        .try_insert_bulk(changes, proof)
-        .then_some(())
-        .ok_or(ChatError::InvalidProof)
+    cx.profiles.get_mut(&identity).ok_or(ChatError::NotFound)?.vault.try_insert_bulk(changes, proof)
 }
 
 pub async fn remove_from_vault(
@@ -71,13 +65,7 @@ pub async fn remove_from_vault(
     identity: Identity,
     Dec((proof, key)): Dec<(Proof<crypto::Hash>, crypto::Hash)>,
 ) -> Result<()> {
-    cx.profiles
-        .get_mut(&identity)
-        .ok_or(ChatError::NotFound)?
-        .vault
-        .try_remove(key, proof)
-        .then_some(())
-        .ok_or(ChatError::InvalidProof)
+    cx.profiles.get_mut(&identity).ok_or(ChatError::NotFound)?.vault.try_remove(key, proof)
 }
 
 pub async fn fetch_vault_key(
@@ -102,7 +90,7 @@ pub async fn read_mail(
     handlers::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
     handlers::ensure!(
         advance_nonce(&mut profile.mail_action, proof.nonce),
-        ChatError::InvalidAction
+        ChatError::InvalidAction(profile.mail_action + 1)
     );
 
     cx.online.insert(identity, location);

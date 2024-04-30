@@ -14,7 +14,7 @@ use {
 };
 
 const MAX_KEPT_MISSING_MESSAGES: usize = 5;
-const KYBER_PERIOD: u32 = 35;
+const KYBER_PERIOD: u32 = 3;
 const SUB_CONSTANT: SharedSecret = [0u8; 32];
 
 type SharedSecret = [u8; 32];
@@ -54,15 +54,15 @@ impl DoubleRatchet {
         let x25519 = StaticSecret::random_from_rng(&mut rng);
 
         let mut root = Chain::from(root);
-        let sender_hash = dbg!(blake3::hash(&root.root)).into();
+        let sender_hash = blake3::hash(&root.root).into();
         let id = root.next_sc();
         let receiver = Chain::new_init(root.next_sc());
-        let receiver_hash = dbg!(blake3::hash(&receiver.root)).into();
+        let receiver_hash = blake3::hash(&receiver.root).into();
 
         let dh = x25519.diffie_hellman(&init.x25519).to_bytes();
         let (cp, ss) = kyber::encapsulate(&init.kyber, &mut rng).unwrap();
 
-        let sender: Chain = root.next_rk(dh).into();
+        let sender = Chain::new_guarding(dh);
 
         let s = Self {
             receiver,
@@ -86,10 +86,10 @@ impl DoubleRatchet {
         let kyber: KyberSeed = random_array(&mut rng);
         let x25519 = StaticSecret::random_from_rng(&mut rng);
         let mut root = Chain::from(root);
-        let receiver_hash = dbg!(blake3::hash(&root.root)).into();
+        let receiver_hash = blake3::hash(&root.root).into();
         let id = root.next_sc();
         let sender = Chain::new_init(root.next_sc());
-        let sender_hash = dbg!(blake3::hash(&sender.root)).into();
+        let sender_hash = blake3::hash(&sender.root).into();
         let key = InitiatiorKey {
             x25519: (&x25519).into(),
             kyber: kyber::Keypair::generate(&mut SliceRng(&kyber)).unwrap().public,
@@ -133,15 +133,9 @@ impl DoubleRatchet {
             let mut receiver_input = self.x25519.diffie_hellman(&message.x25519).to_bytes();
             self.x25519 = StaticSecret::random_from_rng(&mut rng);
             if let Some(kyb) = message.kyber {
-                receiver_input = xor(
-                    receiver_input,
-                    kyber::decapsulate(
-                        &kyber::Keypair::generate(&mut SliceRng(&kyb.cp)).unwrap().secret,
-                        &kyb.cp,
-                    )
-                    .ok()
-                    .ok_or(RecvError::Decapsulation)?,
-                );
+                let sec = kyber::Keypair::generate(&mut SliceRng(&self.kyber)).unwrap().secret;
+                let sec = kyber::decapsulate(&kyb.cp, &sec).ok().ok_or(RecvError::Decapsulation)?;
+                receiver_input = xor(receiver_input, sec);
                 self.kyber = random_array(&mut rng);
                 let (cp, ss) = kyber::encapsulate(&kyb.public, &mut rng).unwrap();
                 self.cp = cp;
@@ -149,17 +143,9 @@ impl DoubleRatchet {
             }
 
             self.prev_sub_count = std::mem::take(&mut self.sender.step);
-
-            let mut sender_input = self.x25519.diffie_hellman(&message.x25519).to_bytes();
-            let by_the_time_we_get_to_send_offset = 2;
-            if (self.root.step + by_the_time_we_get_to_send_offset) % KYBER_PERIOD == 0 {
-                sender_input = xor(sender_input, std::mem::take(&mut self.ss));
-            }
-
             self.receiver = self.root.next_rk(receiver_input).into();
-            self.receiver_hash = dbg!(blake3::hash(&self.receiver.root)).into();
-            self.sender = self.root.next_rk(sender_input).into();
-            self.root.step += 1;
+            self.receiver_hash = blake3::hash(&self.receiver.root).into();
+            self.sender.guard(self.x25519.diffie_hellman(&message.x25519).to_bytes());
         }
 
         self.add_missing_message(message.id.sub_step)?;
@@ -167,9 +153,13 @@ impl DoubleRatchet {
     }
 
     pub fn send(&mut self) -> (MessageHeader, SharedSecret) {
-        if self.sender.step == 0 {
-            self.root.step += 1;
-            self.sender_hash = dbg!(blake3::hash(&self.sender.root)).into();
+        if self.sender.step == u32::MAX {
+            let mut seed = self.sender.root;
+            if (self.root.step + 1) % KYBER_PERIOD == 0 {
+                seed = xor(seed, self.ss);
+            }
+            self.sender = self.root.next_rk(seed).into();
+            self.sender_hash = blake3::hash(&self.sender.root).into();
         }
 
         let header = MessageHeader {
@@ -178,10 +168,14 @@ impl DoubleRatchet {
             // odd number to make participants alternate
             kyber: (self.root.step % KYBER_PERIOD == 0).then(|| Kyber {
                 public: kyber::Keypair::generate(&mut SliceRng(&self.kyber)).unwrap().public,
-                cp: self.cp,
+                cp: {
+                    debug_assert_ne!(self.cp, [0u8; kyber::KYBER_CIPHERTEXTBYTES]);
+                    self.cp
+                },
             }),
             x25519: (&self.x25519).into(),
         };
+
         (header, self.sender.next_sc())
     }
 
@@ -275,13 +269,23 @@ impl Chain {
         Self { step: 1, root }
     }
 
+    pub fn new_guarding(root: SharedSecret) -> Self {
+        Self { step: u32::MAX, root }
+    }
+
     pub fn next_sc(&mut self) -> SharedSecret {
         self.step += 1;
         kdf_sc(&mut self.root)
     }
 
     pub fn next_rk(&mut self, rachet_input: SharedSecret) -> SharedSecret {
+        self.step += 1;
         kdf_rk(&mut self.root, rachet_input)
+    }
+
+    fn guard(&mut self, sender_input: SharedSecret) {
+        self.root = sender_input;
+        self.step = u32::MAX;
     }
 }
 
@@ -339,11 +343,22 @@ impl RngCore for SliceRng<'_> {
     }
 }
 
+impl<'a> Drop for SliceRng<'a> {
+    fn drop(&mut self) {
+        debug_assert!(self.0.is_empty());
+    }
+}
+
 impl CryptoRng for SliceRng<'_> {}
 
 #[cfg(test)]
 mod test {
     use {super::*, rand_core::OsRng};
+
+    fn match_rs(alice: &DoubleRatchet, bob: &DoubleRatchet) {
+        assert_eq!(alice.sender_hash(), bob.receiver_hash());
+        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+    }
 
     #[test]
     fn differned_deliver_orders() {
@@ -354,29 +369,25 @@ mod test {
         let (mut bob, bid) = DoubleRatchet::recipient(shared_secret, init, rng);
         assert_eq!(aid, bid);
 
-        assert_eq!(alice.sender_hash(), bob.receiver_hash());
-        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+        match_rs(&alice, &bob);
 
         let (msg, secret) = alice.send();
         let secret2 = bob.recv(msg, rng).unwrap();
         assert_eq!(secret, secret2);
 
-        assert_eq!(alice.sender_hash(), bob.receiver_hash());
-        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+        match_rs(&alice, &bob);
 
         let (msg, secret) = bob.send();
         let secret2 = alice.recv(msg, rng).unwrap();
         assert_eq!(secret, secret2);
 
-        assert_eq!(alice.receiver_hash(), bob.sender_hash());
-        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+        match_rs(&alice, &bob);
 
         let (msg, secret) = alice.send();
         let secret2 = bob.recv(msg, rng).unwrap();
         assert_eq!(secret, secret2);
 
-        assert_eq!(alice.sender_hash(), bob.receiver_hash());
-        assert_eq!(alice.receiver_hash(), bob.sender_hash());
+        match_rs(&alice, &bob);
     }
 
     #[test]
@@ -396,6 +407,7 @@ mod test {
             for (msg, secret) in messages.drain(..) {
                 let secret2 = alice.recv(msg, rng).unwrap();
                 assert_eq!(secret, secret2);
+                match_rs(&alice, &bob);
             }
         }
 
@@ -406,7 +418,8 @@ mod test {
 
             for (msg, secret) in messages.drain(..) {
                 let secret2 = bob.recv(msg, rng).unwrap();
-                assert_eq!(secret, secret2);
+                assert_eq!(secret, secret2, "{:?} ======= {:?}", bob.cp, alice.cp);
+                match_rs(&alice, &bob);
             }
 
             std::mem::swap(&mut alice, &mut bob);
@@ -424,6 +437,7 @@ mod test {
 
                 let secret2 = bob.recv(msg, rng).unwrap();
                 assert_eq!(secret, secret2);
+                match_rs(&alice, &bob);
             }
 
             std::mem::swap(&mut alice, &mut bob);

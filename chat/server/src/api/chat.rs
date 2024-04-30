@@ -32,7 +32,7 @@ fn default<T: Default>() -> T {
 
 fn advance_nonce(nonce: &mut Nonce, new_nonce: Nonce) -> Result<()> {
     if !nonce.advance_to(new_nonce) {
-        return Err(ChatError::InvalidChatAction(*nonce + 1));
+        return Err(ChatError::InvalidAction(*nonce + 1));
     }
     Ok(())
 }

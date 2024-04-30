@@ -26,6 +26,7 @@ pub async fn subscribe(
     cx: Context,
     topic: Topic,
     user: PathId,
+    loc: OnlineLocation,
     cid: CallId,
     _: (),
 ) -> Result<(), ChatError> {
@@ -36,6 +37,7 @@ pub async fn subscribe(
         }
         Topic::Profile(id) => {
             cx.profile_subs.insert(id, (user, cid));
+            cx.online.insert(id, loc);
             Ok(())
         }
         _ => Err(ChatError::NotFound),
@@ -49,7 +51,10 @@ pub async fn unsubscribe(cx: Context, topic: Topic, user: PathId, _: ()) -> Resu
             subs.remove(&user).ok_or(ChatError::NotFound).map(drop)
         }
         // TODO: perform access control with signature
-        Topic::Profile(id) => cx.profile_subs.remove(&id).ok_or(ChatError::NotFound).map(drop),
+        Topic::Profile(id) => {
+            cx.profile_subs.remove(&id).ok_or(ChatError::NotFound)?;
+            cx.online.remove(&id).ok_or(ChatError::NotFound).map(drop)
+        }
     }
 }
 
@@ -74,23 +79,23 @@ handlers::router! { pub client_router(State):
 }
 
 handlers::router! { pub server_router(State):
-     rpcs::CREATE_CHAT => chat::create;
-     rpcs::ADD_MEMBER => chat::add_member.restore();
-     rpcs::KICK_MEMBER => chat::kick_member.restore();
-     rpcs::SEND_BLOCK => chat::handle_message_block
-         .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
-         .restore();
-     rpcs::FETCH_CHAT_DATA => chat::fetch_chat_data.rated(rate_map!(20));
-     rpcs::SEND_MESSAGE => chat::send_message.restore();
-     rpcs::VOTE_BLOCK => chat::vote
-         .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 })
-         .restore();
-     rpcs::CREATE_PROFILE => profile::create;
-     rpcs::SEND_MAIL => profile::send_mail.restore();
-     rpcs::READ_MAIL => profile::read_mail.restore();
-     rpcs::INSERT_TO_VAULT => profile::insert_to_vault.restore();
-     rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.restore();
-     rpcs::FETCH_PROFILE_FULL => profile::fetch_full.rated(rate_map!(20));
+    rpcs::CREATE_CHAT => chat::create;
+    rpcs::ADD_MEMBER => chat::add_member.restore();
+    rpcs::KICK_MEMBER => chat::kick_member.restore();
+    rpcs::SEND_BLOCK => chat::handle_message_block
+        .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
+        .restore();
+    rpcs::FETCH_CHAT_DATA => chat::fetch_chat_data.rated(rate_map!(20));
+    rpcs::SEND_MESSAGE => chat::send_message.restore();
+    rpcs::VOTE_BLOCK => chat::vote
+        .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 })
+        .restore();
+    rpcs::CREATE_PROFILE => profile::create;
+    rpcs::SEND_MAIL => profile::send_mail.restore();
+    rpcs::READ_MAIL => profile::read_mail.restore();
+    rpcs::INSERT_TO_VAULT => profile::insert_to_vault.restore();
+    rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.restore();
+    rpcs::FETCH_PROFILE_FULL => profile::fetch_full.rated(rate_map!(20));
 }
 
 pub struct State {

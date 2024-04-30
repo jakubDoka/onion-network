@@ -305,8 +305,8 @@ pub trait RequestContext: Sized {
         let mut frined =
             self.try_with_vault(|v| v.friends.get_mut(&name).cloned().context("friend not found"))?;
 
-        let (header, ss) = frined.dr.send();
         let session = frined.dr.sender_hash();
+        let (header, ss) = frined.dr.send();
         let message = FriendMessage::DirectMessage { content };
         let content = Encrypted::new(message, ss);
         let mail = MailVariants::FriendMessage { header, session, content };
@@ -348,9 +348,9 @@ pub trait RequestContext: Sized {
 
     async fn create_and_save_chat(&self, name: ChatName) -> anyhow::Result<()> {
         let my_id = self.with_keys(UserKeys::identity)?;
-        self.save_vault_components([VaultComponentId::Chats]).await.context("saving vault")?;
         self.subscription_for(name).await?.create_chat(my_id).await?;
         self.with_vault(|v| v.chats.insert(name, ChatMeta::new()))?;
+        self.save_vault_components([VaultComponentId::Chats]).await.context("saving vault")?;
         Ok(())
     }
 

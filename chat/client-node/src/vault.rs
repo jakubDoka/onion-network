@@ -110,6 +110,7 @@ impl Vault {
         let VaultHeader { version: v, keys } = Cache::get([])?;
 
         if v != version {
+            log::warn!("version mismatch");
             return None;
         }
 
@@ -119,6 +120,7 @@ impl Vault {
             .collect::<BTreeMap<_, _>>();
 
         if values.len() != keys.len() {
+            log::warn!("missing keys in cache");
             return None;
         }
 
@@ -183,7 +185,11 @@ impl Vault {
 
         let value = VaultValue(value);
         Cache::insert(hash, &value);
-        self.raw.values.insert(hash, value.0);
+        if self.raw.values.insert(hash, value.0).is_none() {
+            let mut header = Cache::get::<VaultHeader>([])?;
+            header.keys.insert(hash);
+            Cache::insert([], &header);
+        }
         self.raw.recompute();
 
         self.change_count += 1;

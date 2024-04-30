@@ -5,7 +5,7 @@ use {
     crate::{requests::MailVariants, ChainClientExt, RawChatMessage, RequestContext},
     anyhow::Context as _,
     chat_spec::{ChatName, Identity, UserName},
-    codec::{Decode, ReminderOwned},
+    codec::ReminderOwned,
     crypto::proof::Nonce,
     libp2p::futures::{channel::mpsc, future::TryJoinAll, StreamExt, TryFutureExt},
     std::{
@@ -234,7 +234,7 @@ impl ChatSubscription {
                         continue;
                     };
 
-                    let Some(content) = String::decode(&mut &message[..]) else {
+                    let Ok(content) = String::from_utf8(message.to_vec()) else {
                         log::warn!("invalid message: {:?}", message);
                         continue;
                     };

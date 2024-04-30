@@ -7,7 +7,7 @@ use {
         encode_direct_chat_name, ChainClientExt, MessageContent, RequestContext, UserKeys,
     },
     chat_spec::{ChatError, ChatEvent, ChatName, Identity, Member, Permissions, Rank, UserName},
-    codec::{Decode, ReminderOwned},
+    codec::ReminderOwned,
     component_utils::DropFn,
     crypto::SharedSecret,
     leptos::{
@@ -139,7 +139,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 return;
             };
 
-            let Some(msg) = String::decode(&mut &*message) else {
+            let Ok(msg) = String::from_utf8(message.to_vec()) else {
                 log::warn!("message cannot be decoded: {:?}", message);
                 return;
             };

@@ -1,4 +1,6 @@
 #![feature(slice_take)]
+#![feature(btree_extract_if)]
+#![feature(macro_metavar_expr)]
 #![feature(let_chains)]
 #![feature(never_type)]
 #![feature(type_alias_impl_trait)]

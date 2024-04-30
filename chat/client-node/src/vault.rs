@@ -1,4 +1,5 @@
 use {
+    crate::Cache,
     chain_api::encrypt,
     chat_spec::*,
     codec::{Codec, Decode, DecodeOwned, Encode},
@@ -6,30 +7,33 @@ use {
     double_ratchet::DoubleRatchet,
     onion::SharedSecret,
     rand::rngs::OsRng,
-    std::collections::{BTreeMap, HashMap, HashSet},
+    std::collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     web_sys::wasm_bindgen::JsValue,
 };
 
 pub type FriendId = SharedSecret;
+
+#[derive(Codec)]
+pub struct VaultValue(Vec<u8>);
+
+#[derive(Codec)]
+pub struct VaultChanges(BTreeSet<crypto::Hash>);
+
+#[derive(Codec)]
+pub struct VaultHeader {
+    pub version: Nonce,
+    pub keys: BTreeSet<crypto::Hash>,
+}
 
 pub struct Vault {
     pub chats: HashMap<ChatName, ChatMeta>,
     pub friend_index: HashMap<crypto::Hash, UserName>,
     pub friends: HashMap<UserName, FriendMeta>,
     pub theme: Theme,
-    pub personal: Personal,
+    last_update: instant::Instant,
+    change_count: usize,
+    changed_keys: BTreeSet<crypto::Hash>,
     raw: chat_spec::Vault,
-}
-
-#[derive(Codec)]
-pub struct Personal {
-    storage_node: String,
-}
-
-impl Default for Personal {
-    fn default() -> Self {
-        Self { storage_node: "127.0.0.1:10000".into() }
-    }
 }
 
 impl Default for Vault {
@@ -40,10 +44,6 @@ impl Default for Vault {
 
 fn constant_key(name: &str) -> SharedSecret {
     crypto::hash::new(crypto::hash::new(name))
-}
-
-fn personal() -> SharedSecret {
-    constant_key("personal")
 }
 
 fn chats() -> SharedSecret {
@@ -88,9 +88,11 @@ impl Vault {
         Self {
             chats: get_encrypted(chats(), key, &values).unwrap_or_default(),
             theme: get_plain(theme(), &values).unwrap_or_default(),
-            personal: get_encrypted(personal(), key, &values).unwrap_or_default(),
             friend_index: friends.iter().map(|(&n, f)| (f.dr.receiver_hash(), n)).collect(),
             friends,
+            last_update: instant::Instant::now(),
+            change_count: 0,
+            changed_keys: Cache::get([]).map(|VaultChanges(c)| c).unwrap_or_default(),
             raw: {
                 let mut raw = chat_spec::Vault {
                     values,
@@ -104,15 +106,55 @@ impl Vault {
         }
     }
 
+    pub fn values_from_cache(version: Nonce) -> Option<BTreeMap<crypto::Hash, Vec<u8>>> {
+        let VaultHeader { version: v, keys } = Cache::get([])?;
+
+        if v != version {
+            return None;
+        }
+
+        let values = keys
+            .iter()
+            .filter_map(|k| Cache::get(k).map(|VaultValue(v)| (*k, v)))
+            .collect::<BTreeMap<_, _>>();
+
+        if values.len() != keys.len() {
+            return None;
+        }
+
+        Some(values)
+    }
+
     pub fn merkle_hash(&self) -> crypto::Hash {
         *self.raw.merkle_tree.root()
     }
 
-    pub fn shapshot(
-        &mut self,
-        id: VaultComponentId,
-        key: SharedSecret,
-    ) -> Option<(crypto::Hash, Vec<u8>)> {
+    pub fn changes(&mut self) -> Vec<(crypto::Hash, Vec<u8>)> {
+        if self.change_count > 40
+            || self.last_update.elapsed() > instant::Duration::from_secs(60)
+            || self.changed_keys.len() > 10
+        {
+            self.changed_keys
+                .iter()
+                .filter_map(|&k| self.raw.values.get(&k).cloned().map(|v| (k, v)))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn clear_changes(&mut self, version: Nonce) {
+        self.change_count = 0;
+        self.changed_keys.clear();
+        self.last_update = instant::Instant::now();
+        Cache::insert([], &VaultChanges(self.changed_keys.clone()));
+        Cache::insert([], &VaultHeader {
+            version,
+            keys: self.raw.values.keys().cloned().collect(),
+        });
+    }
+
+    pub fn update(&mut self, id: VaultComponentId, key: SharedSecret) -> Option<()> {
         use VaultComponentId as VCI;
         let hash = match id {
             VCI::Chats => chats(),
@@ -139,10 +181,16 @@ impl Vault {
             return None;
         }
 
-        self.raw.values.insert(hash, value.clone());
+        let value = VaultValue(value);
+        Cache::insert(hash, &value);
+        self.raw.values.insert(hash, value.0);
         self.raw.recompute();
 
-        Some((hash, value))
+        self.change_count += 1;
+        self.changed_keys.insert(hash);
+        Cache::insert([], &VaultChanges(self.changed_keys.clone()));
+
+        Some(())
     }
 }
 

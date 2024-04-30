@@ -68,16 +68,20 @@ impl Sub<Identity> {
     ) -> anyhow::Result<()> {
         let key = ctx.with_keys(|k| k.vault)?;
         let chnages = ctx.with_vault(|v| {
-            id.into_iter().filter_map(|id| v.shapshot(id, key)).collect::<Vec<_>>()
+            id.into_iter().for_each(|id| _ = v.update(id, key));
+            v.changes()
         })?;
         if chnages.is_empty() {
             return Ok(());
         }
-        let total_hash = ctx.try_with_vault(|v| Ok(v.merkle_hash()))?;
+        let total_hash = ctx.with_vault(|v| v.merkle_hash())?;
         let proof = ctx.with_keys(|k| {
             ctx.with_vault_version(|nonce| Proof::new(&k.sign, nonce, total_hash, OsRng))
         })??;
-        self.insert_to_vault(proof, chnages).await
+        self.insert_to_vault(proof, chnages).await?;
+        ctx.with_vault(|v| v.clear_changes(proof.nonce + 1))?;
+
+        Ok(())
     }
 }
 
@@ -438,13 +442,14 @@ pub trait RequestContext: Sized {
 
     async fn create_and_save_chat(&self, name: ChatName) -> anyhow::Result<()> {
         let my_id = self.with_keys(UserKeys::identity)?;
-        self.try_with_vault(|v| Ok(v.chats.insert(name, ChatMeta::new())))?;
         self.subscription_for(my_id)
             .await?
             .save_vault_components([VaultComponentId::Chats], &self)
             .await
             .context("saving vault")?;
-        self.subscription_for(name).await?.create_chat(my_id).await
+        self.subscription_for(name).await?.create_chat(my_id).await?;
+        self.with_vault(|v| v.chats.insert(name, ChatMeta::new()))?;
+        Ok(())
     }
 
     async fn invite_member(
@@ -494,7 +499,7 @@ pub trait RequestContext: Sized {
             .await
             .context("fetching identity")?
             .sign;
-        self.send_friend_request_to_identity(name, identity).await.context("sending friend request")
+        self.send_friend_request_to_identity(name, identity).await
     }
 
     async fn send_friend_request_to_identity(
@@ -511,7 +516,7 @@ pub trait RequestContext: Sized {
 
         let request = FriendRequest { username: self.with_keys(|k| k.name)?, identity: us, init };
         let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
-        them.send_mail(mail).await.context("sending friend request")?;
+        them.send_mail(mail).await?;
 
         let friend = FriendMeta { dr, identity, id };
         self.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;

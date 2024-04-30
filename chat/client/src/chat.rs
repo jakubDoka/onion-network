@@ -3,7 +3,10 @@ use {
         db, handled_async_callback, handled_async_closure, handled_callback, handled_spawn_local,
     },
     anyhow::Context,
-    chat_client_node::{encode_direct_chat_name, MessageContent, RawChatMessage, RequestContext},
+    chat_client_node::{
+        encode_direct_chat_name, ChainClientExt, MessageContent, RawChatMessage, RequestContext,
+        UserKeys,
+    },
     chat_spec::{ChatError, ChatEvent, ChatName, Identity, Member, Permissions, Rank, UserName},
     codec::{Decode, Encode, ReminderOwned},
     component_utils::DropFn,
@@ -156,12 +159,18 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
             log::info!("received member: {:?}", member);
 
-            let elem = member_view(state, identiy, member, current_member, current_chat);
-            if let Some(member_elem) = document().get_element_by_id(&hex::encode(identiy)) {
-                member_elem.replace_with_with_node_1(&elem).unwrap();
-            } else {
-                document().get_element_by_id("members").unwrap().append_child(&elem).unwrap();
-            }
+            handled_spawn_local("updating member", async move {
+                let mname =
+                    state.with_keys(UserKeys::chain_client)?.await?.fetch_username(identiy).await?;
+                let elem = member_view(state, identiy, mname, member, current_member, current_chat);
+                if let Some(member_elem) = document().get_element_by_id(&hex::encode(identiy)) {
+                    member_elem.replace_with_with_node_1(&elem).unwrap();
+                } else {
+                    document().get_element_by_id("members").unwrap().append_child(&elem).unwrap();
+                }
+
+                Ok(())
+            });
         }
         ChatEvent::MemberRemoved(identity) => {
             if identity == my_id {
@@ -500,7 +509,12 @@ fn member_list_poppup(
         for &(identity, member) in
             fetched_members.iter().skip((last_identity != Identity::default()) as usize)
         {
-            let member = member_view(state, identity, member, me, name_sig);
+            let Ok(mname) =
+                state.with_keys(UserKeys::chain_client)?.await?.fetch_username(identity).await
+            else {
+                continue;
+            };
+            let member = member_view(state, identity, mname, member, me, name_sig);
             members.append_child(&member).unwrap();
         }
 
@@ -532,7 +546,7 @@ fn member_list_poppup(
             <div class="sc flx fdc bp bm bsha w100 bgps">
                 <div class="pr fg1 oys pc flx fdc"  on:scroll=handle_scroll>
                     <table class="tlf w100">
-                        <tr class="sp"><th>rank</th><th>perm</th><th>rtlm</th></tr>
+                        <tr class="sp"><th>name</th><th>rank</th><th>perm</th><th>rtlm</th></tr>
                     </table>
                     <table class="tlf w100" id="members" node_ref=members></table>
                 </div>
@@ -546,6 +560,7 @@ fn member_list_poppup(
 fn member_view(
     state: crate::State,
     identity: Identity,
+    mname: UserName,
     m: Member,
     me: ReadSignal<Member>,
     name: RwSignal<Option<ChatName>>,
@@ -560,7 +575,7 @@ fn member_view(
 
         root.get_untracked()
             .unwrap()
-            .replace_with_with_node_1(&editable_member(state, identity, m, me, name))
+            .replace_with_with_node_1(&editable_member(state, identity, mname, m, me, name))
             .unwrap();
 
         Ok(())
@@ -569,6 +584,7 @@ fn member_view(
     view! {
         <tr class:hov=can_modify class="sp" node_ref=root on:click=start_edit
             id=hex::encode(identity)>
+            <th>{mname.to_string()}</th>
             <th>{m.rank}</th>
             <th>{m.permissions.to_string()}</th>
             <th>{m.action_cooldown_ms}</th>
@@ -579,6 +595,7 @@ fn member_view(
 fn editable_member(
     state: crate::State,
     identity: Identity,
+    mname: UserName,
     m: Member,
     me: ReadSignal<Member>,
     name_sig: RwSignal<Option<ChatName>>,
@@ -596,7 +613,7 @@ fn editable_member(
     let cancel = move || {
         root.get_untracked()
             .unwrap()
-            .replace_with_with_node_1(&member_view(state, identity, m, me, name_sig))
+            .replace_with_with_node_1(&member_view(state, identity, mname, m, me, name_sig))
             .unwrap();
     };
 
@@ -633,6 +650,7 @@ fn editable_member(
         <tbody class="br sb sc sp" node_ref=root id=hex::encode(identity)>
             <form id="member-form" on:submit=save></form>
             <tr class="sbb">
+                <th>{mname.to_string()}</th>
                 <th><input class="hov pc tac sf" type="number" value=m.rank form="member-form"
                     min=me.get_untracked().rank max=Rank::MAX node_ref=rank required /></th>
                 <th><input class="hov pc tac sf" type="text" value=m.permissions.to_string()

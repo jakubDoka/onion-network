@@ -1,5 +1,6 @@
 use {
     crate::OnlineLocation,
+    chain_api::Nonce,
     chat_spec::{advance_nonce, rpcs, ChatError, FetchProfileResp, Identity, Mail, Profile, Vault},
     codec::{Encode, Reminder, ReminderOwned},
     crypto::proof::Proof,
@@ -117,10 +118,15 @@ pub async fn fetch_vault(cx: super::Context, identity: Identity, _: ()) -> Resul
     cx.profiles
         .get(&identity)
         .ok_or(ChatError::NotFound)
-        .map(|p| {
-            (p.value().vault.version, p.value().mail_action, &p.value().vault.values).to_bytes()
-        })
+        .map(|p| p.value().vault.values.to_bytes())
         .map(ReminderOwned)
+}
+
+pub async fn fetch_nonces(cx: super::Context, identity: Identity, _: ()) -> Result<[Nonce; 2]> {
+    cx.profiles
+        .get(&identity)
+        .ok_or(ChatError::NotFound)
+        .map(|p| [p.value().vault.version, p.value().mail_action])
 }
 
 pub async fn fetch_full(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {

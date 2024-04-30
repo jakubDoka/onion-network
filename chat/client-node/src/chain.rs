@@ -1,14 +1,18 @@
 pub use chain_api::Client;
 use {
+    crate::{VaultChanges, VaultHeader, VaultValue},
+    anyhow::Context,
     base64::Engine,
     chain_api::{Nonce, Profile},
-    chat_spec::{username_to_raw, FetchProfileResp, UserName},
+    chat_spec::{username_from_raw, username_to_raw, FetchProfileResp, Identity, UserName},
     codec::{Codec, DecodeOwned, Encode},
     std::{cell::RefCell, collections::BTreeMap, future::Future},
 };
 
-pub(crate) trait ChainClientExt {
+#[allow(async_fn_in_trait)]
+pub trait ChainClientExt {
     async fn fetch_profile(&self, name: UserName) -> Result<Profile, anyhow::Error>;
+    async fn fetch_username(&self, id: Identity) -> Result<UserName, anyhow::Error>;
 }
 
 impl ChainClientExt for Client {
@@ -21,6 +25,14 @@ impl ChainClientExt for Client {
             Err(e) => anyhow::bail!("failed to fetch user: {e}"),
         }
     }
+
+    async fn fetch_username(&self, id: Identity) -> Result<UserName, anyhow::Error> {
+        match Cache::get_or_insert_opt(id, |id| self.get_username(id)).await {
+            Ok(Some(u)) => username_from_raw(u).context("invalid name"),
+            Ok(None) => anyhow::bail!("user {id:?} does not exist"),
+            Err(e) => anyhow::bail!("failed to fetch user: {e}"),
+        }
+    }
 }
 
 pub fn min_nodes() -> usize {
@@ -29,21 +41,27 @@ pub fn min_nodes() -> usize {
 }
 
 pub struct Cache {
+    id: Identity,
     hot_entries: BTreeMap<crypto::Hash, Vec<u8>>,
 }
 
 thread_local! {
     static INSTANCE: RefCell<Cache> = Cache {
+        id: Identity::default(),
         hot_entries: BTreeMap::new(),
     }.into();
 }
 
 impl Cache {
+    pub fn set_id(id: Identity) {
+        INSTANCE.with(|i| i.borrow_mut().id = id);
+    }
+
     pub async fn get_or_insert<K: AsRef<[u8]>, T: Cached, F: Future<Output = anyhow::Result<T>>>(
         key: K,
         or_compute: impl FnOnce(K) -> F,
     ) -> anyhow::Result<T> {
-        let hash = crypto::hash::with_nonce(key.as_ref(), T::NONCE);
+        let hash = Self::compute_key::<T>(&key);
 
         if let Some(res) = Self::get_low::<T>(hash) {
             return Ok(res);
@@ -77,11 +95,18 @@ impl Cache {
     }
 
     pub fn get<T: Cached>(key: impl AsRef<[u8]>) -> Option<T> {
-        Self::get_low::<T>(crypto::hash::with_nonce(key.as_ref(), T::NONCE))
+        Self::get_low::<T>(Self::compute_key::<T>(key))
     }
 
     pub fn insert<T: Cached>(key: impl AsRef<[u8]>, value: &T) {
-        Self::insert_low(crypto::hash::with_nonce(key.as_ref(), T::NONCE), value);
+        Self::insert_low(Self::compute_key::<T>(key), value);
+    }
+
+    fn compute_key<T: Cached>(key: impl AsRef<[u8]>) -> crypto::Hash {
+        crypto::xor_secrets(
+            crypto::hash::with_nonce(key.as_ref(), T::NONCE),
+            INSTANCE.with(|i| i.borrow().id),
+        )
     }
 
     fn get_low<T: Codec>(key: crypto::Hash) -> Option<T> {
@@ -118,20 +143,19 @@ pub trait Cached: Codec {
     const NONCE: Nonce;
 }
 
-impl Cached for Profile {
-    const NONCE: Nonce = 0;
+macro_rules! impl_cached {
+    ($($t:ty,)*) => { $(impl Cached for $t { const NONCE: Nonce = ${index(0)}; })* };
 }
 
-impl Cached for FetchProfileResp {
-    const NONCE: Nonce = 1;
-}
-
-impl Cached for crypto::enc::PublicKey {
-    const NONCE: Nonce = 2;
-}
-
-impl Cached for UserName {
-    const NONCE: Nonce = 3;
+impl_cached! {
+    Profile,
+    FetchProfileResp,
+    crypto::enc::PublicKey,
+    UserName,
+    VaultValue,
+    VaultHeader,
+    VaultChanges,
+    Identity,
 }
 
 fn encode_base64<T: Encode>(t: &T) -> String {

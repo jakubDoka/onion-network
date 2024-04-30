@@ -119,6 +119,30 @@ impl<'a, K: Decode<'a> + Ord, V: Decode<'a>> Decode<'a> for std::collections::BT
     }
 }
 
+impl<T: Encode + Ord> Encode for std::collections::BTreeSet<T> {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        self.len().encode(buffer)?;
+        for i in self {
+            i.encode(buffer)?;
+        }
+        Some(())
+    }
+}
+
+impl<'a, T: Decode<'a> + Ord> Decode<'a> for std::collections::BTreeSet<T> {
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let len = usize::decode(buffer)?;
+        if len > buffer.len() {
+            return None;
+        }
+        let mut s = Self::new();
+        for _ in 0..len {
+            s.insert(<T>::decode(buffer)?);
+        }
+        Some(s)
+    }
+}
+
 impl<T: Encode> Encode for std::collections::VecDeque<T> {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.len().encode(buffer)?;

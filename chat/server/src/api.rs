@@ -67,6 +67,7 @@ handlers::router! { pub client_router(State):
     rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.repl().restore();
     rpcs::FETCH_PROFILE => profile::fetch_keys.restore();
     rpcs::FETCH_VAULT => profile::fetch_vault.restore();
+    rpcs::FETCH_NONCES => profile::fetch_nonces.restore();
     rpcs::FETCH_VAULT_KEY => profile::fetch_vault_key.restore();
     rpcs::SUBSCRIBE => subscribe.restore();
     rpcs::UNSUBSCRIBE => unsubscribe.restore();

@@ -49,6 +49,7 @@ pub mod rpcs {
         REMOVE_FROM_VAULT;
 
         FETCH_VAULT;
+        FETCH_NONCES;
         FETCH_VAULT_KEY;
 
         SUBSCRIBE;

@@ -63,6 +63,8 @@ impl Node {
 
         set_state!(FetchNodesAndProfile);
 
+        Cache::set_id(keys.identity());
+
         let mut swarm = libp2p::Swarm::new(
             websocket_websys::Transport::default()
                 .upgrade(Version::V1)
@@ -166,29 +168,28 @@ impl Node {
 
         set_state!(VaultLoad);
 
-        let (mut vault_nonce, mail_action, vault) =
-            match crate::send_request::<(Nonce, Nonce, BTreeMap<crypto::Hash, Vec<u8>>)>(
-                &mut profile_stream,
-                rpcs::FETCH_VAULT,
-                Topic::Profile(profile_hash.sign),
-                (),
-            )
-            .await
-            {
-                Ok((vn, m, v)) => (vn + 1, m + 1, v),
-                Err(e) => {
-                    log::debug!("cannot access vault: {e} {:?}", profile_hash.sign);
-                    Default::default()
-                }
-            };
+        let [mut vault_nonce, mail_action] = match crate::send_request::<[Nonce; 2]>(
+            &mut profile_stream,
+            rpcs::FETCH_NONCES,
+            profile_hash.sign,
+            (),
+        )
+        .await
+        {
+            Ok([vn, m]) => [vn + 1, m + 1],
+            Err(e) => {
+                log::debug!("cannot access vault: {e} {:?}", profile_hash.sign);
+                Default::default()
+            }
+        };
 
-        let vault = if vault.is_empty() && vault_nonce == 0 {
+        let vault = if vault_nonce == 0 {
             set_state!(ProfileCreate);
             let proof = Proof::new(&keys.sign, &mut vault_nonce, crypto::Hash::default(), OsRng);
             crate::send_request(
                 &mut profile_stream,
                 rpcs::CREATE_PROFILE,
-                Topic::Profile(profile_hash.sign),
+                profile_hash.sign,
                 (proof, "", keys.enc.public_key()),
             )
             .await
@@ -196,7 +197,19 @@ impl Node {
 
             Vault::default()
         } else {
-            Vault::deserialize(vault, keys.vault)
+            let values = match Vault::values_from_cache(vault_nonce) {
+                Some(values) => values,
+                None => crate::send_request::<BTreeMap<crypto::Hash, Vec<u8>>>(
+                    &mut profile_stream,
+                    rpcs::FETCH_VAULT,
+                    profile_hash.sign,
+                    (),
+                )
+                .await
+                .context("fetching vault")?,
+            };
+
+            Vault::deserialize(values, keys.vault)
         };
         let _ = vault.theme.apply();
 

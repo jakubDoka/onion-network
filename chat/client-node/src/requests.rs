@@ -291,6 +291,10 @@ pub trait RequestContext: Sized {
         topic: T,
     ) -> impl Future<Output = anyhow::Result<Sub<T>>>;
 
+    async fn profile_subscription(&self) -> anyhow::Result<Sub<Identity>> {
+        self.subscription_for(self.with_keys(UserKeys::identity)?).await
+    }
+
     async fn set_theme(&self, theme: Theme) -> anyhow::Result<()> {
         self.with_vault(|v| v.theme = theme)?;
         self.save_vault_components([VaultComponentId::Theme]).await
@@ -409,7 +413,7 @@ pub trait RequestContext: Sized {
         let proof = self.with_mail_action(|nonce| {
             self.with_keys(|k| Proof::new(&k.sign, nonce, Mail, OsRng))
         })??;
-        self.subscription_for(proof.topic()).await?.request(rpcs::READ_MAIL, proof).await
+        self.profile_subscription().await?.request(rpcs::READ_MAIL, proof).await
     }
 
     async fn save_vault_components(
@@ -428,7 +432,7 @@ pub trait RequestContext: Sized {
         let proof = self.with_keys(|k| {
             self.with_vault_version(|nonce| Proof::new(&k.sign, nonce, total_hash, OsRng))
         })??;
-        self.subscription_for(proof.pk.identity()).await?.insert_to_vault(proof, chnages).await?;
+        self.profile_subscription().await?.insert_to_vault(proof, chnages).await?;
         self.with_vault(|v| v.clear_changes(proof.nonce + 1))?;
 
         Ok(())

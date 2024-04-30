@@ -1,519 +1,501 @@
-//#![allow(dead_code)]
-//#![allow(non_snake_case)]
-//
-//use {
-//    crate::{requests::MailVariants, RawChatMessage, RequestContext, SubscriptionMessage},
-//    anyhow::Context as _,
-//    chat_spec::{ChatName, Identity, UserName},
-//    codec::{Codec, Reminder},
-//    crypto::proof::Nonce,
-//    libp2p::futures::{channel::mpsc, StreamExt},
-//    std::{
-//        cell::{Cell, RefCell},
-//        rc::Rc,
-//        str::FromStr,
-//    },
-//    wasm_bindgen_futures::{
-//        spawn_local,
-//        wasm_bindgen::{self, prelude::wasm_bindgen},
-//    },
-//    web_sys::wasm_bindgen::JsValue,
-//};
-//
-//pub struct Context {
-//    vault: RefCell<crate::Vault>,
-//    vault_nonce: Cell<Nonce>,
-//    mail_action: Cell<Nonce>,
-//    keys: crate::UserKeys,
-//}
-//
-//impl RequestContext for Context {
-//    fn try_with_vault<R>(
-//        &self,
-//        action: impl FnOnce(&mut crate::Vault) -> crate::Result<R>,
-//    ) -> crate::Result<R> {
-//        let mut vault = self.vault.borrow_mut();
-//        action(&mut vault)
-//    }
-//
-//    fn with_vault<R>(&self, action: impl FnOnce(&mut crate::Vault) -> R) -> crate::Result<R> {
-//        let mut vault = self.vault.borrow_mut();
-//        Ok(action(&mut vault))
-//    }
-//
-//    fn with_keys<R>(&self, action: impl FnOnce(&crate::UserKeys) -> R) -> crate::Result<R> {
-//        Ok(action(&self.keys))
-//    }
-//
-//    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> crate::Result<R> {
-//        let mut vault_nonce = self.vault_nonce.get();
-//        let res = action(&mut vault_nonce);
-//        self.vault_nonce.set(vault_nonce);
-//        Ok(res)
-//    }
-//
-//    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> crate::Result<R> {
-//        let mut mail_action = self.mail_action.get();
-//        let res = action(&mut mail_action);
-//        self.mail_action.set(mail_action);
-//        Ok(res)
-//    }
-//}
-//
-//#[wasm_bindgen]
-//#[derive(Clone)]
-//struct Api {
-//    reqs: crate::Requests,
-//    ctx: Rc<Context>,
-//}
-//
-//#[wasm_bindgen]
-//impl Api {
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn new(user_keys: UserKeys) -> Result<Api, JsValue> {
-//        let (inner, vault, reqs, vault_nonce, mail_action) =
-//            crate::Node::new(user_keys.inner.clone(), |v| _ = v).await.map_err(err_to_js)?;
-//
-//        spawn_local(async move { _ = inner.await });
-//
-//        Ok(Api {
-//            reqs,
-//            ctx: Rc::new(Context {
-//                vault: RefCell::new(vault),
-//                vault_nonce: Cell::new(vault_nonce),
-//                mail_action: Cell::new(mail_action),
-//                keys: user_keys.inner,
-//            }),
-//        })
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn create_chat(&mut self, chat_name: &str) -> Result<(), JsValue> {
-//        let chat = parse_chat_name(chat_name)?;
-//        self.reqs.clone().create_and_save_chat(chat, self.ctx.as_ref()).await.map_err(err_to_js)
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn send_friend_request(
-//        &mut self,
-//        user_name_to_send_request_to: &str,
-//    ) -> Result<(), JsValue> {
-//        let to = parse_chat_name(user_name_to_send_request_to)?;
-//        self.reqs.clone().send_friend_request(to, self.ctx.as_ref()).await.map_err(err_to_js)
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn send_friend_message(
-//        &mut self,
-//        friend: &str,
-//        message: &str,
-//    ) -> Result<(), JsValue> {
-//        let name = parse_chat_name(friend)?;
-//        self.reqs
-//            .clone()
-//            .send_frined_message(name, message.to_string(), self.ctx.as_ref())
-//            .await
-//            .map_err(err_to_js)
-//    }
-//}
-//
-//#[wasm_bindgen]
-//struct ChatSubscription {
-//    target: ChatName,
-//    member: chat_spec::Member,
-//    stream: mpsc::Receiver<SubscriptionMessage>,
-//    reqs: crate::Requests,
-//    ctx: Rc<Context>,
-//}
-//
-//#[wasm_bindgen]
-//impl ChatSubscription {
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn new(api: Api, chat_name: &str) -> Result<ChatSubscription, JsValue> {
-//        let chat = parse_chat_name(chat_name)?;
-//        let my_member = api
-//            .reqs
-//            .clone()
-//            .fetch_my_member(chat, api.ctx.keys.identity_hash())
-//            .await
-//            .map_err(err_to_js)?;
-//        api.ctx
-//            .try_with_vault(|vault| {
-//                vault
-//                    .chats
-//                    .get_mut(&chat)
-//                    .map(|c| c.action_no = my_member.action)
-//                    .with_context(crate::vault_chat_404(chat))
-//            })
-//            .map_err(err_to_js)?;
-//        let stream = api.reqs.clone().subscribe(chat).await.map_err(err_to_js)?;
-//        Ok(ChatSubscription {
-//            target: chat,
-//            member: my_member,
-//            stream,
-//            reqs: api.reqs,
-//            ctx: api.ctx,
-//        })
-//    }
-//
-//    #[wasm_bindgen]
-//    pub fn member(&self) -> Member {
-//        Member { identity: self.ctx.keys.identity_hash(), inner: self.member }
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn invite_member(
-//        &self,
-//        member_identity: &str,
-//        config: Member,
-//    ) -> Result<(), JsValue> {
-//        let member = parse_identity(member_identity)?;
-//        self.reqs
-//            .clone()
-//            .invite_member(self.target, member, self.ctx.as_ref(), config.inner)
-//            .await
-//            .map_err(err_to_js)
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn update_member(
-//        &self,
-//        member_identity: &str,
-//        config: Member,
-//    ) -> Result<(), JsValue> {
-//        let member = parse_identity(member_identity)?;
-//        self.reqs
-//            .clone()
-//            .update_member(self.target, member, config.inner, self.ctx.as_ref())
-//            .await
-//            .map_err(err_to_js)
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn kick_member(&self, member_identity: &str) -> Result<(), JsValue> {
-//        let member = parse_identity(member_identity)?;
-//        self.reqs
-//            .clone()
-//            .kick_member(self.target, member, self.ctx.as_ref())
-//            .await
-//            .map_err(err_to_js)
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn fetch_members(
-//        &mut self,
-//        starting_from_identity: &str,
-//        limit: u32,
-//    ) -> Result<Members, JsValue> {
-//        let from = parse_identity(starting_from_identity)?;
-//        self.reqs.clone().fetch_members(self.target, from, limit).await.map_err(err_to_js).map(
-//            |list| Members {
-//                list: list.into_iter().map(|(id, m)| Member { identity: id, inner: m }).collect(),
-//            },
-//        )
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn send_message(&mut self, message: &str) -> Result<(), JsValue> {
-//        self.reqs
-//            .clone()
-//            .send_encrypted_message(self.target, message.to_bytes().to_vec(), self.ctx.as_ref())
-//            .await
-//            .map_err(err_to_js)
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn fetch_messages(
-//        &mut self,
-//        name: &str,
-//        cursor: Cursor,
-//    ) -> Result<Messages, JsValue> {
-//        let chat = parse_chat_name(name)?;
-//        let mut c = cursor.inner.get();
-//        let messages = self
-//            .reqs
-//            .fetch_and_decrypt_messages(chat, &mut c, self.ctx.as_ref())
-//            .await
-//            .map_err(err_to_js)?;
-//        cursor.inner.set(c);
-//
-//        Ok(Messages { list: messages.into_iter().map(Into::into).collect() })
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn next(&mut self) -> Result<ChatEvent, JsValue> {
-//        while let Some(bytes) = self.stream.next().await {
-//            let Some(event) = chat_spec::ChatEvent::decode(&mut &bytes[..]) else {
-//                log::warn!("invalid message: {:?}", bytes);
-//                continue;
-//            };
-//
-//            let event = match event {
-//                chat_spec::ChatEvent::Message(id, Reminder(message)) => {
-//                    let msg = "chat was deleted while subscription is active";
-//                    let secret = self.ctx.vault.borrow().chats.get(&self.target).ok_or(msg)?.secret;
-//                    let mut message = message.to_owned();
-//                    let Some(message) = crypto::decrypt(&mut message, secret) else {
-//                        log::warn!("failed to decrypt message: {:?}", message);
-//                        continue;
-//                    };
-//
-//                    let Some(mut message) = RawChatMessage::decode(&mut &message[..]) else {
-//                        log::warn!("invalid message: {:?}", message);
-//                        continue;
-//                    };
-//                    message.identity = id;
-//
-//                    ChatEvent { message: Some(message.into()), ..Default::default() }
-//                }
-//                chat_spec::ChatEvent::Member(id, config) => ChatEvent {
-//                    member: Some(Member { identity: id, inner: config }),
-//                    ..Default::default()
-//                },
-//                chat_spec::ChatEvent::MemberRemoved(id) => {
-//                    ChatEvent { member_removed: Some(hex::encode(id)), ..Default::default() }
-//                }
-//            };
-//
-//            return Ok(event);
-//        }
-//
-//        Err(JsValue::from_str("chat subscription closed"))
-//    }
-//
-//    #[wasm_bindgen]
-//    pub fn unsubscribe(&self) {
-//        self.reqs.clone().unsubscribe(self.target);
-//    }
-//}
-//
-//#[wasm_bindgen(getter_with_clone)]
-//#[derive(Clone, Default)]
-//struct ChatEvent {
-//    pub message: Option<Message>,
-//    pub member: Option<Member>,
-//    pub member_removed: Option<String>,
-//}
-//
-//#[wasm_bindgen]
-//struct ProfileSubscription {
-//    stream: mpsc::Receiver<SubscriptionMessage>,
-//    reqs: crate::Requests,
-//    context: Rc<Context>,
-//}
-//
-//#[wasm_bindgen]
-//impl ProfileSubscription {
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn new(api: Api) -> Result<ProfileSubscription, JsValue> {
-//        let stream =
-//            api.reqs.clone().subscribe(api.ctx.keys.identity_hash()).await.map_err(err_to_js)?;
-//        Ok(ProfileSubscription { stream, reqs: api.reqs, context: api.ctx })
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub async fn next(&mut self) -> Result<FriendMessage, JsValue> {
-//        let mut messages = Vec::new();
-//        let mut changes = Vec::new();
-//        while let Some(bytes) = self.stream.next().await {
-//            let Some(mail) = MailVariants::decode(&mut &bytes[..]) else {
-//                log::warn!("invalid message: {:?}", bytes);
-//                continue;
-//            };
-//
-//            mail.handle(self.context.as_ref(), self.reqs.clone(), &mut changes, &mut messages)
-//                .await
-//                .map_err(err_to_js)?;
-//
-//            self.reqs
-//                .clone()
-//                .save_vault_components(changes.drain(..), self.context.as_ref())
-//                .await
-//                .map_err(err_to_js)?;
-//
-//            if let Some((username, crate::FriendMessage::DirectMessage { content })) =
-//                messages.pop()
-//            {
-//                return Ok(FriendMessage { sender: username.to_string(), content });
-//            }
-//        }
-//
-//        Err(JsValue::from_str("profile subscription closed"))
-//    }
-//
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub fn unsubscribe(&self) {
-//        self.reqs.clone().unsubscribe(self.context.keys.identity_hash());
-//    }
-//}
-//
-//#[wasm_bindgen(getter_with_clone)]
-//struct FriendMessage {
-//    pub sender: String,
-//    pub content: String,
-//}
-//
-//#[wasm_bindgen]
-//struct Usernames {
-//    #[wasm_bindgen(getter_with_clone)]
-//    pub list: Vec<String>,
-//}
-//
-//#[wasm_bindgen]
-//struct Messages {
-//    #[wasm_bindgen(getter_with_clone)]
-//    pub list: Vec<Message>,
-//}
-//
-//#[wasm_bindgen(getter_with_clone)]
-//#[derive(Clone)]
-//struct Message {
-//    pub name: String,
-//    id: Identity,
-//    pub content: String,
-//}
-//
-//impl From<RawChatMessage> for Message {
-//    fn from(m: RawChatMessage) -> Self {
-//        Self { name: m.sender.to_string(), id: m.identity, content: m.content }
-//    }
-//}
-//
-//#[wasm_bindgen]
-//impl Message {
-//    #[wasm_bindgen(getter)]
-//    pub fn id(&self) -> String {
-//        hex::encode(self.id)
-//    }
-//}
-//
-//#[wasm_bindgen]
-//struct Cursor {
-//    inner: Rc<Cell<chat_spec::Cursor>>,
-//}
-//
-//#[wasm_bindgen]
-//struct Members {
-//    #[wasm_bindgen(getter_with_clone)]
-//    pub list: Vec<Member>,
-//}
-//
-//#[wasm_bindgen]
-//#[derive(Clone)]
-//struct Member {
-//    identity: Identity,
-//    inner: chat_spec::Member,
-//}
-//
-//#[wasm_bindgen]
-//impl Member {
-//    #[wasm_bindgen]
-//    pub fn best(identity: &str) -> Result<Member, JsValue> {
-//        let identity = parse_identity(identity)?;
-//        Ok(Self { identity, inner: chat_spec::Member::best() })
-//    }
-//
-//    #[wasm_bindgen]
-//    pub fn worst(identity: &str) -> Result<Member, JsValue> {
-//        let identity = parse_identity(identity)?;
-//        Ok(Self { identity, inner: chat_spec::Member::worst() })
-//    }
-//
-//    pub fn identity(&self) -> String {
-//        hex::encode(self.identity)
-//    }
-//
-//    #[wasm_bindgen(getter)]
-//    pub fn rank(&self) -> u32 {
-//        self.inner.rank
-//    }
-//
-//    #[wasm_bindgen(setter)]
-//    pub fn set_rank(&mut self, rank: u32) {
-//        self.inner.rank = rank;
-//    }
-//
-//    #[wasm_bindgen(getter)]
-//    pub fn action_cooldown_ms(&self) -> u32 {
-//        self.inner.action_cooldown_ms
-//    }
-//
-//    #[wasm_bindgen(setter)]
-//    pub fn set_action_cooldown_ms(&mut self, ms: u32) {
-//        self.inner.action_cooldown_ms = ms;
-//    }
-//
-//    #[wasm_bindgen(getter)]
-//    pub fn can_send(&self) -> bool {
-//        self.inner.permissions.contains(chat_spec::Permissions::SEND)
-//    }
-//
-//    #[wasm_bindgen(setter)]
-//    pub fn set_can_send(&mut self, can: bool) {
-//        self.inner.permissions.set(chat_spec::Permissions::SEND, can);
-//    }
-//
-//    #[wasm_bindgen(getter)]
-//    pub fn can_kick(&self) -> bool {
-//        self.inner.permissions.contains(chat_spec::Permissions::KICK)
-//    }
-//
-//    #[wasm_bindgen(setter)]
-//    pub fn set_can_kick(&mut self, can: bool) {
-//        self.inner.permissions.set(chat_spec::Permissions::KICK, can);
-//    }
-//
-//    #[wasm_bindgen(getter)]
-//    pub fn can_invite(&self) -> bool {
-//        self.inner.permissions.contains(chat_spec::Permissions::INVITE)
-//    }
-//
-//    #[wasm_bindgen(setter)]
-//    pub fn set_can_invite(&mut self, can: bool) {
-//        self.inner.permissions.set(chat_spec::Permissions::INVITE, can);
-//    }
-//}
-//
-//#[wasm_bindgen]
-//struct UserKeys {
-//    inner: crate::UserKeys,
-//}
-//
-//#[wasm_bindgen]
-//impl UserKeys {
-//    /// @throw
-//    #[wasm_bindgen]
-//    pub fn new(username: &str, password: &str) -> Result<UserKeys, JsValue> {
-//        let name = UserName::from_str(username).map_err(err_to_js)?;
-//        Ok(UserKeys { inner: crate::UserKeys::new(name, password) })
-//    }
-//}
-//
-//pub fn err_to_js(e: impl std::fmt::Display) -> JsValue {
-//    JsValue::from_str(&e.to_string())
-//}
-//
-//pub fn parse_identity(s: &str) -> Result<Identity, JsValue> {
-//    let mut id = Identity::default();
-//    hex::decode_to_slice(s, &mut id).map_err(err_to_js)?;
-//    Ok(id)
-//}
-//
-//pub fn parse_chat_name(s: &str) -> Result<ChatName, JsValue> {
-//    ChatName::from_str(s).map_err(err_to_js)
-//}
+#![allow(dead_code)]
+#![allow(non_snake_case)]
+
+use {
+    crate::{requests::MailVariants, ChainClientExt, RawChatMessage, RequestContext},
+    anyhow::Context as _,
+    chat_spec::{ChatName, Identity, UserName},
+    codec::{Decode, ReminderOwned},
+    crypto::proof::Nonce,
+    libp2p::futures::{channel::mpsc, future::TryJoinAll, StreamExt, TryFutureExt},
+    std::{
+        cell::{Cell, RefCell},
+        ops::Deref,
+        rc::Rc,
+        str::FromStr,
+    },
+    wasm_bindgen_futures::{
+        spawn_local,
+        wasm_bindgen::{self, prelude::wasm_bindgen},
+    },
+    web_sys::wasm_bindgen::JsValue,
+};
+
+pub struct Inner {
+    vault: RefCell<crate::Vault>,
+    vault_nonce: Cell<Nonce>,
+    mail_action: Cell<Nonce>,
+    keys: crate::UserKeys,
+    node_handle: crate::NodeHandle,
+}
+
+#[wasm_bindgen]
+pub struct Context {
+    inner: Rc<Inner>,
+}
+
+impl Deref for Context {
+    type Target = Inner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl RequestContext for Context {
+    fn try_with_vault<R>(
+        &self,
+        action: impl FnOnce(&mut crate::Vault) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
+        let mut vault = self.vault.borrow_mut();
+        action(&mut vault)
+    }
+
+    fn with_vault<R>(&self, action: impl FnOnce(&mut crate::Vault) -> R) -> anyhow::Result<R> {
+        let mut vault = self.vault.borrow_mut();
+        Ok(action(&mut vault))
+    }
+
+    fn with_keys<R>(&self, action: impl FnOnce(&crate::UserKeys) -> R) -> anyhow::Result<R> {
+        Ok(action(&self.keys))
+    }
+
+    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R> {
+        let mut vault_nonce = self.vault_nonce.get();
+        let res = action(&mut vault_nonce);
+        self.vault_nonce.set(vault_nonce);
+        Ok(res)
+    }
+
+    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R> {
+        let mut mail_action = self.mail_action.get();
+        let res = action(&mut mail_action);
+        self.mail_action.set(mail_action);
+        Ok(res)
+    }
+
+    fn subscription_for<T: Into<chat_spec::Topic> + Clone>(
+        &self,
+        topic: T,
+    ) -> impl libp2p::futures::prelude::Future<Output = anyhow::Result<crate::Sub<T>>> {
+        self.node_handle.subscription_for(topic).map_err(Into::into)
+    }
+}
+
+#[wasm_bindgen]
+impl Context {
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn new(user_keys: UserKeys) -> Result<Context, Error> {
+        let (inner, vault, reqs, vault_nonce, mail_action) =
+            crate::Node::new(user_keys.inner.clone(), |v| _ = v).await?;
+
+        spawn_local(async move { _ = inner.await });
+
+        Ok(Self {
+            inner: Rc::new(Inner {
+                vault: RefCell::new(vault),
+                vault_nonce: Cell::new(vault_nonce),
+                mail_action: Cell::new(mail_action),
+                keys: user_keys.inner,
+                node_handle: reqs,
+            }),
+        })
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn create_chat(&mut self, chat_name: &str) -> Result<(), Error> {
+        let chat = parse_chat_name(chat_name)?;
+        Ok(self.create_and_save_chat(chat).await?)
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn send_friend_request_to(
+        &mut self,
+        user_name_to_send_request_to: &str,
+    ) -> Result<(), Error> {
+        let to = parse_username(user_name_to_send_request_to)?;
+        Ok(self.send_friend_request(to).await?)
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn send_friend_message_to(
+        &mut self,
+        friend_username: &str,
+        message: &str,
+    ) -> Result<(), Error> {
+        let name = parse_username(friend_username)?;
+        Ok(self.send_frined_message(name, message.to_string()).await?)
+    }
+}
+
+#[wasm_bindgen]
+struct ChatSubscription {
+    target: ChatName,
+    member: chat_spec::Member,
+    stream: mpsc::Receiver<chat_spec::ChatEvent>,
+    cx: Context,
+}
+
+#[wasm_bindgen]
+impl ChatSubscription {
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn new(api: Context, chat_name: &str) -> Result<ChatSubscription, Error> {
+        let chat = parse_chat_name(chat_name)?;
+        let mut sub = api.subscription_for(chat).await?;
+        let my_member = sub.fetch_my_member(api.with_keys(crate::UserKeys::identity)?).await?;
+        api.try_with_vault(|vault| {
+            vault
+                .chats
+                .get_mut(&chat)
+                .map(|c| c.action_no = my_member.action)
+                .with_context(|| format!("chat {chat} not found"))
+        })?;
+        let stream = sub.subscribe().await.context("failed to subscribe")?;
+        Ok(ChatSubscription { target: chat, member: my_member, stream, cx: api })
+    }
+
+    #[wasm_bindgen]
+    pub fn member(&self) -> Member {
+        Member { name: self.cx.keys.name, identity: self.cx.keys.identity(), inner: self.member }
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn invite_member(&self, member: &str, config: Member) -> Result<(), Error> {
+        let member = parse_username(member)?;
+        Ok(self.cx.invite_member(self.target, member, config.inner).await?)
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn update_member(&self, member_identity: &str, config: Member) -> Result<(), Error> {
+        let member = parse_identity(member_identity)?;
+        Ok(self.cx.update_member(self.target, member, config.inner).await?)
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn kick_member(&self, member_identity: &str) -> Result<(), Error> {
+        let member = parse_identity(member_identity)?;
+        Ok(self.cx.kick_member(self.target, member).await?)
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn fetch_members(
+        &mut self,
+        starting_from_identity: &str,
+        limit: u32,
+    ) -> Result<Members, Error> {
+        let from = parse_identity(starting_from_identity)?;
+        let members =
+            self.cx.subscription_for(self.target).await?.fetch_members(from, limit).await?;
+
+        let scx = &self.cx;
+        Ok(Members {
+            list: members
+                .into_iter()
+                .map(|(id, m)| async move {
+                    Ok::<_, anyhow::Error>(Member {
+                        name: scx.keys.chain_client().await?.fetch_username(from).await?,
+                        identity: id,
+                        inner: m,
+                    })
+                })
+                .collect::<TryJoinAll<_>>()
+                .await?,
+        })
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn send_message(&mut self, message: &str) -> Result<(), Error> {
+        Ok(self.cx.send_encrypted_message(self.target, message.to_string().into_bytes()).await?)
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn fetch_messages(&mut self, name: &str, cursor: Cursor) -> Result<Messages, Error> {
+        let chat = parse_chat_name(name)?;
+        let mut c = cursor.inner.get();
+        let messages = self.cx.fetch_and_decrypt_messages(chat, &mut c).await?;
+        cursor.inner.set(c);
+        Ok(Messages { list: messages.into_iter().map(Into::into).collect() })
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn next(&mut self) -> Result<ChatEvent, Error> {
+        while let Some(event) = self.stream.next().await {
+            let event = match event {
+                chat_spec::ChatEvent::Message(id, ReminderOwned(message)) => {
+                    let msg = "chat was deleted while subscription is active";
+                    let secret = self.cx.vault.borrow().chats.get(&self.target).ok_or(msg)?.secret;
+                    let mut message = message.to_owned();
+                    let Some(message) = crypto::decrypt(&mut message, secret) else {
+                        log::warn!("failed to decrypt message: {:?}", message);
+                        continue;
+                    };
+
+                    let Some(mut message) = RawChatMessage::decode(&mut &message[..]) else {
+                        log::warn!("invalid message: {:?}", message);
+                        continue;
+                    };
+                    message.identity = id;
+
+                    ChatEvent { message: Some(message.into()), ..Default::default() }
+                }
+                chat_spec::ChatEvent::Member(id, config) => ChatEvent {
+                    member: Some(Member {
+                        name: self.cx.keys.chain_client().await?.fetch_username(id).await?,
+                        identity: id,
+                        inner: config,
+                    }),
+                    ..Default::default()
+                },
+                chat_spec::ChatEvent::MemberRemoved(id) => {
+                    ChatEvent { member_removed: Some(hex::encode(id)), ..Default::default() }
+                }
+            };
+
+            return Ok(event);
+        }
+
+        Err(Error(anyhow::anyhow!("chat subscription closed")))
+    }
+}
+
+#[wasm_bindgen(getter_with_clone)]
+#[derive(Clone, Default)]
+struct ChatEvent {
+    pub message: Option<Message>,
+    pub member: Option<Member>,
+    pub member_removed: Option<String>,
+}
+
+#[wasm_bindgen]
+struct ProfileSubscription {
+    stream: mpsc::Receiver<MailVariants>,
+    cx: Context,
+}
+
+#[wasm_bindgen]
+impl ProfileSubscription {
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn new(cx: Context) -> Result<ProfileSubscription, Error> {
+        let stream =
+            cx.profile_subscription().await?.subscribe().await.context("failed to subscribe")?;
+        Ok(ProfileSubscription { stream, cx })
+    }
+
+    /// @throw
+    #[wasm_bindgen]
+    pub async fn next(&mut self) -> Result<FriendMessage, Error> {
+        let mut messages = Vec::new();
+        let mut changes = Vec::new();
+        while let Some(mail) = self.stream.next().await {
+            mail.handle(&self.cx, &mut changes, &mut messages).await?;
+
+            self.cx.save_vault_components(changes.drain(..)).await?;
+
+            if let Some((username, crate::FriendMessage::DirectMessage { content })) =
+                messages.pop()
+            {
+                return Ok(FriendMessage { sender: username.to_string(), content });
+            }
+        }
+
+        Err(Error(anyhow::anyhow!("profile subscription closed, reomen it I guess")))
+    }
+}
+
+#[wasm_bindgen(getter_with_clone)]
+struct FriendMessage {
+    pub sender: String,
+    pub content: String,
+}
+
+#[wasm_bindgen]
+struct Usernames {
+    #[wasm_bindgen(getter_with_clone)]
+    pub list: Vec<String>,
+}
+
+#[wasm_bindgen]
+struct Messages {
+    #[wasm_bindgen(getter_with_clone)]
+    pub list: Vec<Message>,
+}
+
+#[wasm_bindgen(getter_with_clone)]
+#[derive(Clone)]
+struct Message {
+    pub name: String,
+    id: Identity,
+    pub content: String,
+}
+
+impl From<RawChatMessage> for Message {
+    fn from(m: RawChatMessage) -> Self {
+        Self { name: m.sender.to_string(), id: m.identity, content: m.content }
+    }
+}
+
+#[wasm_bindgen]
+impl Message {
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> String {
+        hex::encode(self.id)
+    }
+}
+
+#[wasm_bindgen]
+struct Cursor {
+    inner: Rc<Cell<chat_spec::Cursor>>,
+}
+
+#[wasm_bindgen]
+struct Members {
+    #[wasm_bindgen(getter_with_clone)]
+    pub list: Vec<Member>,
+}
+
+#[wasm_bindgen]
+#[derive(Clone)]
+struct Member {
+    name: UserName,
+    identity: Identity,
+    inner: chat_spec::Member,
+}
+
+#[wasm_bindgen]
+impl Member {
+    #[wasm_bindgen]
+    pub fn best(name: &str, identity: &str) -> Result<Member, Error> {
+        let name = parse_username(name)?;
+        let identity = parse_identity(identity)?;
+        Ok(Self { name, identity, inner: chat_spec::Member::best() })
+    }
+
+    #[wasm_bindgen]
+    pub fn worst(name: &str, identity: &str) -> Result<Member, Error> {
+        let name = parse_username(name)?;
+        let identity = parse_identity(identity)?;
+        Ok(Self { name, identity, inner: chat_spec::Member::worst() })
+    }
+
+    pub fn identity(&self) -> String {
+        hex::encode(self.identity)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn rank(&self) -> u32 {
+        self.inner.rank
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_rank(&mut self, rank: u32) {
+        self.inner.rank = rank;
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn action_cooldown_ms(&self) -> u32 {
+        self.inner.action_cooldown_ms
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_action_cooldown_ms(&mut self, ms: u32) {
+        self.inner.action_cooldown_ms = ms;
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn can_send(&self) -> bool {
+        self.inner.permissions.contains(chat_spec::Permissions::SEND)
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_can_send(&mut self, can: bool) {
+        self.inner.permissions.set(chat_spec::Permissions::SEND, can);
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn can_kick(&self) -> bool {
+        self.inner.permissions.contains(chat_spec::Permissions::KICK)
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_can_kick(&mut self, can: bool) {
+        self.inner.permissions.set(chat_spec::Permissions::KICK, can);
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn can_invite(&self) -> bool {
+        self.inner.permissions.contains(chat_spec::Permissions::INVITE)
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_can_invite(&mut self, can: bool) {
+        self.inner.permissions.set(chat_spec::Permissions::INVITE, can);
+    }
+}
+
+#[wasm_bindgen]
+pub struct UserKeys {
+    inner: crate::UserKeys,
+}
+
+#[wasm_bindgen]
+impl UserKeys {
+    /// @throw
+    #[wasm_bindgen]
+    pub fn new(username: &str, password: &str) -> Result<UserKeys, Error> {
+        let name = parse_username(username)?;
+        Ok(UserKeys { inner: crate::UserKeys::new(name, password) })
+    }
+}
+
+pub struct Error(anyhow::Error);
+
+impl From<chain_api::Error> for Error {
+    fn from(e: chain_api::Error) -> Self {
+        Self(e.into())
+    }
+}
+
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Self {
+        Self(e)
+    }
+}
+
+impl<'a> From<&'a str> for Error {
+    fn from(s: &'a str) -> Self {
+        Self(anyhow::anyhow!("{s}"))
+    }
+}
+
+impl Into<JsValue> for Error {
+    fn into(self) -> JsValue {
+        JsValue::from_str(&self.0.to_string())
+    }
+}
+
+pub fn parse_identity(s: &str) -> Result<Identity, Error> {
+    let mut id = Identity::default();
+    hex::decode_to_slice(s, &mut id).context("expected hex")?;
+    Ok(id)
+}
+
+pub fn parse_chat_name(s: &str) -> Result<ChatName, Error> {
+    ChatName::from_str(s).context("invalid chat name").map_err(Into::into)
+}
+
+pub fn parse_username(s: &str) -> Result<UserName, Error> {
+    UserName::from_str(s).context("invalid username").map_err(Into::into)
+}

@@ -6,7 +6,7 @@ use {
     anyhow::Context,
     chain_api::Encrypted,
     chat_spec::*,
-    codec::{Codec, Decode, Encode, Reminder, ReminderOwned},
+    codec::{Codec, Decode, Encode, ReminderOwned},
     crypto::{
         enc::{ChoosenCiphertext, Ciphertext},
         proof::{Nonce, Proof},
@@ -88,7 +88,7 @@ impl Sub<ChatName> {
         self.request(rpcs::CREATE_CHAT, me).await
     }
 
-    async fn send_message<'a>(&'a mut self, proof: Proof<Reminder<'_>>) -> anyhow::Result<()> {
+    async fn send_message<'a>(&'a mut self, proof: &Proof<ReminderOwned>) -> anyhow::Result<()> {
         self.request(rpcs::SEND_MESSAGE, proof).await
     }
 
@@ -291,6 +291,18 @@ pub trait RequestContext: Sized {
         topic: T,
     ) -> impl Future<Output = anyhow::Result<Sub<T>>>;
 
+    fn with_chat_and_keys<R>(
+        &self,
+        chat: ChatName,
+        action: impl FnOnce(&mut ChatMeta, &UserKeys) -> R,
+    ) -> anyhow::Result<R> {
+        self.try_with_vault(|v| {
+            let chat_meta =
+                v.chats.get_mut(&chat).with_context(|| format!("could not find '{chat}'"))?;
+            self.with_keys(|keys| action(chat_meta, &keys))
+        })
+    }
+
     async fn profile_subscription(&self) -> anyhow::Result<Sub<Identity>> {
         self.subscription_for(self.with_keys(UserKeys::identity)?).await
     }
@@ -301,13 +313,8 @@ pub trait RequestContext: Sized {
     }
 
     async fn kick_member(&self, from: ChatName, identity: Identity) -> anyhow::Result<()> {
-        let proof = self.try_with_vault(|v| {
-            let chat_meta =
-                v.chats.get_mut(&from).with_context(|| format!("could not find '{from}'"))?;
-            let action_no = &mut chat_meta.action_no;
-            let proof = self.with_keys(|k| Proof::new(&k.sign, action_no, from, OsRng))?;
-            Ok(proof)
-        })?;
+        let proof = self
+            .with_chat_and_keys(from, |c, k| Proof::new(&k.sign, &mut c.action_no, from, OsRng))?;
         let mut sub = self.subscription_for(from).await?;
         sub.request(rpcs::KICK_MEMBER, (proof, identity)).await.map_err(Into::into)
     }
@@ -359,14 +366,10 @@ pub trait RequestContext: Sized {
         let mut them = self.subscription_for(member).await?;
         let keys = them.fetch_keys().await?;
 
-        let (invite, proof) = self.try_with_vault(|vault| {
-            let chat_meta =
-                vault.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
-            let cp =
-                self.with_keys(|k| k.enc.encapsulate_choosen(&keys.enc, chat_meta.secret, OsRng))?;
-            let proof =
-                self.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, name, OsRng))?;
-            Ok((MailVariants::ChatInvite { chat: name, cp }, proof))
+        let (invite, proof) = self.with_chat_and_keys(name, |c, k| {
+            let cp = k.enc.encapsulate_choosen(&keys.enc, c.secret, OsRng);
+            let proof = Proof::new(&k.sign, &mut c.action_no, name, OsRng);
+            (MailVariants::ChatInvite { chat: name, cp }, proof)
         })?;
 
         them.send_mail(invite).await.context("sending invite")?;
@@ -438,35 +441,21 @@ pub trait RequestContext: Sized {
         Ok(())
     }
 
-    async fn send_encrypted_message(
-        &self,
-        name: ChatName,
-        mut message: Vec<u8>,
-    ) -> anyhow::Result<()> {
+    async fn send_encrypted_message(&self, name: ChatName, message: Vec<u8>) -> anyhow::Result<()> {
         let mut sub = self.subscription_for(name).await?;
-        let proof = self.try_with_vault(|vault| {
-            let chat_meta =
-                vault.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
-            let tag = crypto::encrypt(&mut message, chat_meta.secret, OsRng);
-            message.extend(tag);
-            let msg = Reminder(&message);
-            let proof =
-                self.with_keys(|k| Proof::new(&k.sign, &mut chat_meta.action_no, msg, OsRng))?;
-            Ok(proof)
+        let proof = self.with_chat_and_keys(name, |c, k| {
+            let msg = ReminderOwned(chain_api::encrypt(message, c.secret));
+            Proof::new(&k.sign, &mut c.action_no, msg, OsRng)
         })?;
-        let nonce = match sub.send_message(proof).await.downcast_nonce()? {
+        let nonce = match sub.send_message(&proof).await.downcast_nonce()? {
             Err(nonce) => nonce,
             Ok(r) => return Ok(r),
         };
-        log::info!("foo bar {nonce} {}", proof.nonce);
-        let proof =
-            self.with_keys(|k| Proof::new(&k.sign, &mut { nonce }, proof.context, OsRng))?;
-        self.try_with_vault(|v| {
-            v.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?.action_no =
-                nonce + 1;
-            Ok(())
+        let proof = self.with_chat_and_keys(name, |c, k| {
+            c.action_no = nonce;
+            Proof::new(&k.sign, &mut { nonce }, proof.context, OsRng)
         })?;
-        sub.send_message(proof).await.map_err(Into::into)
+        sub.send_message(&proof).await.map_err(Into::into)
     }
 
     async fn fetch_and_decrypt_messages(
@@ -474,10 +463,7 @@ pub trait RequestContext: Sized {
         name: ChatName,
         cursor: &mut Cursor,
     ) -> anyhow::Result<Vec<RawChatMessage>> {
-        let chat_meta = self.try_with_vault(|v| {
-            v.chats.get(&name).context("we are not part of the chat").copied()
-        })?;
-
+        let chat_meta = self.with_chat_and_keys(name, |c, _| c.clone())?;
         let mut sub = self.subscription_for(name).await?;
         let (new_cusor, ReminderOwned(mesages)) = sub.fetch_messages(*cursor).await?;
         *cursor = new_cusor;
@@ -499,13 +485,8 @@ pub trait RequestContext: Sized {
         member: Identity,
         config: Member,
     ) -> anyhow::Result<()> {
-        let proof = self.try_with_vault(|v| {
-            let chat_meta =
-                v.chats.get_mut(&name).with_context(|| format!("could not find '{name}'"))?;
-            let action_no = &mut chat_meta.action_no;
-            let proof = self.with_keys(|k| Proof::new(&k.sign, action_no, name, OsRng))?;
-            Ok(proof)
-        })?;
+        let proof = self
+            .with_chat_and_keys(name, |c, k| Proof::new(&k.sign, &mut c.action_no, name, OsRng))?;
         self.subscription_for(name).await?.add_member(proof, member, config).await
     }
 }

@@ -47,13 +47,11 @@ impl RequestContext for Context {
         &self,
         action: impl FnOnce(&mut crate::Vault) -> anyhow::Result<R>,
     ) -> anyhow::Result<R> {
-        let mut vault = self.vault.borrow_mut();
-        action(&mut vault)
+        action(&mut self.vault.borrow_mut())
     }
 
     fn with_vault<R>(&self, action: impl FnOnce(&mut crate::Vault) -> R) -> anyhow::Result<R> {
-        let mut vault = self.vault.borrow_mut();
-        Ok(action(&mut vault))
+        Ok(action(&mut self.vault.borrow_mut()))
     }
 
     fn with_keys<R>(&self, action: impl FnOnce(&crate::UserKeys) -> R) -> anyhow::Result<R> {
@@ -77,7 +75,7 @@ impl RequestContext for Context {
     fn subscription_for<T: Into<chat_spec::Topic> + Clone>(
         &self,
         topic: T,
-    ) -> impl libp2p::futures::prelude::Future<Output = anyhow::Result<crate::Sub<T>>> {
+    ) -> impl std::future::Future<Output = anyhow::Result<crate::Sub<T>>> {
         self.node_handle.subscription_for(topic).map_err(Into::into)
     }
 }
@@ -148,13 +146,7 @@ impl ChatSubscription {
         let chat = parse_chat_name(chat_name)?;
         let mut sub = api.subscription_for(chat).await?;
         let my_member = sub.fetch_my_member(api.with_keys(crate::UserKeys::identity)?).await?;
-        api.try_with_vault(|vault| {
-            vault
-                .chats
-                .get_mut(&chat)
-                .map(|c| c.action_no = my_member.action)
-                .with_context(|| format!("chat {chat} not found"))
-        })?;
+        api.with_chat_and_keys(chat, |c, _| c.action_no = my_member.action)?;
         let stream = sub.subscribe().await.context("failed to subscribe")?;
         Ok(ChatSubscription { target: chat, member: my_member, stream, cx: api })
     }

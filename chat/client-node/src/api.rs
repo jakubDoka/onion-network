@@ -234,13 +234,15 @@ impl ChatSubscription {
                         continue;
                     };
 
-                    let Some(mut message) = RawChatMessage::decode(&mut &message[..]) else {
+                    let Some(content) = String::decode(&mut &message[..]) else {
                         log::warn!("invalid message: {:?}", message);
                         continue;
                     };
-                    message.identity = id;
 
-                    ChatEvent { message: Some(message.into()), ..Default::default() }
+                    let name =
+                        self.cx.keys.chain_client().await?.fetch_username(id).await?.to_string();
+
+                    ChatEvent { message: Some(Message { name, id, content }), ..Default::default() }
                 }
                 chat_spec::ChatEvent::Member(id, config) => ChatEvent {
                     member: Some(Member {

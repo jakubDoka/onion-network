@@ -12,6 +12,7 @@ use {
         proof::{Nonce, Proof},
     },
     double_ratchet::{DoubleRatchet, MessageHeader},
+    libp2p::futures::future::TryJoinAll,
     rand::rngs::OsRng,
     std::{collections::HashSet, future::Future},
 };
@@ -291,18 +292,6 @@ pub trait RequestContext: Sized {
         topic: T,
     ) -> impl Future<Output = anyhow::Result<Sub<T>>>;
 
-    fn with_chat_and_keys<R>(
-        &self,
-        chat: ChatName,
-        action: impl FnOnce(&mut ChatMeta, &UserKeys) -> R,
-    ) -> anyhow::Result<R> {
-        self.try_with_vault(|v| {
-            let chat_meta =
-                v.chats.get_mut(&chat).with_context(|| format!("could not find '{chat}'"))?;
-            self.with_keys(|keys| action(chat_meta, &keys))
-        })
-    }
-
     async fn profile_subscription(&self) -> anyhow::Result<Sub<Identity>> {
         self.subscription_for(self.with_keys(UserKeys::identity)?).await
     }
@@ -312,102 +301,18 @@ pub trait RequestContext: Sized {
         self.save_vault_components([VaultComponentId::Theme]).await
     }
 
-    async fn kick_member(&self, from: ChatName, identity: Identity) -> anyhow::Result<()> {
-        let proof = self
-            .with_chat_and_keys(from, |c, k| Proof::new(&k.sign, &mut c.action_no, from, OsRng))?;
-        let mut sub = self.subscription_for(from).await?;
-        sub.request(rpcs::KICK_MEMBER, (proof, identity)).await.map_err(Into::into)
-    }
-
     async fn send_frined_message(&self, name: UserName, content: String) -> anyhow::Result<()> {
-        let (session, (header, ss), identity) = self.try_with_vault(|v| {
-            let friend = v.friends.get_mut(&name).context("friend not found")?;
-            Ok((friend.dr.sender_hash(), friend.dr.send(), friend.identity))
-        })?;
+        let mut frined =
+            self.try_with_vault(|v| v.friends.get_mut(&name).cloned().context("friend not found"))?;
 
-        self.save_vault_components([VaultComponentId::Friend(name)]).await?;
-
+        let (header, ss) = frined.dr.send();
+        let session = frined.dr.sender_hash();
         let message = FriendMessage::DirectMessage { content };
-        let mail =
-            MailVariants::FriendMessage { header, session, content: Encrypted::new(message, ss) };
-        self.subscription_for(identity).await?.send_mail(mail).await.context("sending message")
-    }
-
-    async fn create_and_save_chat(&self, name: ChatName) -> anyhow::Result<()> {
-        let my_id = self.with_keys(UserKeys::identity)?;
-        self.save_vault_components([VaultComponentId::Chats]).await.context("saving vault")?;
-        self.subscription_for(name).await?.create_chat(my_id).await?;
-        self.with_vault(|v| v.chats.insert(name, ChatMeta::new()))?;
-        Ok(())
-    }
-
-    async fn invite_member(
-        &self,
-        name: ChatName,
-        member: UserName,
-        config: Member,
-    ) -> anyhow::Result<()> {
-        let identity = self
-            .with_keys(UserKeys::chain_client)?
-            .await?
-            .fetch_profile(member)
-            .await
-            .context("fetching identity")?
-            .sign;
-        self.invite_member_identity(name, identity, config).await.context("inviting member")
-    }
-
-    async fn invite_member_identity(
-        &self,
-        name: ChatName,
-        member: Identity,
-        config: Member,
-    ) -> anyhow::Result<()> {
-        let mut them = self.subscription_for(member).await?;
-        let keys = them.fetch_keys().await?;
-
-        let (invite, proof) = self.with_chat_and_keys(name, |c, k| {
-            let cp = k.enc.encapsulate_choosen(&keys.enc, c.secret, OsRng);
-            let proof = Proof::new(&k.sign, &mut c.action_no, name, OsRng);
-            (MailVariants::ChatInvite { chat: name, cp }, proof)
-        })?;
-
-        them.send_mail(invite).await.context("sending invite")?;
-        self.subscription_for(name).await?.add_member(proof, member, config).await
-    }
-
-    async fn send_friend_request(&self, name: UserName) -> anyhow::Result<()> {
-        let identity = self
-            .with_keys(UserKeys::chain_client)?
-            .await?
-            .fetch_profile(name)
-            .await
-            .context("fetching identity")?
-            .sign;
-        self.send_friend_request_to_identity(name, identity).await
-    }
-
-    async fn send_friend_request_to_identity(
-        &self,
-        name: UserName,
-        identity: Identity,
-    ) -> anyhow::Result<()> {
-        let mut them = self.subscription_for(identity).await?;
-        let keys = them.fetch_keys().await.context("fetching keys")?;
-        let (cp, ss) = self.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
-        let (dr, init, id) = DoubleRatchet::sender(ss, OsRng);
-
-        let us = self.with_keys(UserKeys::identity)?;
-
-        let request = FriendRequest { username: self.with_keys(|k| k.name)?, identity: us, init };
-        let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
-        them.send_mail(mail).await?;
-
-        let friend = FriendMeta { dr, identity, id };
-        self.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;
-        self.with_vault(|v| v.friends.insert(name, friend))?;
-        let changes = [VaultComponentId::Friend(name), VaultComponentId::FriendNames];
-        self.save_vault_components(changes).await?;
+        let content = Encrypted::new(message, ss);
+        let mail = MailVariants::FriendMessage { header, session, content };
+        self.subscription_for(frined.identity).await?.send_mail(mail).await?;
+        self.with_vault(|v| _ = v.friends.insert(name, frined))?;
+        self.save_vault_components([VaultComponentId::Friend(name)]).await?;
 
         Ok(())
     }
@@ -441,6 +346,89 @@ pub trait RequestContext: Sized {
         Ok(())
     }
 
+    async fn create_and_save_chat(&self, name: ChatName) -> anyhow::Result<()> {
+        let my_id = self.with_keys(UserKeys::identity)?;
+        self.save_vault_components([VaultComponentId::Chats]).await.context("saving vault")?;
+        self.subscription_for(name).await?.create_chat(my_id).await?;
+        self.with_vault(|v| v.chats.insert(name, ChatMeta::new()))?;
+        Ok(())
+    }
+
+    async fn kick_member(&self, from: ChatName, identity: Identity) -> anyhow::Result<()> {
+        let proof = self
+            .with_chat_and_keys(from, |c, k| Proof::new(&k.sign, &mut c.action_no, from, OsRng))?;
+        let mut sub = self.subscription_for(from).await?;
+        sub.request(rpcs::KICK_MEMBER, (proof, identity)).await.map_err(Into::into)
+    }
+
+    fn with_chat_and_keys<R>(
+        &self,
+        chat: ChatName,
+        action: impl FnOnce(&mut ChatMeta, &UserKeys) -> R,
+    ) -> anyhow::Result<R> {
+        self.try_with_vault(|v| {
+            let chat_meta =
+                v.chats.get_mut(&chat).with_context(|| format!("could not find '{chat}'"))?;
+            self.with_keys(|keys| action(chat_meta, &keys))
+        })
+    }
+
+    async fn invite_member(
+        &self,
+        name: ChatName,
+        member: UserName,
+        config: Member,
+    ) -> anyhow::Result<()> {
+        let identity = self
+            .with_keys(UserKeys::chain_client)?
+            .await?
+            .fetch_profile(member)
+            .await
+            .context("fetching identity")?
+            .sign;
+
+        let mut them = self.subscription_for(identity).await?;
+        let keys = them.fetch_keys().await?;
+
+        let (invite, proof) = self.with_chat_and_keys(name, |c, k| {
+            let cp = k.enc.encapsulate_choosen(&keys.enc, c.secret, OsRng);
+            let proof = Proof::new(&k.sign, &mut c.action_no, name, OsRng);
+            (MailVariants::ChatInvite { chat: name, cp }, proof)
+        })?;
+
+        them.send_mail(invite).await.context("sending invite")?;
+        self.subscription_for(name).await?.add_member(proof, identity, config).await
+    }
+
+    async fn send_friend_request(&self, name: UserName) -> anyhow::Result<()> {
+        let identity = self
+            .with_keys(UserKeys::chain_client)?
+            .await?
+            .fetch_profile(name)
+            .await
+            .context("fetching identity")?
+            .sign;
+
+        let mut them = self.subscription_for(identity).await?;
+        let keys = them.fetch_keys().await.context("fetching keys")?;
+        let (cp, ss) = self.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
+        let (dr, init, id) = DoubleRatchet::sender(ss, OsRng);
+
+        let us = self.with_keys(UserKeys::identity)?;
+
+        let request = FriendRequest { username: self.with_keys(|k| k.name)?, identity: us, init };
+        let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
+        them.send_mail(mail).await?;
+
+        let friend = FriendMeta { dr, identity, id };
+        self.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;
+        self.with_vault(|v| v.friends.insert(name, friend))?;
+        let changes = [VaultComponentId::Friend(name), VaultComponentId::FriendNames];
+        self.save_vault_components(changes).await?;
+
+        Ok(())
+    }
+
     async fn send_encrypted_message(&self, name: ChatName, message: Vec<u8>) -> anyhow::Result<()> {
         let mut sub = self.subscription_for(name).await?;
         let proof = self.with_chat_and_keys(name, |c, k| {
@@ -469,14 +457,20 @@ pub trait RequestContext: Sized {
         *cursor = new_cusor;
 
         Ok(unpack_messages_ref(&mesages)
-            .filter_map(|message| {
-                let message = chat_spec::Message::decode(&mut &message[..])?;
-                let mut content = message.content.0.to_owned();
-                let content = crypto::decrypt(&mut content, chat_meta.secret)?;
-                RawChatMessage::decode(&mut &*content)
-                    .map(|m| RawChatMessage { identity: message.sender, ..m })
+            .map(|message| async move {
+                let chat_spec::Message { sender: identity, content, .. } =
+                    chat_spec::Message::decode(&mut &message[..]).context("invalid message")?;
+                let mut content = content.0.to_owned();
+                let content =
+                    crypto::decrypt(&mut content, chat_meta.secret).context("decrypt content")?;
+                let client = self.with_keys(|k| k.chain_client())?.await?;
+                let sender = client.fetch_username(identity).await?;
+                String::from_utf8(content.to_vec())
+                    .map(|content| RawChatMessage { identity, sender, content })
+                    .context("invalid message")
             })
-            .collect())
+            .collect::<TryJoinAll<_>>()
+            .await?)
     }
 
     async fn update_member(

@@ -239,13 +239,10 @@ pub struct FriendMeta {
     pub id: FriendId,
 }
 
-#[derive(Codec)]
 pub struct RawChatMessage {
-    pub sender: UserName,
     pub content: String,
-
-    #[codec(skip)]
     pub identity: Identity,
+    pub sender: UserName,
 }
 
 pub fn try_set_color(name: &str, value: u32) -> Result<(), JsValue> {

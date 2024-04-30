@@ -4,11 +4,10 @@ use {
     },
     anyhow::Context,
     chat_client_node::{
-        encode_direct_chat_name, ChainClientExt, MessageContent, RawChatMessage, RequestContext,
-        UserKeys,
+        encode_direct_chat_name, ChainClientExt, MessageContent, RequestContext, UserKeys,
     },
     chat_spec::{ChatError, ChatEvent, ChatName, Identity, Member, Permissions, Rank, UserName},
-    codec::{Decode, Encode, ReminderOwned},
+    codec::{Decode, ReminderOwned},
     component_utils::DropFn,
     crypto::SharedSecret,
     leptos::{
@@ -140,19 +139,21 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 return;
             };
 
-            let Some(msg) = RawChatMessage::decode(&mut &*message) else {
+            let Some(msg) = String::decode(&mut &*message) else {
                 log::warn!("message cannot be decoded: {:?}", message);
                 return;
             };
 
-            append_message(msg.sender, msg.content);
+            handled_spawn_local("appending message", async move {
+                let client = state.with_keys(UserKeys::chain_client)?.await?;
+                append_message(client.fetch_username(sender).await?, msg);
+                Ok(())
+            });
         }
         ChatEvent::Member(identiy, member) => {
             if identiy == my_id {
                 set_current_member(member);
             }
-
-            log::info!("received member: {:?}", member);
 
             handled_spawn_local("updating member", async move {
                 let mname =
@@ -174,8 +175,6 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                     current_chat.set(None);
                 }
             }
-
-            log::info!("member removed: {:?}", identity);
 
             if let Some(member_elem) = document().get_element_by_id(&hex::encode(identity)) {
                 member_elem.remove();
@@ -358,9 +357,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let send_normal_message = move |chat, content: String| {
         handled_spawn_local("sending normal message", async move {
-            let content = RawChatMessage { sender: my_name, content, identity: Default::default() }
-                .to_bytes();
-            state.send_encrypted_message(chat, content).await?;
+            state.send_encrypted_message(chat, content.into_bytes()).await?;
             clear_input();
             Ok(())
         });

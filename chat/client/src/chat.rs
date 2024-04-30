@@ -611,17 +611,15 @@ fn editable_member(
             .replace_with_with_node_1(&member_view(state, identity, mname, m, me, name_sig))
             .unwrap();
     };
+    let get_chat = move || name_sig.get_untracked().context("no chat selected");
 
     let kick = handled_async_callback(kick_ctx, move |_| async move {
-        let name = name_sig.get_untracked().context("no chat selected")?;
-        state.subscription_for(name).await?.kick_member(identity, state).await?;
+        state.kick_member(get_chat()?, identity).await?;
         root.get_untracked().unwrap().remove();
         Ok(())
     });
     let save = handled_async_callback(ctx, move |e: SubmitEvent| async move {
         e.prevent_default();
-
-        let name = name_sig.get_untracked().context("no chat selected")?;
 
         let rank = crate::get_value(rank).parse::<Rank>().context("parsing rank")?;
         let permissions = crate::get_value(permissions)
@@ -634,7 +632,7 @@ fn editable_member(
             crate::get_value(action_cooldown_ms).parse::<u32>().context("parsing cooldown")?;
         let updated_member = Member { rank, permissions, action_cooldown_ms, ..m };
 
-        state.update_member(name, identity, updated_member).await?;
+        state.update_member(get_chat()?, identity, updated_member).await?;
         cancel();
 
         Ok(())

@@ -44,7 +44,7 @@ impl Sub<Identity> {
     }
 
     pub async fn send_mail(&mut self, mail: impl Encode) -> anyhow::Result<()> {
-        self.sub.request(rpcs::SEND_MAIL, self.topic, mail).await.recover_mail()
+        self.request(rpcs::SEND_MAIL, mail).await.recover_mail()
     }
 }
 
@@ -57,30 +57,14 @@ impl Sub<ChatName> {
     ) -> anyhow::Result<()> {
         debug_assert_eq!(proof.context, self.topic);
         let msg = (&proof, member, config);
-        self.sub.request(rpcs::ADD_MEMBER, self.topic, msg).await.map_err(Into::into)
-    }
-
-    pub async fn kick_member(
-        &mut self,
-        identity: Identity,
-        ctx: impl RequestContext,
-    ) -> anyhow::Result<()> {
-        let from = self.topic;
-        let proof = ctx.try_with_vault(|v| {
-            let chat_meta =
-                v.chats.get_mut(&from).with_context(|| format!("could not find '{from}'"))?;
-            let action_no = &mut chat_meta.action_no;
-            let proof = ctx.with_keys(|k| Proof::new(&k.sign, action_no, from, OsRng))?;
-            Ok(proof)
-        })?;
-        self.sub.request(rpcs::KICK_MEMBER, from, (proof, identity)).await.map_err(Into::into)
+        self.request(rpcs::ADD_MEMBER, msg).await.map_err(Into::into)
     }
 
     pub async fn fetch_messages(
         &mut self,
         cursor: Cursor,
     ) -> anyhow::Result<(Cursor, ReminderOwned)> {
-        self.sub.request(rpcs::FETCH_MESSAGES, self.topic, cursor).await.map_err(Into::into)
+        self.request(rpcs::FETCH_MESSAGES, cursor).await.map_err(Into::into)
     }
 
     pub async fn fetch_members(
@@ -88,7 +72,7 @@ impl Sub<ChatName> {
         from: Identity,
         limit: u32,
     ) -> anyhow::Result<Vec<(Identity, Member)>> {
-        self.sub.request(rpcs::FETCH_MEMBERS, self.topic, (from, limit)).await
+        self.request(rpcs::FETCH_MEMBERS, (from, limit)).await
     }
 
     pub async fn fetch_my_member(&mut self, me: Identity) -> anyhow::Result<Member> {
@@ -101,11 +85,11 @@ impl Sub<ChatName> {
     }
 
     async fn create_chat(&mut self, me: Identity) -> anyhow::Result<()> {
-        self.sub.request(rpcs::CREATE_CHAT, self.topic, me).await
+        self.request(rpcs::CREATE_CHAT, me).await
     }
 
     async fn send_message<'a>(&'a mut self, proof: Proof<Reminder<'_>>) -> anyhow::Result<()> {
-        self.sub.request(rpcs::SEND_MESSAGE, self.topic, proof).await
+        self.request(rpcs::SEND_MESSAGE, proof).await
     }
 
     // pub async fn request_storage_stream(
@@ -310,6 +294,18 @@ pub trait RequestContext: Sized {
     async fn set_theme(&self, theme: Theme) -> anyhow::Result<()> {
         self.with_vault(|v| v.theme = theme)?;
         self.save_vault_components([VaultComponentId::Theme]).await
+    }
+
+    async fn kick_member(&self, from: ChatName, identity: Identity) -> anyhow::Result<()> {
+        let proof = self.try_with_vault(|v| {
+            let chat_meta =
+                v.chats.get_mut(&from).with_context(|| format!("could not find '{from}'"))?;
+            let action_no = &mut chat_meta.action_no;
+            let proof = self.with_keys(|k| Proof::new(&k.sign, action_no, from, OsRng))?;
+            Ok(proof)
+        })?;
+        let mut sub = self.subscription_for(from).await?;
+        sub.request(rpcs::KICK_MEMBER, (proof, identity)).await.map_err(Into::into)
     }
 
     async fn send_frined_message(&self, name: UserName, content: String) -> anyhow::Result<()> {

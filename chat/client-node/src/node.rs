@@ -392,6 +392,16 @@ impl Sub<Identity> {
     }
 }
 
+impl<T: Into<Topic> + Clone> Sub<T> {
+    pub async fn request<R: DecodeOwned>(
+        &mut self,
+        read_mail: u8,
+        request: impl Encode,
+    ) -> Result<R, anyhow::Error> {
+        self.sub.request(read_mail, self.topic.clone(), request).await
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RawSub {
     requests: mpsc::Sender<SubscriptionRequest>,

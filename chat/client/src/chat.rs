@@ -111,12 +111,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
         match cursor.get_untracked() {
             Cursor::Normal(mut cursor) => {
-                for message in state
-                    .subscription_for(chat)
-                    .await?
-                    .fetch_and_decrypt_messages(&mut cursor, state)
-                    .await?
-                {
+                for message in state.fetch_and_decrypt_messages(chat, &mut cursor).await? {
                     prepend_message(message.sender, message.content);
                 }
                 set_red_all_messages(cursor == chat_spec::Cursor::INIT);
@@ -365,7 +360,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         handled_spawn_local("sending normal message", async move {
             let content = RawChatMessage { sender: my_name, content, identity: Default::default() }
                 .to_bytes();
-            state.subscription_for(chat).await?.send_encrypted_message(content, state).await?;
+            state.send_encrypted_message(chat, content).await?;
             clear_input();
             Ok(())
         });
@@ -639,8 +634,7 @@ fn editable_member(
             crate::get_value(action_cooldown_ms).parse::<u32>().context("parsing cooldown")?;
         let updated_member = Member { rank, permissions, action_cooldown_ms, ..m };
 
-        state.subscription_for(name).await?.update_member(identity, updated_member, state).await?;
-
+        state.update_member(name, identity, updated_member).await?;
         cancel();
 
         Ok(())

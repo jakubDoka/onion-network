@@ -152,8 +152,7 @@ fn App() -> impl IntoView {
                     .inspect_err(|_| navigate_to("/login"))?;
 
             handled_spawn_local("reading mail", async move {
-                let mut profile_sub = state.subscription_for(identity).await?;
-                let ReminderOwned(list) = profile_sub.read_mail(state).await?;
+                let ReminderOwned(list) = state.read_mail().await?;
                 let mut new_messages = Vec::new();
                 let mut vault_updates = Vec::new();
                 for mail in chat_spec::unpack_mail(&list) {
@@ -166,7 +165,7 @@ fn App() -> impl IntoView {
                 db::save_messages(&new_messages).await?;
                 vault_updates.sort_unstable();
                 vault_updates.dedup();
-                profile_sub.save_vault_components(vault_updates, &state).await
+                state.save_vault_components(vault_updates).await
             });
 
             let listen = async move {
@@ -180,7 +179,7 @@ fn App() -> impl IntoView {
                         let task = async {
                             handle_mail(mail, &mut new_messages, &mut vault_updates, state).await?;
                             db::save_messages(&new_messages).await?;
-                            profile_sub.save_vault_components(vault_updates.drain(..), &state).await
+                            state.save_vault_components(vault_updates.drain(..)).await
                         };
                         handle_error(task.await);
                         new_messages.clear();

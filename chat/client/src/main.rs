@@ -17,7 +17,7 @@ use {
     chain_api::Nonce,
     chat_client_node::{
         encode_direct_chat_name, BootPhase, FriendMessage, MailVariants, Node, NodeHandle,
-        RequestContext, Sub, UserKeys, Vault, VaultComponentId,
+        RequestContext, Sub, UserKeys, Vault, VaultKey,
     },
     chat_spec::{ChatName, Topic},
     codec::{Decode, ReminderOwned},
@@ -120,7 +120,7 @@ fn App() -> impl IntoView {
     async fn handle_mail(
         mail: MailVariants,
         new_messages: &mut Vec<db::Message>,
-        vault_updates: &mut Vec<VaultComponentId>,
+        vault_updates: &mut Vec<VaultKey>,
         state: State,
     ) -> Result<()> {
         let mut messages = Vec::new();

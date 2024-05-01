@@ -110,7 +110,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
         match cursor.get_untracked() {
             Cursor::Normal(mut cursor) => {
-                for message in state.fetch_and_decrypt_messages(chat, &mut cursor).await? {
+                for message in state.fetch_messages(chat, &mut cursor).await? {
                     prepend_message(message.sender, message.content);
                 }
                 set_red_all_messages(cursor == chat_spec::Cursor::INIT);
@@ -131,20 +131,12 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     });
 
     let handle_event = move |event: ChatEvent, secret: SharedSecret| match event {
-        ChatEvent::Message(sender, ReminderOwned(mut message)) => {
+        ChatEvent::Message(sender, ReminderOwned(message)) => {
             _ = sender; // TODO: verify this matches with the username
 
-            let Some(message) = crypto::decrypt(&mut message, secret) else {
-                log::warn!("message cannot be decrypted: {:?} {:?}", message, secret);
-                return;
-            };
-
-            let Ok(msg) = String::from_utf8(message.to_vec()) else {
-                log::warn!("message cannot be decoded: {:?}", message);
-                return;
-            };
-
             handled_spawn_local("appending message", async move {
+                let message = chain_api::decrypt(message, secret)?;
+                let msg = String::from_utf8(message)?;
                 let client = state.with_keys(UserKeys::chain_client)?.await?;
                 append_message(client.fetch_username(sender).await?, msg);
                 Ok(())
@@ -357,7 +349,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
     let send_normal_message = move |chat, content: String| {
         handled_spawn_local("sending normal message", async move {
-            state.send_encrypted_message(chat, content.into_bytes()).await?;
+            state.send_message(chat, content).await?;
             clear_input();
             Ok(())
         });

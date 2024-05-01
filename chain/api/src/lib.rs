@@ -475,6 +475,28 @@ pub fn encrypt(mut data: Vec<u8>, secret: SharedSecret) -> Vec<u8> {
     data
 }
 
+pub fn decrypt(mut data: Vec<u8>, secret: SharedSecret) -> Result<Vec<u8>, DecryptError> {
+    match crypto::decrypt(&mut data, secret) {
+        Some(slc) => {
+            let len = slc.len();
+            data.truncate(len);
+            Ok(data)
+        }
+        None => Err(DecryptError(data)),
+    }
+}
+
+#[derive(Debug)]
+pub struct DecryptError(Vec<u8>);
+
+impl std::fmt::Display for DecryptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed to decrypt data: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for DecryptError {}
+
 fn unwrap_chat_staker(e: chain_types::Event) -> Option<ChatStakeEvent> {
     match e {
         chain_types::Event::ChatStaker(e) => Some(e),

@@ -123,10 +123,10 @@ impl Context {
     pub async fn send_friend_message_to(
         &mut self,
         friend_username: &str,
-        message: &str,
+        message: String,
     ) -> Result<(), Error> {
         let name = parse_username(friend_username)?;
-        Ok(self.send_frined_message(name, message.to_string()).await?)
+        Ok(self.send_frined_message(name, message).await?)
     }
 }
 
@@ -206,8 +206,8 @@ impl ChatSubscription {
 
     /// @throw
     #[wasm_bindgen]
-    pub async fn send_message(&mut self, message: &str) -> Result<(), Error> {
-        Ok(self.cx.send_encrypted_message(self.target, message.to_string().into_bytes()).await?)
+    pub async fn send_message(&mut self, message: String) -> Result<(), Error> {
+        Ok(self.cx.send_message(self.target, message).await?)
     }
 
     /// @throw
@@ -215,7 +215,7 @@ impl ChatSubscription {
     pub async fn fetch_messages(&mut self, name: &str, cursor: Cursor) -> Result<Messages, Error> {
         let chat = parse_chat_name(name)?;
         let mut c = cursor.inner.get();
-        let messages = self.cx.fetch_and_decrypt_messages(chat, &mut c).await?;
+        let messages = self.cx.fetch_messages(chat, &mut c).await?;
         cursor.inner.set(c);
         Ok(Messages { list: messages.into_iter().map(Into::into).collect() })
     }
@@ -227,21 +227,12 @@ impl ChatSubscription {
             let event = match event {
                 chat_spec::ChatEvent::Message(id, ReminderOwned(message)) => {
                     let msg = "chat was deleted while subscription is active";
-                    let secret = self.cx.vault.borrow().chats.get(&self.target).ok_or(msg)?.secret;
-                    let mut message = message.to_owned();
-                    let Some(message) = crypto::decrypt(&mut message, secret) else {
-                        log::warn!("failed to decrypt message: {:?}", message);
-                        continue;
-                    };
-
-                    let Ok(content) = String::from_utf8(message.to_vec()) else {
-                        log::warn!("invalid message: {:?}", message);
-                        continue;
-                    };
-
+                    let secret =
+                        self.cx.vault.borrow().chats.get(&self.target).context(msg)?.secret;
+                    let message = chain_api::decrypt(message.to_owned(), secret)?;
+                    let content = String::from_utf8(message).context("validating message utf8")?;
                     let name =
                         self.cx.keys.chain_client().await?.fetch_username(id).await?.to_string();
-
                     ChatEvent { message: Some(Message { name, id, content }), ..Default::default() }
                 }
                 chat_spec::ChatEvent::Member(id, config) => ChatEvent {
@@ -456,21 +447,9 @@ impl UserKeys {
 
 pub struct Error(anyhow::Error);
 
-impl From<chain_api::Error> for Error {
-    fn from(e: chain_api::Error) -> Self {
+impl<T: Into<anyhow::Error>> From<T> for Error {
+    fn from(e: T) -> Self {
         Self(e.into())
-    }
-}
-
-impl From<anyhow::Error> for Error {
-    fn from(e: anyhow::Error) -> Self {
-        Self(e)
-    }
-}
-
-impl<'a> From<&'a str> for Error {
-    fn from(s: &'a str) -> Self {
-        Self(anyhow::anyhow!("{s}"))
     }
 }
 

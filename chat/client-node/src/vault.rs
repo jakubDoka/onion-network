@@ -19,11 +19,11 @@ pub struct VaultValue(Vec<u8>);
 #[derive(Codec)]
 pub struct VaultChanges(BTreeSet<crypto::Hash>);
 
+#[derive(Codec)]
+pub struct VaultVersion(Nonce);
+
 #[derive(Codec, Default)]
-pub struct VaultHeader {
-    pub version: Nonce,
-    pub keys: BTreeSet<crypto::Hash>,
-}
+pub struct VaultKeys(BTreeSet<crypto::Hash>);
 
 pub struct Vault {
     pub chats: HashMap<ChatName, ChatMeta>,
@@ -121,13 +121,13 @@ impl Vault {
     }
 
     pub fn values_from_cache(version: Nonce) -> Option<BTreeMap<crypto::Hash, Vec<u8>>> {
-        let VaultHeader { version: v, keys } = Cache::get([])?;
-
-        if v != version {
+        let VaultVersion(v) = Cache::get([])?;
+        if v < version {
             log::warn!("version mismatch");
             return None;
         }
 
+        let VaultKeys(keys) = Cache::get([])?;
         let values = keys
             .iter()
             .filter_map(|k| Cache::get(k).map(|VaultValue(v)| (*k, v)))
@@ -164,14 +164,11 @@ impl Vault {
         self.changed_keys.clear();
         self.last_update = instant::Instant::now();
         Cache::insert([], &VaultChanges(self.changed_keys.clone()));
-        Cache::insert([], &VaultHeader {
-            version,
-            keys: self.raw.values.keys().cloned().collect(),
-        });
+        Cache::insert([], &VaultVersion(version));
     }
 
-    pub fn update(&mut self, id: VaultComponentId, key: SharedSecret) -> Option<()> {
-        use VaultComponentId as VCI;
+    pub fn update(&mut self, id: VaultKey, key: SharedSecret) -> Option<()> {
+        use VaultKey as VCI;
         let value = match id {
             VCI::Chats => self.chats.to_bytes(),
             VCI::Theme => self.theme.to_bytes(),
@@ -202,9 +199,7 @@ impl Vault {
         let value = VaultValue(value);
         Cache::insert(hash, &value);
         if self.raw.values.insert(hash, value.0).is_none() {
-            let mut header = Cache::get::<VaultHeader>([]).unwrap_or_default();
-            header.keys.insert(hash);
-            Cache::insert([], &header);
+            Cache::insert([], &VaultKeys(self.raw.values.keys().copied().collect()));
         }
         self.raw.recompute();
 
@@ -217,7 +212,7 @@ impl Vault {
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum VaultComponentId {
+pub enum VaultKey {
     Chats,
     Friend(UserName),
     FriendNames,

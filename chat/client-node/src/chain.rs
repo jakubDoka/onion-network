@@ -1,6 +1,6 @@
 pub use chain_api::Client;
 use {
-    crate::{VaultChanges, VaultHeader, VaultValue},
+    crate::{VaultChanges, VaultKeys, VaultValue, VaultVersion},
     anyhow::Context,
     base64::Engine,
     chain_api::{Nonce, Profile},
@@ -113,8 +113,6 @@ impl Cache {
     }
 
     fn get_low<T: Codec>(key: crypto::Hash) -> Option<T> {
-        log::info!("getting from cache: {} {}", encode_base64(&key), std::any::type_name::<T>());
-
         if let Some(entry) = INSTANCE.with(|i| i.borrow().hot_entries.get(&key).cloned())
             && let Some(res) = T::decode(&mut entry.as_slice())
         {
@@ -139,11 +137,6 @@ impl Cache {
         if let Some(win) = web_sys::window()
             && let Some(local_storage) = win.local_storage().unwrap()
         {
-            log::info!(
-                "inserting into cache: {} {}",
-                encode_base64(&key),
-                std::any::type_name::<T>()
-            );
             local_storage.set(&encode_base64(&key), &encode_base64(&value)).unwrap();
         }
     }
@@ -163,8 +156,9 @@ impl_cached! {
     crypto::enc::PublicKey,
     UserName,
     VaultValue,
-    VaultHeader,
+    VaultKeys,
     VaultChanges,
+    VaultVersion,
     Identity,
 }
 

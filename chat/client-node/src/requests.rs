@@ -1,7 +1,7 @@
 use {
     crate::{
-        Cache, ChainClientExt, ChatMeta, DowncastNonce, FriendMeta, RawChatMessage, RecoverMail,
-        Sub, Theme, UserKeys, Vault, VaultComponentId,
+        Cache, ChainClientExt, ChatMeta, FriendMeta, RawChatMessage, RecoverMail, Sub, Theme,
+        UserKeys, Vault, VaultKey,
     },
     anyhow::Context,
     chain_api::Encrypted,
@@ -12,7 +12,7 @@ use {
         proof::{Nonce, Proof},
     },
     double_ratchet::{DoubleRatchet, MessageHeader},
-    libp2p::futures::future::TryJoinAll,
+    libp2p::futures::future::JoinAll,
     rand::rngs::OsRng,
     std::{collections::HashSet, future::Future},
 };
@@ -298,7 +298,7 @@ pub trait RequestContext: Sized {
 
     async fn set_theme(&self, theme: Theme) -> anyhow::Result<()> {
         self.with_vault(|v| v.theme = theme)?;
-        self.save_vault_components([VaultComponentId::Theme]).await
+        self.save_vault_components([VaultKey::Theme]).await
     }
 
     async fn send_frined_message(&self, name: UserName, content: String) -> anyhow::Result<()> {
@@ -312,7 +312,7 @@ pub trait RequestContext: Sized {
         let mail = MailVariants::FriendMessage { header, session, content };
         self.subscription_for(frined.identity).await?.send_mail(mail).await?;
         self.with_vault(|v| _ = v.friends.insert(name, frined))?;
-        self.save_vault_components([VaultComponentId::Friend(name)]).await?;
+        self.save_vault_components([VaultKey::Friend(name)]).await?;
 
         Ok(())
     }
@@ -326,7 +326,7 @@ pub trait RequestContext: Sized {
 
     async fn save_vault_components(
         &self,
-        id: impl IntoIterator<Item = VaultComponentId>,
+        id: impl IntoIterator<Item = VaultKey>,
     ) -> anyhow::Result<()> {
         let key = self.with_keys(|k| k.vault)?;
         let chnages = self.with_vault(|v| {
@@ -350,7 +350,7 @@ pub trait RequestContext: Sized {
         let my_id = self.with_keys(UserKeys::identity)?;
         self.subscription_for(name).await?.create_chat(my_id).await?;
         self.with_vault(|v| v.chats.insert(name, ChatMeta::new()))?;
-        self.save_vault_components([VaultComponentId::Chats]).await.context("saving vault")?;
+        self.save_vault_components([VaultKey::Chats]).await.context("saving vault")?;
         Ok(())
     }
 
@@ -423,30 +423,21 @@ pub trait RequestContext: Sized {
         let friend = FriendMeta { dr, identity, id };
         self.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name))?;
         self.with_vault(|v| v.friends.insert(name, friend))?;
-        let changes = [VaultComponentId::Friend(name), VaultComponentId::FriendNames];
-        self.save_vault_components(changes).await?;
+        self.save_vault_components([VaultKey::Friend(name), VaultKey::FriendNames]).await?;
 
         Ok(())
     }
 
-    async fn send_encrypted_message(&self, name: ChatName, message: Vec<u8>) -> anyhow::Result<()> {
+    async fn send_message(&self, name: ChatName, message: String) -> anyhow::Result<()> {
         let mut sub = self.subscription_for(name).await?;
         let proof = self.with_chat_and_keys(name, |c, k| {
-            let msg = ReminderOwned(chain_api::encrypt(message, c.secret));
+            let msg = ReminderOwned(chain_api::encrypt(message.into_bytes(), c.secret));
             Proof::new(&k.sign, &mut c.action_no, msg, OsRng)
         })?;
-        let nonce = match sub.send_message(&proof).await.downcast_nonce()? {
-            Err(nonce) => nonce,
-            Ok(r) => return Ok(r),
-        };
-        let proof = self.with_chat_and_keys(name, |c, k| {
-            c.action_no = nonce;
-            Proof::new(&k.sign, &mut { nonce }, proof.context, OsRng)
-        })?;
-        sub.send_message(&proof).await.map_err(Into::into)
+        sub.send_message(&proof).await
     }
 
-    async fn fetch_and_decrypt_messages(
+    async fn fetch_messages(
         &self,
         name: ChatName,
         cursor: &mut Cursor,
@@ -460,17 +451,19 @@ pub trait RequestContext: Sized {
             .map(|message| async move {
                 let chat_spec::Message { sender: identity, content, .. } =
                     chat_spec::Message::decode(&mut &message[..]).context("invalid message")?;
-                let mut content = content.0.to_owned();
-                let content =
-                    crypto::decrypt(&mut content, chat_meta.secret).context("decrypt content")?;
+                let content = chain_api::decrypt(content.0.to_owned(), chat_meta.secret)
+                    .context("decrypt content")?;
                 let client = self.with_keys(|k| k.chain_client())?.await?;
                 let sender = client.fetch_username(identity).await?;
-                String::from_utf8(content.to_vec())
+                String::from_utf8(content)
                     .map(|content| RawChatMessage { identity, sender, content })
                     .context("invalid message")
             })
-            .collect::<TryJoinAll<_>>()
-            .await?)
+            .collect::<JoinAll<_>>()
+            .await
+            .into_iter()
+            .filter_map(|r| r.inspect_err(|e| log::warn!("decripting chat message: {:?}", e)).ok())
+            .collect())
     }
 
     async fn update_member(
@@ -564,7 +557,7 @@ impl MailVariants {
     pub async fn handle(
         self,
         ctx: &impl RequestContext,
-        updates: &mut Vec<VaultComponentId>,
+        updates: &mut Vec<VaultKey>,
         messages: &mut Vec<(UserName, FriendMessage)>,
     ) -> anyhow::Result<()> {
         match self {
@@ -573,7 +566,7 @@ impl MailVariants {
                     .with_keys(|k| k.enc.decapsulate_choosen(&cp))?
                     .context("failed to decapsulate invite")?;
                 ctx.with_vault(|v| v.chats.insert(chat, ChatMeta::from_secret(secret)))?;
-                updates.push(VaultComponentId::Chats);
+                updates.push(VaultKey::Chats);
             }
             MailVariants::FriendRequest { cp, mut payload } => {
                 let secret = ctx
@@ -584,8 +577,8 @@ impl MailVariants {
                     payload.decrypt(secret).context("failed to decrypt frined request")?;
 
                 let (dr, id) = DoubleRatchet::recipient(secret, init, OsRng);
-                updates.push(VaultComponentId::Friend(username));
-                updates.push(VaultComponentId::FriendNames);
+                updates.push(VaultKey::Friend(username));
+                updates.push(VaultKey::FriendNames);
 
                 let friend = FriendMeta { dr, identity, id };
                 ctx.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), username))?;
@@ -608,7 +601,7 @@ impl MailVariants {
                     Ok((nm, message))
                 })?;
 
-                updates.push(VaultComponentId::Friend(name));
+                updates.push(VaultKey::Friend(name));
                 messages.push(message);
             }
         }

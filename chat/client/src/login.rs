@@ -44,7 +44,7 @@ fn form(state: State, register: bool) -> impl IntoView {
             if account_id != prev_account_id.get_untracked() {
                 let msg = format!(
                     "your hot wallet adress is {account_id} \
-                    transfere funds here to pay for registration\
+                    transfere funds here to pay for registration \
                     (TODO: hint amount)"
                 );
                 hint.get_untracked().unwrap().set_text_content(Some(&msg));

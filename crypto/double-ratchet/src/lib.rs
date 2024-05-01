@@ -14,7 +14,7 @@ use {
 };
 
 const MAX_KEPT_MISSING_MESSAGES: usize = 5;
-const KYBER_PERIOD: u32 = 3;
+const KYBER_PERIOD: u32 = 35;
 const SUB_CONSTANT: SharedSecret = [0u8; 32];
 
 type SharedSecret = [u8; 32];
@@ -425,7 +425,7 @@ mod test {
             std::mem::swap(&mut alice, &mut bob);
         }
 
-        for i in 1..10 {
+        for i in 1..100 {
             for _ in 0..i {
                 messages.push(alice.send());
             }

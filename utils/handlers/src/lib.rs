@@ -167,12 +167,7 @@ impl<'a, T: Decode<'a> + Sync, S: Stream> FromStream<S> for BorDec<'a, T> {
 
 pub trait Stream = AsyncRead + AsyncWrite + Unpin + Send + 'static;
 
-pub trait Handler<C, S, A, B>: Sized + Clone + Send + Sync + 'static
-where
-    S: Stream,
-    A: FromContext<C>,
-    B: FromStream<S>,
-{
+pub trait Handler<C, S, A, B>: Sized + Clone + Send + Sync + 'static {
     type Future: std::future::Future + Send;
 
     fn call(self, args: A, stream: B) -> Self::Future;
@@ -186,6 +181,9 @@ where
     ) -> impl std::future::Future<Output = HandlerRet<S>> + Send + 'static
     where
         <Self::Future as std::future::Future>::Output: Encode + Send,
+        S: Stream,
+        A: FromContext<C>,
+        B: FromStream<S>,
     {
         let args = A::from_context(context);
 
@@ -216,9 +214,6 @@ macro_rules! impl_handler {
         where
             F: FnOnce($($ty,)* $last) -> Fut + Send + 'static + Clone + Sync,
             Fut: std::future::Future + Send,
-            S: Stream,
-            $($ty: FromContext<Z> + Send,)*
-            $last: FromStream<S> + Send,
         {
             type Future = Fut;
 

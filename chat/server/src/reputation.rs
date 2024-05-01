@@ -39,10 +39,8 @@ impl<H, F, C, S, A, B, O> handlers::Handler<C, S, (Origin, A), B> for Rated<H, F
 where
     H: handlers::Handler<C, S, A, B>,
     H::Future: Future<Output = Result<O, ChatError>>,
-    S: handlers::Stream,
-    A: handlers::FromContext<C>,
-    (Origin, A): handlers::FromContext<C>,
-    B: handlers::FromStream<S>,
+    B: Send,
+    A: Send,
     F: Clone + 'static + Send + Sync + FnOnce(ChatError) -> i64,
 {
     type Future = impl Future<Output = <H::Future as Future>::Output> + Send;

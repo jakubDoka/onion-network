@@ -505,6 +505,7 @@ impl StreamCache {
 
 unsafe impl Sync for StreamCache {}
 
+// TODO: improve recovery mechanism
 // TODO: switch to lmdb
 // TODO: remove recovery locks, ommit response instead
 pub struct OwnedContext {
@@ -665,12 +666,15 @@ impl OwnedContext {
     }
 
     fn get_others(&self, topic: impl Into<Topic>) -> Option<FullReplGroup> {
+        self.get_others_for(topic, self.local_peer_id)
+    }
+
+    fn get_others_for(&self, topic: impl Into<Topic>, id: NodeIdentity) -> Option<FullReplGroup> {
         let topic = topic.into();
         let mut others =
             self.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
-        others.retain(|peer| peer != &self.local_peer_id.into());
+        others.retain(|peer| peer != &id.into());
         if others.is_full() {
-            log::error!("we tried to replicate on group where we dont belong");
             return None;
         }
         Some(others)

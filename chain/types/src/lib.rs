@@ -23,6 +23,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
         path = "pallet_node_staker::pallet::Stake",
         derive = "Debug, Clone, PartialEq, Eq, PartialOrd, Ord"
     ),
+    derive_for_type(path = "pallet_node_staker::pallet::Event", derive = "Clone, Copy"),
     derive_for_type(
         path = "pallet_node_staker::pallet::NodeAddress",
         derive = "Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash"

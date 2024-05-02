@@ -225,7 +225,7 @@ pub async fn timeout<F: Future>(duration: Duration, f: F) -> Option<F::Output> {
 
 pub async fn send_request<R: DecodeOwned>(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
-    id: u8,
+    id: Prefix,
     topic: impl Into<Topic>,
     req: impl Encode,
 ) -> anyhow::Result<R> {
@@ -240,7 +240,7 @@ pub async fn send_request<R: DecodeOwned>(
 
 pub async fn send_request_low<R: DecodeOwned>(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
-    id: u8,
+    id: Prefix,
     topic: impl Into<Topic>,
     req: impl Encode,
 ) -> io::Result<R> {

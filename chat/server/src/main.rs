@@ -23,7 +23,7 @@ use {
     arrayvec::ArrayVec,
     chain_api::{ChatStakeEvent, NodeIdentity, NodeKeys, NodeVec, StakeEvents},
     chat_spec::{
-        ChatError, ChatName, Identity, ReplVec, RequestHeader, ResponseHeader, Topic,
+        ChatError, ChatName, Identity, Prefix, ReplVec, RequestHeader, ResponseHeader, Topic,
         REPLICATION_FACTOR,
     },
     clap::Parser,
@@ -450,7 +450,7 @@ async fn run_client(
 
         if !repl_rgoup.contains(&cx.local_peer_id.into()) {
             log::warn!(
-                "peer {path_id:?} tried to access {topic:?} but it is not in the replication group, (prefix: {})",
+                "peer {path_id:?} tried to access {topic:?} but it is not in the replication group, (prefix: {:?})",
                 header.prefix,
             );
             return Err(io::ErrorKind::InvalidInput.into());
@@ -468,7 +468,7 @@ async fn run_client(
             .await
             .ok_or(io::ErrorKind::PermissionDenied)
             .inspect_err(|_| {
-                log::warn!("user accessed prefix '{}' that us not recognised", header.prefix)
+                log::warn!("user accessed prefix '{:?}' that us not recognised", header.prefix)
             })??
             .ok_or(io::ErrorKind::ConnectionAborted.into())
     }
@@ -591,7 +591,7 @@ impl OwnedContext {
         &self,
         topic: impl Into<Topic>,
         peer: NodeIdentity,
-        send_mail: u8,
+        send_mail: Prefix,
         body: impl Encode,
     ) -> Result<R, ChatError> {
         let topic = topic.into();
@@ -624,7 +624,7 @@ impl OwnedContext {
     async fn repl_rpc<R: DecodeOwned>(
         &self,
         topic: impl Into<Topic>,
-        id: u8,
+        id: Prefix,
         body: impl Encode,
     ) -> Result<ReplVec<(NodeIdentity, R)>, ChatError> {
         self.repl_rpc_low(topic, id, &body.to_bytes()).await
@@ -633,7 +633,7 @@ impl OwnedContext {
     async fn repl_rpc_low<R: DecodeOwned>(
         &self,
         topic: impl Into<Topic>,
-        id: u8,
+        id: Prefix,
         msg: &[u8],
     ) -> Result<ReplVec<(NodeIdentity, R)>, ChatError> {
         let topic = topic.into();

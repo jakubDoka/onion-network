@@ -80,7 +80,8 @@ impl Handle {
         }
 
         path.push(MAILBOX_PATH);
-        let mailbox = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        let mut mailbox = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        mailbox.seek(std::io::SeekFrom::End(0))?;
         path.pop();
 
         path.push(ROOT_PATH);
@@ -185,6 +186,7 @@ impl Handle {
     pub fn read_mail(&self) -> Result<Vec<u8>, ChatError> {
         let mut buf = Vec::new();
         let mut mailbox = self.mailbox.lock().unwrap();
+        mailbox.seek(std::io::SeekFrom::Start(0))?;
         mailbox.read_to_end(&mut buf)?;
         mailbox.set_len(0)?;
         Ok(buf)
@@ -241,8 +243,11 @@ impl Handle {
     }
 
     pub fn append_mail(&self, mail: &[u8]) -> Result<(), ChatError> {
+        handlers::ensure!(!mail.is_empty(), ChatError::PleaseDont);
         let mut mailbox = self.mailbox.lock().unwrap();
-        mailbox.seek(std::io::SeekFrom::End(0))?;
+        let next_len = mailbox.metadata()?.len() as usize + mail.len();
+        handlers::ensure!(next_len <= chat_spec::MAIL_BOX_CAP, ChatError::MailboxFull);
+        mailbox.write_all(&(mail.len() as u16).to_be_bytes())?;
         mailbox.write_all(mail)?;
         Ok(())
     }

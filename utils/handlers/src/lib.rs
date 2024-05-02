@@ -219,8 +219,8 @@ pub type HandlerRet<S> = io::Result<Option<S>>;
 
 #[macro_export]
 macro_rules! router {
-    ($vis:vis $name:ident($state:ty, $stream:ty): $($id:pat => $endpoint:expr;)*) => {
-        $vis async fn $name(id: CallId, prefix: u8, len: usize, mut context: $state, stream: $stream) -> Option<$crate::HandlerRet<$stream>>
+    ($vis:vis $name:ident($prefix:ty, $state:ty, $stream:ty): $($id:pat => $endpoint:expr;)*) => {
+        $vis async fn $name(id: CallId, prefix: $prefix, len: usize, mut context: $state, stream: $stream) -> Option<$crate::HandlerRet<$stream>>
         {
             Some(match prefix {
                 $($id => $crate::Handler::handle($endpoint, id, len, &mut context, stream).await,)*

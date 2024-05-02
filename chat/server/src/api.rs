@@ -2,7 +2,7 @@ use {
     crate::{rate_map, reputation::Rated, Context, OnlineLocation},
     chain_api::NodeIdentity,
     chat_spec::{
-        rpcs, ChatError, ChatName, GroupVec, Identity, ReplVec, Topic, REPLICATION_FACTOR,
+        rpcs, ChatError, ChatName, GroupVec, Identity, Prefix, ReplVec, Topic, REPLICATION_FACTOR,
     },
     codec::{DecodeOwned, Encode},
     dht::U256,
@@ -19,7 +19,6 @@ pub mod profile;
 type Result<T, E = ChatError> = std::result::Result<T, E>;
 pub type ReplGroup = ReplVec<U256>;
 pub type FullReplGroup = GroupVec<U256>;
-pub type Prefix = u8;
 pub type Origin = PeerId;
 
 pub async fn subscribe(
@@ -58,7 +57,7 @@ pub async fn unsubscribe(cx: Context, topic: Topic, user: PathId, _: ()) -> Resu
     }
 }
 
-handlers::router! { pub client_router(State, EncryptedStream):
+handlers::router! { pub client_router(Prefix, State, EncryptedStream):
     rpcs::CREATE_CHAT => chat::create.repld();
     rpcs::ADD_MEMBER => chat::add_member.repld();
     rpcs::KICK_MEMBER => chat::kick_member.repld();
@@ -78,7 +77,7 @@ handlers::router! { pub client_router(State, EncryptedStream):
     rpcs::UNSUBSCRIBE => unsubscribe;
 }
 
-handlers::router! { pub server_router(State, libp2p::Stream):
+handlers::router! { pub server_router(Prefix, State, libp2p::Stream):
     rpcs::CREATE_CHAT => chat::create;
     rpcs::ADD_MEMBER => chat::add_member.restored();
     rpcs::KICK_MEMBER => chat::kick_member.restored();

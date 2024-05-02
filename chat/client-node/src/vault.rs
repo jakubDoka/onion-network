@@ -71,7 +71,6 @@ fn get_encrypted<T: DecodeOwned>(
 ) -> anyhow::Result<T> {
     let VaultValue(v) = Storage::get(key).context("not found")?;
     let v = chain_api::decrypt(v, decryption_key).context("decryption failed")?;
-    log::info!("decrypted: {:?}", v);
     Decode::decode_exact(&v).context("invalid encoding")
 }
 

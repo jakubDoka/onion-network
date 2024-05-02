@@ -311,7 +311,7 @@ type Subs = RefCell<HashMap<NodeIdentity, RawSub>>;
 enum SubscriptionRequest {
     Chat(ChatName, mpsc::Sender<ChatEvent>),
     Profile(Identity, mpsc::Sender<MailVariants>),
-    Request(u8, Topic, Vec<u8>, oneshot::Sender<RawResponse>),
+    Request(Prefix, Topic, Vec<u8>, oneshot::Sender<RawResponse>),
 }
 
 pub enum NodeRequest {
@@ -403,10 +403,10 @@ impl Sub<Identity> {
 impl<T: Into<Topic> + Clone> Sub<T> {
     pub async fn request<R: DecodeOwned>(
         &mut self,
-        read_mail: u8,
+        prefix: Prefix,
         request: impl Encode,
     ) -> Result<R, anyhow::Error> {
-        self.sub.request(read_mail, self.topic.clone(), request).await
+        self.sub.request(prefix, self.topic.clone(), request).await
     }
 }
 
@@ -434,7 +434,7 @@ impl RawSub {
 
     pub async fn request<R: DecodeOwned>(
         &mut self,
-        prefix: u8,
+        prefix: Prefix,
         topic: impl Into<Topic>,
         body: impl Encode,
     ) -> anyhow::Result<R> {
@@ -449,7 +449,7 @@ impl RawSub {
 
     pub async fn request_low<R: DecodeOwned>(
         &mut self,
-        prefix: u8,
+        prefix: Prefix,
         topic: impl Into<Topic>,
         body: impl Encode,
     ) -> anyhow::Result<R> {
@@ -495,8 +495,8 @@ impl RawSub {
                     vec![],
                     RegisteredCall::NewProfileSub(id, tx),
                 ),
-                SubscriptionRequest::Request(prefic, topic, body, tx) => {
-                    (prefic, topic, body, RegisteredCall::Request(tx))
+                SubscriptionRequest::Request(prefix, topic, body, tx) => {
+                    (prefix, topic, body, RegisteredCall::Request(tx))
                 }
             };
 

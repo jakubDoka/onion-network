@@ -19,17 +19,19 @@ use {
 pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
 pub const PROTO_NAME: StreamProtocol = StreamProtocol::new("/orion-den/chat/0.1.0");
 
+pub type Prefix = [u8; 2];
 pub type BlockNumber = u64;
 pub type Identity = crypto::Hash;
 pub type ReplVec<T> = ArrayVec<T, { REPLICATION_FACTOR.get() }>;
 pub type GroupVec<T> = ArrayVec<T, { REPLICATION_FACTOR.get() + 1 }>;
-pub type Mail = crypto::proof::ConstContext<{ rpcs::SEND_MAIL as usize }>;
+pub type Mail = crypto::proof::ConstContext<{ u16::from_be_bytes(rpcs::SEND_MAIL) as usize }>;
 
 mod chat;
 mod profile;
+
 pub mod rpcs {
     macro_rules! rpcs {
-        ($($name:ident;)*) => { $( pub const $name: u8 = ${index(0)}; )* };
+        ($($name:ident;)*) => { $( pub const $name: crate::Prefix = (${index(0)} as u16).to_be_bytes(); )* };
     }
 
     rpcs! {
@@ -122,6 +124,8 @@ pub enum ChatError {
     InvalidResponse,
     #[error("timeout")]
     Timeout,
+    #[error("please don't")]
+    PleaseDont,
     #[error("io error: {0}")]
     Io(io::ErrorKind),
 }
@@ -231,7 +235,7 @@ pub fn advance_nonce(current: &mut Nonce, new: Nonce) -> bool {
 #[repr(packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct RequestHeader {
-    pub prefix: u8,
+    pub prefix: Prefix,
     pub call_id: [u8; 4],
     pub topic: [u8; 32],
     pub len: [u8; 4],

@@ -261,5 +261,5 @@ pub async fn send_request_low<R: DecodeOwned>(
     let header = ResponseHeader::from_array(header);
     let mut buf = vec![0; header.get_len()];
     stream.read_exact(&mut buf).await?;
-    R::decode(&mut buf.as_slice()).ok_or(io::ErrorKind::InvalidData.into())
+    R::decode_exact(&buf).ok_or(io::ErrorKind::InvalidData.into())
 }

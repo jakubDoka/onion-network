@@ -49,24 +49,24 @@ if [ "$PROFILE" = "release" ]; then
 	TARGET_DIR="target/native-optimized"
 fi
 
-ensure_dir tmp
+ensure_dir $TMP_DIR
 
 reset_state() { # reset the port and nonce counters
-	echo 42069 > tmp/port
-	echo 0 > tmp/nonce
+	echo 42069 > $TMP_DIR/port
+	echo 0 > $TMP_DIR/nonce
 }
 
 alloc_port() { # allocate a port for a node
-	PORT=$(cat tmp/port)
+	PORT=$(cat $TMP_DIR/port)
 	PORT=$((PORT + 1))
-	echo $PORT > tmp/port
+	echo $PORT > $TMP_DIR/port
 	echo $((PORT - 1))
 }
 
 alloc_nonce() { # allocate a nonce for a node
-	NONCE=$(cat tmp/nonce)
+	NONCE=$(cat $TMP_DIR/nonce)
 	NONCE=$((NONCE + 1))
-	echo $NONCE > tmp/nonce
+	echo $NONCE > $TMP_DIR/nonce
 	echo $((NONCE - 1))
 }
 
@@ -78,7 +78,7 @@ load_mnemonic() { # <name> - load or generate a mnemonic for a node
 	echo $(cat $FILE_NAME)
 }
 
-cleanup_files() { rm -rf tmp; }
+cleanup_files() { rm -rf $TMP_DIR; }
 generate_falcon() { (cd $FALCON_ROOT && sh transpile.sh || exit 1); }
 
 build_native() { # rebuild the native part of the project (all executables)
@@ -127,7 +127,7 @@ run_nodes() { # <exe> <count> - run nodes of a certain type
 		IDENTITY=$($TARGET_DIR/chain-helper export-identity "$MNEMONIC" | jq -r '.sign')
 		ENC_HAHS=$($TARGET_DIR/chain-helper export-identity "$MNEMONIC" | jq -r '.enc')
 		$TARGET_DIR/chain-helper register-node //Alice $IDENTITY $ENC_HAHS 127.0.0.1:$PORT $CHAIN_NODES \
-			&& $TARGET_DIR/$EXE $PORT $WS_PORT $IDLE_TIMEOUT $RPC_TIMEOUT "$MNEMONIC" \
+			&& $TARGET_DIR/$EXE $PORT $WS_PORT $IDLE_TIMEOUT $RPC_TIMEOUT $STORAGE_DIR "$MNEMONIC" \
 				$CHAIN_NODES > "$TMP_DIR/logs/$EXE/$i.log" 2>&1 &
 	done
 }

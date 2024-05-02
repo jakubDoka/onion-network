@@ -48,7 +48,6 @@ crypto = { path = "crypto/crypto", features = ["codec"] }
 falcon = { path = "crypto/falcon/falcon" }
 opfusk = { path = "crypto/opfusk" }
 double-ratchet = { path = "crypto/double-ratchet" }
-merkle-tree = { path = "crypto/merkle-tree" }
 
 codec-derive = { path = "utils/codec-derive" }
 codec = { path = "utils/codec" }

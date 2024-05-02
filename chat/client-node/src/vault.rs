@@ -1,29 +1,31 @@
 use {
-    crate::Cache,
+    crate::Storage,
+    anyhow::Context,
     chain_api::encrypt,
     chat_spec::*,
     codec::{Codec, Decode, DecodeOwned, Encode},
-    crypto::{decrypt, proof::Nonce},
+    crypto::proof::Nonce,
     double_ratchet::DoubleRatchet,
+    merkle_tree::MerkleTree,
     onion::SharedSecret,
     rand::rngs::OsRng,
-    std::collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    std::collections::{BTreeSet, HashMap, HashSet},
     web_sys::wasm_bindgen::JsValue,
 };
 
 pub type FriendId = SharedSecret;
 
-#[derive(Codec)]
+#[derive(Codec, PartialEq, Eq)]
 pub struct VaultValue(Vec<u8>);
 
-#[derive(Codec)]
-pub struct VaultChanges(BTreeSet<crypto::Hash>);
+#[derive(Codec, Default)]
+pub struct VaultChanges(BTreeSet<VaultKey>);
 
 #[derive(Codec)]
 pub struct VaultVersion(Nonce);
 
 #[derive(Codec, Default)]
-pub struct VaultKeys(BTreeSet<crypto::Hash>);
+pub struct VaultKeys(BTreeSet<VaultKey>);
 
 pub struct Vault {
     pub chats: HashMap<ChatName, ChatMeta>,
@@ -32,8 +34,6 @@ pub struct Vault {
     pub theme: Theme,
     last_update: instant::Instant,
     change_count: usize,
-    changed_keys: BTreeSet<crypto::Hash>,
-    raw: chat_spec::Vault,
 }
 
 impl Default for Vault {
@@ -45,13 +45,6 @@ impl Default for Vault {
             theme: Default::default(),
             last_update: instant::Instant::now(),
             change_count: Default::default(),
-            changed_keys: Default::default(),
-            raw: chat_spec::Vault {
-                values: Default::default(),
-                merkle_tree: Default::default(),
-                sig: unsafe { std::mem::zeroed() },
-                version: Default::default(),
-            },
         }
     }
 }
@@ -75,84 +68,95 @@ fn friends() -> SharedSecret {
 fn get_encrypted<T: DecodeOwned>(
     key: crypto::Hash,
     decryption_key: SharedSecret,
-    values: &BTreeMap<crypto::Hash, Vec<u8>>,
-) -> Option<T> {
-    values
-        .get(&key)
-        .and_then(|v| Decode::decode(&mut &*decrypt(&mut v.to_owned(), decryption_key)?))
+) -> anyhow::Result<T> {
+    let VaultValue(v) = Storage::get(key).context("not found")?;
+    let v = chain_api::decrypt(v, decryption_key).context("decryption failed")?;
+    log::info!("decrypted: {:?}", v);
+    Decode::decode_exact(&v).context("invalid encoding")
 }
 
-fn get_plain<T: DecodeOwned>(
-    key: crypto::Hash,
-    values: &BTreeMap<crypto::Hash, Vec<u8>>,
-) -> Option<T> {
-    values.get(&key).and_then(|v| Decode::decode(&mut v.as_slice()))
+fn get_plain<T: DecodeOwned>(key: crypto::Hash) -> anyhow::Result<T> {
+    let VaultValue(v) = Storage::get(key).context("not found")?;
+    Decode::decode_exact(&v).context("invalid encoding")
 }
 
 impl Vault {
-    pub(crate) fn deserialize(values: BTreeMap<crypto::Hash, Vec<u8>>, key: SharedSecret) -> Self {
-        let friends = get_encrypted::<Vec<(UserName, FriendId)>>(friends(), key, &values)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(name, id)| {
-                get_encrypted(id, key, &values).map(|pk| (name, FriendMeta { id, ..pk }))
-            })
-            .collect::<HashMap<_, _>>();
+    pub fn new(key: SharedSecret) -> Self {
+        Self::repair(key);
+        Self::default()
+    }
 
-        Self {
-            chats: get_encrypted(chats(), key, &values).unwrap_or_default(),
-            theme: get_plain(theme(), &values).unwrap_or_default(),
+    pub fn repair(key: SharedSecret) {
+        fn ensure(key: SharedSecret, id: VaultKey, value: Vec<u8>) {
+            if Storage::ensure(key, &VaultValue(value)) {
+                Storage::update([], |VaultKeys(keys)| _ = keys.insert(id));
+                Storage::update([], |VaultChanges(changes)| _ = changes.insert(id));
+            }
+        }
+
+        ensure(chats(), VaultKey::Chats, encrypt(vec![0], key));
+        ensure(theme(), VaultKey::Theme, Theme::default().to_bytes());
+        ensure(friends(), VaultKey::FriendNames, encrypt(vec![0], key));
+    }
+
+    pub fn from_storage(key: SharedSecret) -> anyhow::Result<Self> {
+        let friends = get_encrypted::<Vec<(UserName, FriendId)>>(friends(), key)
+            .context("loading friends")?
+            .into_iter()
+            .map(|(name, id)| {
+                get_encrypted(id, key)
+                    .map(|pk| (name, FriendMeta { id, ..pk }))
+                    .with_context(|| format!("loading friend'{name}'"))
+            })
+            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+
+        Ok(Self {
+            chats: get_encrypted(chats(), key).context("loading chats")?,
+            theme: get_plain(theme()).context("loading theme")?,
             friend_index: friends.iter().map(|(&n, f)| (f.dr.receiver_hash(), n)).collect(),
             friends,
             last_update: instant::Instant::now(),
             change_count: 0,
-            changed_keys: Cache::get([]).map(|VaultChanges(c)| c).unwrap_or_default(),
-            raw: {
-                let mut raw = chat_spec::Vault {
-                    values,
-                    merkle_tree: Default::default(),
-                    sig: unsafe { std::mem::zeroed() },
-                    version: 0,
-                };
-                raw.recompute();
-                raw
-            },
-        }
+        })
     }
 
-    pub fn values_from_cache(version: Nonce) -> Option<BTreeMap<crypto::Hash, Vec<u8>>> {
-        let VaultVersion(v) = Cache::get([])?;
-        if v < version {
-            log::warn!("version mismatch");
-            return None;
+    pub fn needs_refresh(for_version: Nonce) -> bool {
+        Storage::get([]).map_or(true, |VaultVersion(v)| v < for_version)
+    }
+
+    pub fn refresh(values: Vec<(crypto::Hash, Vec<u8>)>) {
+        for (key, value) in values {
+            Storage::insert(key, &VaultValue(value));
         }
-
-        let VaultKeys(keys) = Cache::get([])?;
-        let values = keys
-            .iter()
-            .filter_map(|k| Cache::get(k).map(|VaultValue(v)| (*k, v)))
-            .collect::<BTreeMap<_, _>>();
-
-        if values.len() != keys.len() {
-            log::warn!("missing keys in cache");
-            return None;
-        }
-
-        Some(values)
     }
 
     pub fn merkle_hash(&self) -> crypto::Hash {
-        *self.raw.merkle_tree.root()
+        let VaultKeys(keys) = Storage::get([]).unwrap_or_default();
+
+        log::info!("keys: {:?}", keys);
+
+        let mut hashes = keys
+            .iter()
+            .filter_map(|k| self.get_key(*k))
+            .filter_map(|k| Storage::get(k).map(|VaultValue(v)| crypto::hash::kv(&k, &v)))
+            .collect::<Vec<_>>();
+        hashes.sort_unstable();
+
+        log::info!("hashes: {:?}", hashes);
+
+        *hashes.into_iter().collect::<MerkleTree<_>>().root()
     }
 
     pub fn changes(&mut self) -> Vec<(crypto::Hash, Vec<u8>)> {
+        let VaultChanges(changes) = Storage::get([]).unwrap_or_default();
         if self.change_count > 40
             || self.last_update.elapsed() > instant::Duration::from_secs(60)
-            || self.changed_keys.len() > 10
+            || changes.len() > 10
         {
-            self.changed_keys
-                .iter()
-                .filter_map(|&k| self.raw.values.get(&k).cloned().map(|v| (k, v)))
+            changes
+                .into_iter()
+                .filter_map(|k| self.get_key(k))
+                .filter_map(|k| Some((k, Storage::get::<VaultValue>(k)?.0)))
                 .collect()
         } else {
             Vec::new()
@@ -161,57 +165,61 @@ impl Vault {
 
     pub fn clear_changes(&mut self, version: Nonce) {
         self.change_count = 0;
-        self.changed_keys.clear();
         self.last_update = instant::Instant::now();
-        Cache::insert([], &VaultChanges(self.changed_keys.clone()));
-        Cache::insert([], &VaultVersion(version));
+        Storage::insert([], &VaultChanges::default());
+        Storage::insert([], &VaultVersion(version));
     }
 
-    pub fn update(&mut self, id: VaultKey, key: SharedSecret) -> Option<()> {
+    pub fn get_repr(&self, id: VaultKey, key: SharedSecret) -> Option<Vec<u8>> {
         use VaultKey as VCI;
-        let value = match id {
+        let repr = match id {
             VCI::Chats => self.chats.to_bytes(),
             VCI::Theme => self.theme.to_bytes(),
-            VCI::Friend(name) => self.friends.get(&name).map(Encode::to_bytes)?,
+            VCI::Friend(name) => self.friends.get(&name)?.to_bytes(),
             VCI::FriendNames => {
-                self.friends.iter().map(|(&n, f)| (n, f.id)).collect::<Vec<_>>().to_bytes()
+                self.friends.iter().map(|(n, f)| (n, f.id)).collect::<Vec<_>>().to_bytes()
             }
         };
 
-        log::info!("updating {:?} with {:?}", id, value);
+        let value = match id {
+            VCI::Theme => repr,
+            _ => encrypt(repr, key),
+        };
 
-        let hash = match id {
+        Some(value)
+    }
+
+    pub fn get_key(&self, id: VaultKey) -> Option<SharedSecret> {
+        use VaultKey as VCI;
+        let key = match id {
             VCI::Chats => chats(),
             VCI::Theme => theme(),
-            VCI::FriendNames => friends(),
             VCI::Friend(name) => self.friends.get(&name).map(|f| f.id)?,
+            VCI::FriendNames => friends(),
         };
 
-        let value = match id {
-            VCI::Theme => value,
-            _ => encrypt(value, key),
-        };
+        Some(key)
+    }
 
-        if self.raw.values.get(&hash) == Some(&value) {
+    pub fn update(&mut self, id: VaultKey, key: SharedSecret) -> Option<()> {
+        let value = VaultValue(self.get_repr(id, key)?);
+        let key = self.get_key(id)?;
+
+        let current: Option<VaultValue> = Storage::get(key);
+        if current.as_ref() == Some(&value) {
             return None;
         }
 
-        let value = VaultValue(value);
-        Cache::insert(hash, &value);
-        if self.raw.values.insert(hash, value.0).is_none() {
-            Cache::insert([], &VaultKeys(self.raw.values.keys().copied().collect()));
-        }
-        self.raw.recompute();
-
+        Storage::insert(key, &value);
+        Storage::update([], |VaultKeys(keys)| _ = keys.insert(id));
+        Storage::update([], |VaultChanges(changes)| _ = changes.insert(id));
         self.change_count += 1;
-        self.changed_keys.insert(hash);
-        Cache::insert([], &VaultChanges(self.changed_keys.clone()));
 
         Some(())
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy, Codec)]
 pub enum VaultKey {
     Chats,
     Friend(UserName),

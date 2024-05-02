@@ -21,6 +21,7 @@ pub type BlockNumber = u64;
 pub type Identity = crypto::Hash;
 pub type ReplVec<T> = ArrayVec<T, { REPLICATION_FACTOR.get() }>;
 pub type GroupVec<T> = ArrayVec<T, { REPLICATION_FACTOR.get() + 1 }>;
+pub type Mail = crypto::proof::ConstContext<{ rpcs::SEND_MAIL as usize }>;
 
 mod chat;
 mod profile;
@@ -61,6 +62,16 @@ pub use {chat::*, profile::*};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Codec, thiserror::Error)]
 pub enum ChatError {
+    #[error("TODO")]
+    Todo,
+    #[error("ISE")]
+    Ise,
+    #[error("ongoing recovery, try again later")]
+    OngoingRecovery,
+    #[error("too many keys")]
+    TooManyKeys,
+    #[error("value too large")]
+    ValueTooLarge,
     #[error("invalid proof")]
     InvalidProof,
     #[error("invalid proof context")]
@@ -116,6 +127,13 @@ pub enum ChatError {
 impl From<io::Error> for ChatError {
     fn from(e: io::Error) -> Self {
         Self::Io(e.kind())
+    }
+}
+
+impl From<anyhow::Error> for ChatError {
+    fn from(e: anyhow::Error) -> Self {
+        log::error!("ISE: {:?}", e);
+        Self::Ise
     }
 }
 
@@ -257,6 +275,3 @@ pub struct InternalRequestHeader {
     pub prefix: u8,
     pub topic: [u8; 32],
 }
-
-#[derive(Clone, Copy, Codec, Debug)]
-pub struct Mail;

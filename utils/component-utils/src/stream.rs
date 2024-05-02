@@ -69,7 +69,7 @@ impl PacketReader {
     ) -> Result<T, io::Error> {
         poll_fn(|cx| {
             self.poll_packet(cx, stream).map(|v| {
-                v.and_then(|v| T::decode(&mut &*v).ok_or(io::ErrorKind::InvalidData.into()))
+                v.and_then(|v| T::decode_exact(&v).ok_or(io::ErrorKind::InvalidData.into()))
             })
         })
         .await
@@ -412,4 +412,3 @@ mod tests {
         assert_eq!(writer.guard().write(buf), None);
     }
 }
-

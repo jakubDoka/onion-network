@@ -1,6 +1,6 @@
 use {
     crate::{
-        Cache, ChainClientExt, ChatMeta, FriendMeta, RawChatMessage, RecoverMail, Sub, Theme,
+        ChainClientExt, ChatMeta, FriendMeta, RawChatMessage, RecoverMail, Storage, Sub, Theme,
         UserKeys, Vault, VaultKey,
     },
     anyhow::Context,
@@ -41,7 +41,12 @@ impl Sub<Identity> {
     }
 
     pub async fn fetch_keys(&mut self) -> anyhow::Result<FetchProfileResp> {
-        Cache::get_or_insert(self.topic, |k| self.sub.request(rpcs::FETCH_PROFILE, k, ())).await
+        Storage::get_or_insert(self.topic, |k| async move {
+            let f = self.sub.request::<FetchProfileResp>(rpcs::FETCH_PROFILE, k, ()).await;
+            log::info!("fetching keys: {:?}", f.as_ref().map(|r| &r.enc));
+            f
+        })
+        .await
     }
 
     pub async fn send_mail(&mut self, mail: impl Encode) -> anyhow::Result<()> {
@@ -319,7 +324,7 @@ pub trait RequestContext: Sized {
 
     async fn read_mail(&self) -> anyhow::Result<ReminderOwned> {
         let proof = self.with_mail_action(|nonce| {
-            self.with_keys(|k| Proof::new(&k.sign, nonce, Mail, OsRng))
+            self.with_keys(|k| Proof::new(&k.sign, nonce, Mail::new(), OsRng))
         })??;
         self.profile_subscription().await?.request(rpcs::READ_MAIL, proof).await
     }
@@ -328,11 +333,13 @@ pub trait RequestContext: Sized {
         &self,
         id: impl IntoIterator<Item = VaultKey>,
     ) -> anyhow::Result<()> {
-        let key = self.with_keys(|k| k.vault)?;
-        let chnages = self.with_vault(|v| {
-            id.into_iter().for_each(|id| _ = v.update(id, key));
-            v.changes()
-        })?;
+        let chnages = {
+            let key = self.with_keys(|k| k.vault)?;
+            self.with_vault(|v| {
+                id.into_iter().for_each(|id| _ = v.update(id, key));
+                v.changes()
+            })?
+        };
         if chnages.is_empty() {
             return Ok(());
         }
@@ -412,12 +419,14 @@ pub trait RequestContext: Sized {
         let mut them = self.subscription_for(identity).await?;
         let keys = them.fetch_keys().await.context("fetching keys")?;
         let (cp, ss) = self.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
+        log::info!("encapsulated friend request: {:?} {:?}", ss, keys.enc);
         let (dr, init, id) = DoubleRatchet::sender(ss, OsRng);
 
         let us = self.with_keys(UserKeys::identity)?;
 
         let request = FriendRequest { username: self.with_keys(|k| k.name)?, identity: us, init };
         let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
+        log::info!("sending friend request: {:?}", mail.to_bytes());
         them.send_mail(mail).await?;
 
         let friend = FriendMeta { dr, identity, id };
@@ -450,7 +459,7 @@ pub trait RequestContext: Sized {
         Ok(unpack_messages_ref(&mesages)
             .map(|message| async move {
                 let chat_spec::Message { sender: identity, content, .. } =
-                    chat_spec::Message::decode(&mut &message[..]).context("invalid message")?;
+                    chat_spec::Message::decode_exact(message).context("invalid message")?;
                 let content = chain_api::decrypt(content.0.to_owned(), chat_meta.secret)
                     .context("decrypt content")?;
                 let client = self.with_keys(|k| k.chain_client())?.await?;
@@ -560,6 +569,7 @@ impl MailVariants {
         updates: &mut Vec<VaultKey>,
         messages: &mut Vec<(UserName, FriendMessage)>,
     ) -> anyhow::Result<()> {
+        log::info!("handling mail: {:?}", self.to_bytes());
         match self {
             MailVariants::ChatInvite { chat, cp } => {
                 let secret = ctx
@@ -572,6 +582,12 @@ impl MailVariants {
                 let secret = ctx
                     .with_keys(|k| k.enc.decapsulate(&cp))?
                     .context("fialed to decapsulate friend request")?;
+
+                log::info!(
+                    "decrypted friend request: {:?} {:?}",
+                    secret,
+                    ctx.with_keys(|k| k.enc.public_key())
+                );
 
                 let FriendRequest { username, identity, init } =
                     payload.decrypt(secret).context("failed to decrypt frined request")?;

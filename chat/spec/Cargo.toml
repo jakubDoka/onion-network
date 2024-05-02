@@ -22,6 +22,8 @@ codec.workspace = true
 arrayvec = "0.7.4"
 merkle-tree = { version = "0.1.0", path = "../../crypto/merkle-tree" }
 futures.workspace = true
+anyhow.workspace = true
+log.workspace = true
 
 [lints]
 workspace = true

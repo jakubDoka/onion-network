@@ -13,21 +13,22 @@
 #![feature(map_try_insert)]
 #![feature(macro_metavar_expr)]
 #![feature(slice_take)]
+#![allow(unused_labels)]
 
 use {
     self::api::chat::Chat,
     crate::api::State,
     anyhow::Context as _,
-    api::FullReplGroup,
+    api::{chat, profile, FullReplGroup},
     arrayvec::ArrayVec,
     chain_api::{ChatStakeEvent, NodeIdentity, NodeKeys, NodeVec, StakeEvents},
     chat_spec::{
-        ChatError, ChatName, Identity, Profile, ReplVec, RequestHeader, ResponseHeader, Topic,
+        ChatError, ChatName, Identity, ReplVec, RequestHeader, ResponseHeader, Topic,
         REPLICATION_FACTOR,
     },
     clap::Parser,
     codec::{DecodeOwned, Encode},
-    dashmap::{mapref::entry::Entry, DashMap},
+    dashmap::{mapref::entry::Entry, DashMap, DashSet},
     dht::{Route, SharedRoutingTable},
     handlers::CallId,
     libp2p::{
@@ -50,10 +51,12 @@ use {
         io,
         net::Ipv4Addr,
         ops::DerefMut,
+        path::PathBuf,
         sync::Arc,
         task::Poll,
         time::{Duration, Instant},
     },
+    storage::Storage,
     tokio::sync::RwLock,
     topology_wrapper::BuildWrapped,
 };
@@ -61,6 +64,7 @@ use {
 mod api;
 mod db;
 mod reputation;
+mod storage;
 #[cfg(test)]
 mod tests;
 
@@ -69,7 +73,7 @@ const STREAM_POOL_STREAM_LIFETIME: Duration = Duration::from_secs(5);
 type Context = &'static OwnedContext;
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
@@ -103,6 +107,8 @@ pub struct NodeConfig {
     idle_timeout: u64,
     /// Rpc request is dropped after ms of delay
     rpc_timeout: u64,
+    /// The path to node preserved data
+    data_dir: PathBuf,
     #[clap(flatten)]
     chain: chain_api::EnvConfig,
 }
@@ -199,12 +205,14 @@ impl Server {
 
         Ok(Self {
             context: Box::leak(Box::new(OwnedContext {
-                profiles: Default::default(),
+                storage: Storage::new(config.data_dir),
+                not_found: Default::default(),
                 online: Default::default(),
                 chats: Default::default(),
                 chat_subs: Default::default(),
                 clients: Default::default(),
                 profile_subs: Default::default(),
+                ongoing_recovery: Default::default(),
                 stream_requests: stream_requests.0,
                 recycled_streams: recycled_streams.0,
                 stream_cache: StreamCache::default(),
@@ -509,20 +517,42 @@ unsafe impl Sync for StreamCache {}
 // TODO: switch to lmdb
 // TODO: remove recovery locks, ommit response instead
 pub struct OwnedContext {
-    profiles: DashMap<Identity, Profile>,
+    storage: Storage,
+    not_found: DashSet<Topic>,
     online: DashMap<Identity, OnlineLocation>,
     chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
     chat_subs: DashMap<ChatName, HashMap<PathId, CallId>>,
     profile_subs: DashMap<Identity, (PathId, CallId)>,
+    ongoing_recovery: DashSet<Topic>,
+    clients: DashMap<PathId, Client>,
     stream_requests: mpsc::Sender<(NodeIdentity, oneshot::Sender<libp2p::Stream>)>,
     recycled_streams: mpsc::Sender<(NodeIdentity, libp2p::Stream)>,
-    clients: DashMap<PathId, Client>,
     stream_cache: StreamCache,
     local_peer_id: NodeIdentity,
     dht: SharedRoutingTable,
 }
 
 impl OwnedContext {
+    fn start_recovery(&'static self, topic: Topic) -> bool {
+        if !self.ongoing_recovery.insert(topic) {
+            return false;
+        }
+
+        tokio::spawn(async move {
+            let res = match topic {
+                Topic::Profile(profile) => profile::recover(self, profile).await,
+                Topic::Chat(chat) => chat::recover(self, chat).await,
+            };
+            if res.is_err() {
+                self.not_found.insert(topic);
+            }
+        });
+
+        self.ongoing_recovery.remove(&topic);
+
+        true
+    }
+
     async fn push_chat_event(&self, topic: ChatName, ev: chat_spec::ChatEvent) {
         let Some(mut subscriptions) = self.chat_subs.get_mut(&topic) else { return };
         subscriptions.retain(|path_id, call_id| {
@@ -587,7 +617,7 @@ impl OwnedContext {
         let mut buf = vec![0; header.get_len()];
         stream.read_exact(&mut buf).await?;
         self.stream_cache.recycle(peer, stream);
-        R::decode(&mut buf.as_slice()).ok_or(ChatError::InvalidResponse)
+        R::decode_exact(&buf).ok_or(ChatError::InvalidResponse)
     }
 
     async fn repl_rpc<R: DecodeOwned>(
@@ -653,7 +683,7 @@ impl OwnedContext {
                     self.stream_cache.recycle(id.into(), stream);
                     Ok::<_, ChatError>((
                         id.into(),
-                        R::decode(&mut buf.as_slice()).ok_or(ChatError::InvalidResponse)?,
+                        R::decode_exact(&buf).ok_or(ChatError::InvalidResponse)?,
                     ))
                 })
                 .map_err(|_| ChatError::Timeout)
@@ -678,5 +708,12 @@ impl OwnedContext {
             return None;
         }
         Some(others)
+    }
+
+    fn should_recover(&'static self, topic: Topic) -> bool {
+        !match topic {
+            Topic::Profile(profile) => self.storage.has_profile(profile),
+            Topic::Chat(chat) => self.chats.contains_key(&chat),
+        }
     }
 }

@@ -181,7 +181,10 @@ impl Client {
     {
         let latest = self.client.storage().at_latest().await?;
         let map_ok = |kv: subxt::storage::StorageKeyValuePair<SA>| {
-            (parity_scale_codec::Decode::decode(&mut &kv.key_bytes[48..]).unwrap(), kv.value.into())
+            let mut slc = &kv.key_bytes[48..];
+            let key = parity_scale_codec::Decode::decode(&mut slc).unwrap();
+            debug_assert!(slc.is_empty());
+            (key, kv.value.into())
         };
         latest.iter(tx).await?.map_ok(map_ok).try_collect().await
     }
@@ -465,7 +468,7 @@ impl<T> Encrypted<T> {
         T: DecodeOwned,
     {
         let data = crypto::decrypt(&mut self.0, secret)?;
-        T::decode(&mut &data[..])
+        T::decode_exact(&data)
     }
 }
 

@@ -6,6 +6,7 @@ use {
     chain_api::{Nonce, Profile},
     chat_spec::{username_from_raw, username_to_raw, FetchProfileResp, Identity, UserName},
     codec::{Codec, DecodeOwned, Encode},
+    libp2p::futures::TryFutureExt,
     std::{cell::RefCell, collections::BTreeMap, future::Future},
 };
 
@@ -17,8 +18,10 @@ pub trait ChainClientExt {
 
 impl ChainClientExt for Client {
     async fn fetch_profile(&self, name: UserName) -> Result<Profile, anyhow::Error> {
-        match Cache::get_or_insert_opt(username_to_raw(name), |name| self.get_profile_by_name(name))
-            .await
+        match Storage::get_or_insert_opt(username_to_raw(name), |name| {
+            self.get_profile_by_name(name).map_err(anyhow::Error::from)
+        })
+        .await
         {
             Ok(Some(u)) => Ok(u),
             Ok(None) => anyhow::bail!("user {name} does not exist"),
@@ -27,7 +30,11 @@ impl ChainClientExt for Client {
     }
 
     async fn fetch_username(&self, id: Identity) -> Result<UserName, anyhow::Error> {
-        match Cache::get_or_insert_opt(id, |id| self.get_username(id)).await {
+        match Storage::get_or_insert_opt(id, |id| {
+            self.get_username(id).map_err(anyhow::Error::from)
+        })
+        .await
+        {
             Ok(Some(u)) => username_from_raw(u).context("invalid name"),
             Ok(None) => anyhow::bail!("user {id:?} does not exist"),
             Err(e) => anyhow::bail!("failed to fetch user: {e}"),
@@ -40,19 +47,19 @@ pub fn min_nodes() -> usize {
     MIN_NODES.parse().unwrap()
 }
 
-pub struct Cache {
+pub struct Storage {
     id: Identity,
     hot_entries: BTreeMap<crypto::Hash, Vec<u8>>,
 }
 
 thread_local! {
-    static INSTANCE: RefCell<Cache> = Cache {
+    static INSTANCE: RefCell<Storage> = Storage {
         id: Identity::default(),
         hot_entries: BTreeMap::new(),
     }.into();
 }
 
-impl Cache {
+impl Storage {
     pub fn set_id(id: Identity) {
         INSTANCE.with(|i| i.borrow_mut().id = id);
     }
@@ -75,8 +82,7 @@ impl Cache {
     pub async fn get_or_insert_opt<
         K: AsRef<[u8]>,
         T: Cached,
-        E: std::error::Error + Send + Sync + 'static,
-        F: Future<Output = Result<Option<T>, E>>,
+        F: Future<Output = anyhow::Result<Option<T>>>,
     >(
         key: K,
         or_compute: impl FnOnce(K) -> F,
@@ -94,17 +100,34 @@ impl Cache {
         Ok(res)
     }
 
-    #[track_caller]
+    pub fn ensure<T: Cached>(friends: impl AsRef<[u8]>, key: &T) -> bool {
+        let hash = Self::compute_key::<T>(friends);
+        if Self::get_low::<T>(hash).is_none() {
+            Self::insert_low(hash, key);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn get<T: Cached>(key: impl AsRef<[u8]>) -> Option<T> {
         Self::get_low::<T>(Self::compute_key::<T>(key))
     }
 
-    #[track_caller]
     pub fn insert<T: Cached>(key: impl AsRef<[u8]>, value: &T) {
         Self::insert_low(Self::compute_key::<T>(key), value);
     }
 
-    #[track_caller]
+    pub fn update<T: Cached + Default>(key: impl AsRef<[u8]>, f: impl FnOnce(&mut T)) {
+        let hash = Self::compute_key::<T>(key);
+        let mut current: T = Self::get_low(hash).unwrap_or_default();
+        let bytes = current.to_bytes();
+        f(&mut current);
+        if current.to_bytes() != bytes {
+            Self::insert_low(hash, &current);
+        }
+    }
+
     fn compute_key<T: Cached>(key: impl AsRef<[u8]>) -> crypto::Hash {
         let id = INSTANCE.with(|i| i.borrow().id);
         debug_assert_ne!(id, Identity::default());
@@ -114,7 +137,7 @@ impl Cache {
 
     fn get_low<T: Codec>(key: crypto::Hash) -> Option<T> {
         if let Some(entry) = INSTANCE.with(|i| i.borrow().hot_entries.get(&key).cloned())
-            && let Some(res) = T::decode(&mut entry.as_slice())
+            && let Some(res) = T::decode_exact(&entry)
         {
             return Some(res);
         }
@@ -167,8 +190,5 @@ fn encode_base64<T: Encode>(t: &T) -> String {
 }
 
 fn decode_base64<T: DecodeOwned>(s: &str) -> Option<T> {
-    base64::prelude::BASE64_STANDARD_NO_PAD
-        .decode(s)
-        .ok()
-        .and_then(|b| T::decode(&mut b.as_slice()))
+    base64::prelude::BASE64_STANDARD_NO_PAD.decode(s).ok().and_then(|b| T::decode_exact(&b))
 }

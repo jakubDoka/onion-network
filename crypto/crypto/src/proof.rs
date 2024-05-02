@@ -1,6 +1,30 @@
-use {codec::Encode, rand_core::CryptoRngCore};
+use {
+    codec::{Decode, Encode},
+    rand_core::CryptoRngCore,
+};
 
 pub type Nonce = u64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ConstContext<const N: usize>;
+
+impl<const N: usize> ConstContext<N> {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl<const N: usize> Encode for ConstContext<N> {
+    fn encode(&self, b: &mut impl codec::Buffer) -> Option<()> {
+        N.encode(b)
+    }
+}
+
+impl<'a, const N: usize> Decode<'a> for ConstContext<N> {
+    fn decode(b: &mut &[u8]) -> Option<Self> {
+        usize::decode(b).filter(|&v| v == N).map(|_| Self)
+    }
+}
 
 pub trait NonceInt {
     fn next(&mut self) -> Self;
@@ -25,7 +49,7 @@ impl NonceInt for Nonce {
 }
 
 #[derive(Clone, Copy, Debug, codec::Codec)]
-pub struct Proof<T> {
+pub struct Proof<T = ()> {
     pub pk: crate::sign::PublicKey,
     pub nonce: Nonce,
     pub signature: crate::sign::Signature,

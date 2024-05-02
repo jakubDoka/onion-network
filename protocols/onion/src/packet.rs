@@ -84,22 +84,22 @@ pub fn peel(
 ) -> Option<(Result<PeerId, SharedSecret>, usize)> {
     let prev_len = original_buffer.len();
 
-    if let Some(op) = OuterPacket::decode(&mut &*original_buffer) {
+    if let Some(op) = OuterPacket::decode_exact(&original_buffer) {
         op.mid.encode(&mut original_buffer).unwrap();
         return Some((Ok(op.to), prev_len - original_buffer.len()));
     }
 
-    if let Some(mp) = MiddlePacket::decode(&mut &*original_buffer) {
+    if let Some(mp) = MiddlePacket::decode_exact(&original_buffer) {
         let ss = node_kp.decapsulate(&mp.cp).ok()?;
         original_buffer[..mp.bytes.len()].copy_from_slice(&mp.bytes);
         crypto::decrypt_separate_tag(&mut original_buffer[..mp.bytes.len()], ss, mp.tag)
             .then_some(())?;
-        let ip = InnerMostPacket::decode(&mut &original_buffer[..mp.bytes.len()])?;
+        let ip = InnerMostPacket::decode_exact(&original_buffer[..mp.bytes.len()])?;
         ip.cp.encode(&mut original_buffer)?;
         return Some((Ok(ip.to), std::mem::size_of::<Ciphertext>()));
     }
 
-    let cp = Ciphertext::decode(&mut &*original_buffer)?;
+    let cp = Ciphertext::decode_exact(&mut &*original_buffer)?;
     let ss = node_kp.decapsulate(&cp).ok()?;
     Some((Err(ss), 0))
 }

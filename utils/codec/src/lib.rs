@@ -89,6 +89,12 @@ pub trait Encode {
 
 pub trait Decode<'a>: Sized {
     fn decode(buffer: &mut &'a [u8]) -> Option<Self>;
+
+    fn decode_exact(mut buffer: &'a [u8]) -> Option<Self> {
+        let value = Self::decode(&mut buffer)?;
+        debug_assert!(buffer.is_empty(), "{:?} {}", buffer, std::any::type_name::<Self>());
+        buffer.is_empty().then_some(value)
+    }
 }
 
 pub trait DecodeOwned: for<'a> Decode<'a> {}

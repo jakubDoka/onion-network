@@ -75,6 +75,10 @@ impl<T: MerkleHash> MerkleTree<T> {
         &self.nodes[Self::mid_point(self.nodes.len())]
     }
 
+    pub fn len(&self) -> usize {
+        self.nodes.len() / 2 + 1
+    }
+
     fn mid_point(len: usize) -> usize {
         (len.next_power_of_two() / 2).saturating_sub(1)
     }

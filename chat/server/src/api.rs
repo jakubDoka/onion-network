@@ -8,7 +8,7 @@ use {
     dht::U256,
     handlers::CallId,
     libp2p::PeerId,
-    onion::PathId,
+    onion::{EncryptedStream, PathId},
     opfusk::ToPeerId,
     std::future::Future,
 };
@@ -58,42 +58,44 @@ pub async fn unsubscribe(cx: Context, topic: Topic, user: PathId, _: ()) -> Resu
     }
 }
 
-handlers::router! { pub client_router(State):
-    rpcs::CREATE_CHAT => chat::create.repl();
-    rpcs::ADD_MEMBER => chat::add_member.repl();
-    rpcs::KICK_MEMBER => chat::kick_member.repl();
-    rpcs::SEND_MESSAGE => chat::send_message.repl();
+handlers::router! { pub client_router(State, EncryptedStream):
+    rpcs::CREATE_CHAT => chat::create.repld();
+    rpcs::ADD_MEMBER => chat::add_member.repld();
+    rpcs::KICK_MEMBER => chat::kick_member.repld();
+    rpcs::SEND_MESSAGE => chat::send_message.repld();
     rpcs::FETCH_MESSAGES => chat::fetch_messages;
     rpcs::FETCH_MEMBERS => chat::fetch_members;
-    rpcs::CREATE_PROFILE => profile::create.repl();
-    rpcs::SEND_MAIL => profile::send_mail.repl();
-    rpcs::READ_MAIL => profile::read_mail.repl();
-    rpcs::INSERT_TO_VAULT => profile::insert_to_vault.repl();
-    rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.repl();
-    rpcs::FETCH_PROFILE => profile::fetch_keys;
-    rpcs::FETCH_VAULT => profile::fetch_vault;
-    rpcs::FETCH_NONCES => profile::fetch_nonces;
-    rpcs::FETCH_VAULT_KEY => profile::fetch_vault_key;
+    rpcs::CREATE_PROFILE => profile::create.repld();
+    rpcs::SEND_MAIL => profile::send_mail.repld();
+    rpcs::READ_MAIL => profile::read_mail.repld();
+    rpcs::INSERT_TO_VAULT => profile::insert_to_vault.repld();
+    rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.repld();
+    rpcs::FETCH_PROFILE => profile::fetch_keys.restored();
+    rpcs::FETCH_VAULT => profile::fetch_vault.restored();
+    rpcs::FETCH_NONCES => profile::fetch_nonces.restored();
+    rpcs::FETCH_VAULT_KEY => profile::fetch_vault_key.restored();
     rpcs::SUBSCRIBE => subscribe;
     rpcs::UNSUBSCRIBE => unsubscribe;
 }
 
-handlers::router! { pub server_router(State):
+handlers::router! { pub server_router(State, libp2p::Stream):
     rpcs::CREATE_CHAT => chat::create;
-    rpcs::ADD_MEMBER => chat::add_member;
-    rpcs::KICK_MEMBER => chat::kick_member;
+    rpcs::ADD_MEMBER => chat::add_member.restored();
+    rpcs::KICK_MEMBER => chat::kick_member.restored();
     rpcs::SEND_BLOCK => chat::handle_message_block
-        .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 });
+        .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
+        .restored();
     rpcs::FETCH_CHAT_DATA => chat::fetch_chat_data.rated(rate_map!(40));
-    rpcs::SEND_MESSAGE => chat::send_message;
+    rpcs::SEND_MESSAGE => chat::send_message.restored();
     rpcs::VOTE_BLOCK => chat::vote
-        .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 });
+        .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 }).restored();
     rpcs::CREATE_PROFILE => profile::create;
-    rpcs::SEND_MAIL => profile::send_mail;
-    rpcs::READ_MAIL => profile::read_mail;
-    rpcs::INSERT_TO_VAULT => profile::insert_to_vault;
-    rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault;
-    rpcs::FETCH_PROFILE_FULL => profile::fetch_full.rated(rate_map!(40));
+    rpcs::SEND_MAIL => profile::send_mail.restored();
+    rpcs::READ_MAIL => profile::read_mail.restored();
+    rpcs::INSERT_TO_VAULT => profile::insert_to_vault.restored();
+    rpcs::REMOVE_FROM_VAULT => profile::remove_from_vault.restored();
+    rpcs::FETCH_PROFILE_FULL => profile::fetch_full.rated(rate_map!(10));
+    rpcs::FETCH_VAULT => profile::fetch_vault.rated(rate_map!(100));
 }
 
 pub struct State {
@@ -138,13 +140,17 @@ handlers::quick_impl_from_request! {State => [
 ]}
 
 pub trait Handler: Sized {
-    fn repl(self) -> Repl<Self> {
+    fn repld(self) -> Repl<Self> {
         Repl { handler: self }
     }
 
     // fn repl_max(self) -> ReplMax<Self> {
     //     ReplMax { handler: self }
     // }
+
+    fn restored(self) -> Restore<Self> {
+        Restore { handler: self }
+    }
 
     fn rated<F>(self, rater: F) -> Rated<Self, F> {
         Rated::new(self, rater)
@@ -236,24 +242,20 @@ where
 
             let mut resps = others.into_iter().chain(std::iter::once(us)).collect::<GroupVec<_>>();
 
+            let mut recovering = false;
             let mut pick = None;
             while let Some((peer, base)) = resps.pop() {
-                let prev_len = resps.len() + 1;
                 let mut others = GroupVec::from_iter([peer]);
-                resps.retain(|(_, other)| (&base == other).then(|| others.push(peer)).is_none());
+                resps.retain(|(p, other)| (&base == other).then(|| others.push(*p)).is_none());
 
-                let count = prev_len - resps.len();
-                if count > REPLICATION_FACTOR.get() / 2 {
+                if others.len() > REPLICATION_FACTOR.get() / 2 {
                     pick = Some(base);
                     for peer in others {
                         crate::reputation::Rep::get().rate(peer, -1);
                     }
                 } else {
                     if others.contains(&cx.local_peer_id) {
-                        match topic {
-                            Topic::Profile(pf) => profile::recover(cx, pf).await?,
-                            Topic::Chat(chat) => chat::recover(cx, chat).await?,
-                        }
+                        recovering = cx.start_recovery(topic);
                     }
 
                     for peer in others {
@@ -262,7 +264,41 @@ where
                 }
             }
 
+            if recovering && pick.is_none() {
+                return Err(ChatError::OngoingRecovery);
+            }
+
             pick.ok_or(ChatError::NoMajority)?
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Restore<H> {
+    pub handler: H,
+}
+
+pub type RestoreArgsArgs<A> = (Context, Topic, A);
+
+impl<C, H, S, A, B, O> handlers::Handler<C, S, RestoreArgsArgs<A>, B> for Restore<H>
+where
+    H: handlers::Handler<C, S, A, B>,
+    H::Future: Future<Output = Result<O>>,
+    S: handlers::Stream,
+    RestoreArgsArgs<A>: handlers::FromContext<C>,
+    A: handlers::FromContext<C>,
+    B: handlers::FromStream<S>,
+{
+    type Future = impl Future<Output = <H::Future as Future>::Output> + Send;
+
+    fn call(self, (cx, topic, args): RestoreArgsArgs<A>, req: B) -> Self::Future {
+        async move {
+            if cx.should_recover(topic) {
+                cx.start_recovery(topic);
+                return Err(ChatError::OngoingRecovery);
+            }
+
+            self.handler.call(args, req).await
         }
     }
 }

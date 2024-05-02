@@ -1,9 +1,9 @@
 use {
-    crate::{min_nodes, Cache, MailVariants, RawResponse, UserKeys, Vault},
+    crate::{min_nodes, MailVariants, RawResponse, Storage, UserKeys, Vault},
     anyhow::Context,
     chain_api::NodeIdentity,
     chat_spec::*,
-    codec::{Decode, DecodeOwned, Encode},
+    codec::{Decode, DecodeOwned, Encode, ReminderVec},
     crypto::{
         enc,
         proof::{Nonce, Proof},
@@ -24,7 +24,7 @@ use {
     rand::{rngs::OsRng, seq::IteratorRandom},
     std::{
         cell::RefCell,
-        collections::{BTreeMap, HashMap},
+        collections::HashMap,
         convert::Infallible,
         future::Future,
         io,
@@ -63,7 +63,7 @@ impl Node {
 
         set_state!(FetchNodesAndProfile);
 
-        Cache::set_id(keys.identity());
+        Storage::set_id(keys.identity());
 
         let mut swarm = libp2p::Swarm::new(
             websocket_websys::Transport::default()
@@ -116,7 +116,7 @@ impl Node {
 
         let routes = swarm.behaviour_mut().chat_dht.table.read();
         for route in { routes }.iter() {
-            if let Some(keys) = Cache::get::<enc::PublicKey>(NodeIdentity::from(route.id)) {
+            if let Some(keys) = Storage::get::<enc::PublicKey>(NodeIdentity::from(route.id)) {
                 swarm.behaviour_mut().key_share.keys.insert(route.peer_id(), keys);
                 reminimg -= 1;
                 continue;
@@ -130,7 +130,7 @@ impl Node {
                     SwarmEvent::Behaviour(BehaviourEvent::KeyShare((peer, key))) => {
                         reminimg -= 1;
                         set_state!(CollecringKeys(reminimg));
-                        Cache::insert(peer.to_hash(), &key);
+                        Storage::insert(peer.to_hash(), &key);
                     }
                     SwarmEvent::OutgoingConnectionError { .. } => {
                         reminimg -= 1;
@@ -190,26 +190,30 @@ impl Node {
                 &mut profile_stream,
                 rpcs::CREATE_PROFILE,
                 profile_hash.sign,
-                (proof, "", keys.enc.public_key()),
+                (proof, keys.enc.public_key()),
             )
             .await
             .context("creating account")?;
 
-            Vault::default()
+            Vault::new(keys.vault)
         } else {
-            let values = match Vault::values_from_cache(vault_nonce) {
-                Some(values) => values,
-                None => crate::send_request::<BTreeMap<crypto::Hash, Vec<u8>>>(
+            if !Vault::needs_refresh(vault_nonce)
+                && let Ok(vault) = Vault::from_storage(keys.vault)
+            {
+                vault
+            } else {
+                crate::send_request::<ReminderVec<(crypto::Hash, Vec<u8>)>>(
                     &mut profile_stream,
                     rpcs::FETCH_VAULT,
                     profile_hash.sign,
                     (),
                 )
                 .await
-                .context("fetching vault")?,
-            };
-
-            Vault::deserialize(values, keys.vault)
+                .context("fetching vault")
+                .map(|ReminderVec(v)| Vault::refresh(v))?;
+                Vault::repair(keys.vault);
+                Vault::from_storage(keys.vault).context("welp, your account is fucked")?
+            }
         };
         let _ = vault.theme.apply();
 
@@ -449,7 +453,7 @@ impl RawSub {
         self.requests
             .send(SubscriptionRequest::Request(prefix, topic.into(), body.to_bytes(), tx))
             .await?;
-        R::decode(&mut rx.await?.as_slice()).context("received invalid response")
+        R::decode_exact(&rx.await?).context("received invalid response")
     }
 
     async fn run(
@@ -524,7 +528,7 @@ impl RawSub {
 
             match rc {
                 RegisteredCall::NewChatSub(chat, tx) => 'b: {
-                    let Some(res) = Result::<(), ChatError>::decode(&mut data.as_slice()) else {
+                    let Some(res) = Result::<(), ChatError>::decode_exact(&data) else {
                         log::error!("invalid chat subscription response");
                         break 'b;
                     };
@@ -537,7 +541,7 @@ impl RawSub {
                     subs.insert(header.call_id, RegisteredCall::ChatSub(chat, tx));
                 }
                 RegisteredCall::NewProfileSub(id, tx) => 'b: {
-                    let Some(res) = Result::<(), ChatError>::decode(&mut data.as_slice()) else {
+                    let Some(res) = Result::<(), ChatError>::decode_exact(&data) else {
                         log::error!("invalid profile subscription response");
                         break 'b;
                     };
@@ -550,7 +554,7 @@ impl RawSub {
                     subs.insert(header.call_id, RegisteredCall::ProfileSub(id, tx));
                 }
                 RegisteredCall::ChatSub(chat, mut ch) => {
-                    if let Some(ev) = ChatEvent::decode(&mut data.as_slice()) {
+                    if let Some(ev) = ChatEvent::decode_exact(&data) {
                         if ch.send(ev).await.is_err() {
                             let header = RequestHeader {
                                 prefix: rpcs::UNSUBSCRIBE,
@@ -568,7 +572,7 @@ impl RawSub {
                     subs.insert(header.call_id, RegisteredCall::ChatSub(chat, ch));
                 }
                 RegisteredCall::ProfileSub(id, mut ch) => {
-                    if let Some(ev) = MailVariants::decode(&mut data.as_slice()) {
+                    if let Some(ev) = MailVariants::decode_exact(&data) {
                         if ch.send(ev).await.is_err() {
                             let header = RequestHeader {
                                 prefix: rpcs::UNSUBSCRIBE,

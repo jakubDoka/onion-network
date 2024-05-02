@@ -44,7 +44,7 @@ impl<'a, T: Decode<'a>> Decode<'a> for Range<T> {
     }
 }
 
-impl<'b, T: Encode> Encode for &'b T {
+impl<'b, T: Encode + ?Sized> Encode for &'b T {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         (*self).encode(buffer)
     }

@@ -17,7 +17,7 @@ env_logger = "0.11.0"
 libp2p = { workspace = true, features = ["tcp", "macros", "tokio", "yamux", "websocket", "dns"] }
 log = { workspace = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
-tokio = { version = "1.32.0", features = ["rt", "macros", "time"] }
+tokio = { version = "1.32.0", features = ["rt-multi-thread", "macros", "time"] }
 dashmap = "5.5.3"
 arrayvec = "0.7.4"
 
@@ -33,6 +33,10 @@ component-utils.workspace = true
 opfusk = { workspace = true }
 streaming.workspace = true
 clap = { version = "4.5.4", features = ["derive", "env"] }
+lmdb-zero = "0.4.4"
+lru = { version = "0.12.3", features = ["nightly"] }
+base64 = "0.22.1"
+merkle-tree = { version = "0.1.0", path = "../../crypto/merkle-tree" }
 
 [lints]
 workspace = true

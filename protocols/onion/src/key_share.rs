@@ -176,7 +176,7 @@ impl OutboundUpgrade<libp2p::Stream> for Protocol {
         async move {
             let mut key = [0; std::mem::size_of::<enc::PublicKey>()];
             socket.read_exact(&mut key).await?;
-            enc::PublicKey::decode(&mut key.as_slice()).ok_or(io::ErrorKind::InvalidData.into())
+            enc::PublicKey::decode_exact(&key).ok_or(io::ErrorKind::InvalidData.into())
         }
     }
 }

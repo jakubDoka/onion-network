@@ -1,53 +1,24 @@
 use {
-    crate::OnlineLocation,
+    crate::{storage::profile, OnlineLocation},
     chain_api::Nonce,
-    chat_spec::{advance_nonce, rpcs, ChatError, FetchProfileResp, Identity, Mail, Profile, Vault},
-    codec::{Encode, Reminder, ReminderOwned},
+    chat_spec::{rpcs, ChatError, FetchProfileResp, Identity, Mail},
+    codec::{Decode, Reminder, ReminderOwned},
     crypto::proof::Proof,
-    dashmap::mapref::entry::Entry,
     handlers::{Dec, DecFixed},
-    std::collections::BTreeMap,
+    merkle_tree::MerkleTree,
+    tokio::task::block_in_place,
 };
-
-const MAIL_BOX_CAP: usize = 1024 * 1024;
 
 type Result<T, E = ChatError> = std::result::Result<T, E>;
 
 pub async fn create(
     cx: super::Context,
     identity: Identity,
-    Dec((proof, values, enc)): Dec<(
-        Proof<crypto::Hash>,
-        BTreeMap<crypto::Hash, Vec<u8>>,
-        crypto::enc::PublicKey,
-    )>,
+    Dec((proof, enc)): Dec<(Proof<crypto::Hash>, crypto::enc::PublicKey)>,
 ) -> Result<()> {
-    let mut vault = Vault {
-        version: proof.nonce,
-        sig: proof.signature,
-        values,
-        merkle_tree: Default::default(),
-    };
-    vault.recompute();
-    handlers::ensure!(vault.is_valid(proof.pk), ChatError::InvalidProof);
-
-    match cx.profiles.entry(identity) {
-        Entry::Vacant(entry) => {
-            entry.insert(Profile {
-                sign: proof.pk,
-                enc,
-                vault,
-                mail_action: proof.nonce,
-                mail: Vec::new(),
-            });
-            Ok(())
-        }
-        Entry::Occupied(mut entry) if entry.get().vault.version < proof.nonce => {
-            entry.get_mut().vault = vault;
-            Ok(())
-        }
-        _ => Err(ChatError::AlreadyExists),
-    }
+    block_in_place(|| cx.storage.create_profile(proof, enc))?;
+    cx.not_found.remove(&identity.into());
+    Ok(())
 }
 
 // TODO: add size checks
@@ -57,7 +28,7 @@ pub async fn insert_to_vault(
     identity: Identity,
     Dec((proof, changes)): Dec<(Proof<crypto::Hash>, Vec<(crypto::Hash, Vec<u8>)>)>,
 ) -> Result<()> {
-    cx.profiles.get_mut(&identity).ok_or(ChatError::NotFound)?.vault.try_insert_bulk(changes, proof)
+    block_in_place(|| cx.storage.insert_to_vault(identity, changes, proof))
 }
 
 pub async fn remove_from_vault(
@@ -65,7 +36,8 @@ pub async fn remove_from_vault(
     identity: Identity,
     Dec((proof, key)): Dec<(Proof<crypto::Hash>, crypto::Hash)>,
 ) -> Result<()> {
-    cx.profiles.get_mut(&identity).ok_or(ChatError::NotFound)?.vault.try_remove(key, proof)
+    _ = (cx, identity, proof, key);
+    Err(ChatError::Todo)
 }
 
 pub async fn fetch_vault_key(
@@ -73,8 +45,8 @@ pub async fn fetch_vault_key(
     identity: Identity,
     DecFixed(key): DecFixed<crypto::Hash>,
 ) -> Result<ReminderOwned> {
-    let profile = cx.profiles.get(&identity).ok_or(ChatError::NotFound)?;
-    profile.vault.values.get(&key).ok_or(ChatError::NotFound).cloned().map(ReminderOwned)
+    _ = (cx, identity, key);
+    Err(ChatError::Todo)
 }
 
 pub async fn read_mail(
@@ -82,47 +54,26 @@ pub async fn read_mail(
     location: OnlineLocation,
     Dec(proof): Dec<Proof<Mail>>,
 ) -> Result<ReminderOwned> {
-    handlers::ensure!(proof.verify(), ChatError::InvalidProof);
-
-    let identity = crypto::hash::new(proof.pk);
-    let profile = cx.profiles.get_mut(&identity);
-
-    handlers::ensure!(let Some(mut profile) = profile, ChatError::NotFound);
-    handlers::ensure!(
-        advance_nonce(&mut profile.mail_action, proof.nonce),
-        ChatError::InvalidAction(profile.mail_action + 1)
-    );
-
-    cx.online.insert(identity, location);
-
-    Ok(ReminderOwned(profile.read_mail().to_vec()))
+    let mail = block_in_place(|| cx.storage.read_mail(proof))?;
+    cx.online.insert(proof.identity(), location);
+    Ok(ReminderOwned(mail))
 }
 
 pub async fn fetch_keys(cx: super::Context, identity: Identity, _: ()) -> Result<FetchProfileResp> {
-    cx.profiles.get(&identity).ok_or(ChatError::NotFound).map(|p| FetchProfileResp::from(p.value()))
+    block_in_place(|| cx.storage.get_profile(identity)?.load_keys())
 }
 
+/// the return structure is RemiderOwned<(Identity, Vec<u8>)>
 pub async fn fetch_vault(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {
-    cx.profiles
-        .get(&identity)
-        .ok_or(ChatError::NotFound)
-        .map(|p| p.value().vault.values.to_bytes())
-        .map(ReminderOwned)
+    block_in_place(|| cx.storage.get_profile(identity)?.fetch_vault()).map(ReminderOwned)
 }
 
 pub async fn fetch_nonces(cx: super::Context, identity: Identity, _: ()) -> Result<[Nonce; 2]> {
-    cx.profiles
-        .get(&identity)
-        .ok_or(ChatError::NotFound)
-        .map(|p| [p.value().vault.version, p.value().mail_action])
+    block_in_place(|| cx.storage.get_profile(identity)?.nonces())
 }
 
-pub async fn fetch_full(cx: super::Context, identity: Identity, _: ()) -> Result<ReminderOwned> {
-    cx.profiles
-        .get(&identity)
-        .ok_or(ChatError::NotFound)
-        .map(|p| p.value().to_bytes())
-        .map(ReminderOwned)
+pub async fn fetch_full(cx: super::Context, identity: Identity, _: ()) -> Result<profile::Root> {
+    block_in_place(|| cx.storage.get_profile(identity)?.root())
 }
 
 pub async fn send_mail(
@@ -131,12 +82,7 @@ pub async fn send_mail(
     for_who: Identity,
     ReminderOwned(mail): ReminderOwned,
 ) -> Result<()> {
-    let push_mail = || {
-        let mut profile = cx.profiles.get_mut(&for_who).ok_or(ChatError::NotFound)?;
-        handlers::ensure!(profile.mail.len() + mail.len() < MAIL_BOX_CAP, ChatError::MailboxFull);
-        profile.push_mail(&mail);
-        Ok(())
-    };
+    let push_mail = || block_in_place(|| cx.storage.get_profile(for_who)?.append_mail(&mail));
 
     let Some(online_in) = cx.online.get(&for_who).map(|v| *v.value()) else {
         return push_mail();
@@ -171,15 +117,45 @@ pub async fn send_mail(
 }
 
 pub async fn recover(cx: crate::Context, identity: Identity) -> Result<()> {
-    let profile = cx
-        .repl_rpc::<Result<Profile>>(identity, rpcs::FETCH_PROFILE_FULL, ())
+    let mut resps = cx
+        .repl_rpc::<Result<profile::Root>>(identity, rpcs::FETCH_PROFILE_FULL, ())
         .await?
         .into_iter()
-        .filter_map(|(_, r)| r.ok())
-        .filter(|r| r.sign.identity() == identity)
-        .filter(|r| r.is_valid())
-        .max_by_key(|r| r.vault.version)
-        .ok_or(ChatError::NotFound)?;
-    cx.profiles.insert(identity, profile);
-    Ok(())
+        .filter_map(|(p, r)| r.ok().map(|r| (p, r)))
+        .filter(|(_, r)| r.sign.identity() == identity)
+        .filter(|(_, r)| r.is_valid())
+        .collect::<Vec<_>>();
+
+    resps.sort_unstable_by_key(|(_, a)| a.vault_version + a.mail_action);
+
+    let (profile, vault) = 'b: {
+        for (peer, profile) in resps {
+            let Ok(ReminderOwned(vault)) = cx
+                .send_rpc::<Result<ReminderOwned>>(identity, peer, rpcs::FETCH_VAULT, ())
+                .await
+                .and_then(std::convert::identity)
+                .inspect_err(|_| crate::reputation::Rep::get().rate(peer, 40))
+            else {
+                continue;
+            };
+
+            let mut buffer = vault.as_slice();
+            let mut hashes = Vec::new();
+            while let Some((id, val)) = <(crypto::Hash, &[u8])>::decode(&mut buffer) {
+                hashes.push(crypto::hash::kv(&id, val));
+            }
+            hashes.sort_unstable();
+            // FIXME: maybe we just want to compute the proof wihout allocating a tree
+            let root = *hashes.into_iter().collect::<MerkleTree<_>>().root();
+            if root != profile.vault_root {
+                continue;
+            }
+
+            break 'b (profile, vault);
+        }
+
+        return Err(ChatError::NotFound);
+    };
+
+    cx.storage.recover_profile(profile, vault)
 }

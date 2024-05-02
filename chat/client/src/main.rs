@@ -157,7 +157,7 @@ fn App() -> impl IntoView {
                 loop {
                     let ReminderOwned(list) = state.read_mail().await?;
                     for mail in chat_spec::unpack_mail(&list) {
-                        let mail = MailVariants::decode(&mut &*mail)
+                        let mail = MailVariants::decode_exact(mail)
                             .with_context(|| format!("cant decode mail: {mail:?}"))?;
                         handle_error(
                             handle_mail(mail, &mut new_messages, &mut vault_updates, state).await,

@@ -224,6 +224,33 @@ impl<'a> Decode<'a> for ReminderOwned {
     }
 }
 
+pub struct ReminderVec<T>(pub Vec<T>);
+
+impl<T> AsRef<[T]> for ReminderVec<T> {
+    fn as_ref(&self) -> &[T] {
+        self.0.as_ref()
+    }
+}
+
+impl<T: Encode> Encode for ReminderVec<T> {
+    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
+        for i in &self.0 {
+            i.encode(buffer)?;
+        }
+        Some(())
+    }
+}
+
+impl<'a, T: Decode<'a>> Decode<'a> for ReminderVec<T> {
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let mut s = Vec::new();
+        while !buffer.is_empty() {
+            s.push(<T>::decode(buffer)?);
+        }
+        Some(Self(s))
+    }
+}
+
 impl Encode for String {
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
         self.as_str().encode(buffer)

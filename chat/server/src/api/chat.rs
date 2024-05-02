@@ -48,6 +48,7 @@ pub async fn create(
     );
 
     v.insert(Arc::new(RwLock::new(Chat::new(identity, name))));
+    cx.not_found.remove(&name.into());
 
     Ok(())
 }

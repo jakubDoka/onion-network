@@ -21,3 +21,10 @@ pub fn with_nonce(data: &[u8], nonce: u64) -> Hash {
     hasher.update(&nonce.to_be_bytes());
     hasher.finalize().into()
 }
+
+pub fn kv(key: &[u8], value: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(key);
+    hasher.update(value);
+    hasher.finalize().into()
+}

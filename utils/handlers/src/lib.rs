@@ -6,9 +6,9 @@
 #![feature(trait_alias)]
 
 use {
-    codec::{Codec, Decode, DecodeOwned, Encode, ReminderOwned},
+    codec::{Codec, DecodeOwned, Encode, ReminderOwned},
     futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    std::{io, marker::PhantomData},
+    std::io,
 };
 
 pub type CallId = [u8; 4];
@@ -74,11 +74,20 @@ impl_tuples_from_request!(A, B, C);
 impl_tuples_from_request!(A, B, C, D);
 impl_tuples_from_request!(A, B, C, D, E);
 
-pub trait FromStream<S: Stream>: Sized + Send + Sync {
+pub trait FromStream<S: Stream>: Sized + Send {
     fn from_context(
         stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_;
+}
+
+impl<S: Send + Stream> FromStream<S> for (S, usize) {
+    fn from_context(
+        stream: &mut Option<S>,
+        len: usize,
+    ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
+        async move { stream.take().ok_or(io::ErrorKind::InvalidInput.into()).map(|s| (s, len)) }
+    }
 }
 
 #[derive(Codec)]
@@ -95,7 +104,7 @@ impl<T: DecodeOwned + Send + Sync + 'static, S: Stream> FromStream<S> for DecFix
             let bytes = codec::uninit_to_zeroed_slice(&mut result);
             debug_assert_eq!(bytes.len(), len);
             stream.read_exact(bytes).await?;
-            Ok(DecFixed(T::decode(&mut &*bytes).ok_or(io::ErrorKind::InvalidData)?))
+            Ok(DecFixed(T::decode_exact(&bytes).ok_or(io::ErrorKind::InvalidData)?))
         }
     }
 }
@@ -120,7 +129,7 @@ impl<T: DecodeOwned + Send + Sync, S: Stream> FromStream<S> for Dec<T> {
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
             let ReminderOwned(buffer) = ReminderOwned::from_context(stream, len).await?;
-            Ok(Dec(T::decode(&mut &*buffer).ok_or(io::ErrorKind::InvalidData)?))
+            Ok(Dec(T::decode_exact(&buffer).ok_or(io::ErrorKind::InvalidData)?))
         }
     }
 }
@@ -135,32 +144,6 @@ impl<S: Stream> FromStream<S> for ReminderOwned {
             let mut buffer = vec![0u8; len];
             stream.read_exact(&mut buffer).await?;
             Ok(ReminderOwned(buffer))
-        }
-    }
-}
-
-#[derive(Codec)]
-pub struct BorDec<'a, T>(ReminderOwned, PhantomData<(&'a (), T)>);
-
-impl<'a, T: Decode<'a>> BorDec<'a, T> {
-    pub fn get(&'a self) -> T {
-        T::decode(&mut &*self.0 .0).unwrap()
-    }
-}
-
-unsafe impl<'a, T> Send for BorDec<'a, T> {}
-
-impl<'a, T: Decode<'a> + Sync, S: Stream> FromStream<S> for BorDec<'a, T> {
-    fn from_context(
-        stream: &mut Option<S>,
-        len: usize,
-    ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
-        async move {
-            let ReminderOwned(buffer) = ReminderOwned::from_context(stream, len).await?;
-            if T::decode(&mut unsafe { std::mem::transmute(buffer.as_slice()) }).is_none() {
-                return Err(io::ErrorKind::InvalidData.into());
-            }
-            Ok(BorDec(ReminderOwned(buffer), PhantomData))
         }
     }
 }
@@ -236,10 +219,8 @@ pub type HandlerRet<S> = io::Result<Option<S>>;
 
 #[macro_export]
 macro_rules! router {
-    ($vis:vis $name:ident($state:ty): $($id:pat => $endpoint:expr;)*) => {
-        $vis async fn $name<S>(id: CallId, prefix: u8, len: usize, mut context: $state, stream: S) -> Option<$crate::HandlerRet<S>>
-            where
-                S: $crate::Stream,
+    ($vis:vis $name:ident($state:ty, $stream:ty): $($id:pat => $endpoint:expr;)*) => {
+        $vis async fn $name(id: CallId, prefix: u8, len: usize, mut context: $state, stream: $stream) -> Option<$crate::HandlerRet<$stream>>
         {
             Some(match prefix {
                 $($id => $crate::Handler::handle($endpoint, id, len, &mut context, stream).await,)*

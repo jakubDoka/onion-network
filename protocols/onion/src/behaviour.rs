@@ -47,7 +47,7 @@ impl Behaviour {
     pub fn new(config: Config) -> Self {
         Self {
             router: Default::default(),
-            streaming: streaming::Behaviour::new(),
+            streaming: streaming::Behaviour::new(|| ROUTING_PROTOCOL),
             inbound: Default::default(),
             outbound: Default::default(),
 
@@ -282,7 +282,7 @@ impl NetworkBehaviour for Behaviour {
         _: &libp2p::Multiaddr,
         _: &libp2p::Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        self.streaming.new_handler(peer_id, cid, || ROUTING_PROTOCOL)
+        self.streaming.new_handler(peer_id, cid)
     }
 
     fn handle_established_outbound_connection(
@@ -292,7 +292,7 @@ impl NetworkBehaviour for Behaviour {
         _: &libp2p::Multiaddr,
         _: libp2p::core::Endpoint,
     ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        self.streaming.new_handler(peer_id, cid, || ROUTING_PROTOCOL)
+        self.streaming.new_handler(peer_id, cid)
     }
 
     fn on_swarm_event(&mut self, se: libp2p::swarm::FromSwarm) {

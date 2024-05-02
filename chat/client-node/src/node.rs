@@ -75,7 +75,11 @@ impl Node {
                 onion: onion::Config::default()
                     .keep_alive_interval(Duration::from_secs(100))
                     .build(),
-                ..Default::default()
+                key_share: onion::key_share::Behaviour::default(),
+                chat_dht: dht::Behaviour::default(),
+                satelite_dht: dht::Behaviour::default(),
+                storage_dht: dht::Behaviour::default(),
+                streaming: streaming::Behaviour::new(|| chat_spec::PROTO_NAME),
             },
             keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_wasm_executor()
@@ -619,7 +623,7 @@ impl Drop for Node {
     }
 }
 
-#[derive(libp2p::swarm::NetworkBehaviour, Default)]
+#[derive(libp2p::swarm::NetworkBehaviour)]
 struct Behaviour {
     onion: onion::Behaviour,
     key_share: onion::key_share::Behaviour,

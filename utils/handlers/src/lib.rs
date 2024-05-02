@@ -75,14 +75,14 @@ impl_tuples_from_request!(A, B, C, D);
 impl_tuples_from_request!(A, B, C, D, E);
 
 pub trait FromStream<S: Stream>: Sized + Send {
-    fn from_context(
+    fn from_stream(
         stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_;
 }
 
 impl<S: Send + Stream> FromStream<S> for (S, usize) {
-    fn from_context(
+    fn from_stream(
         stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
@@ -94,7 +94,7 @@ impl<S: Send + Stream> FromStream<S> for (S, usize) {
 pub struct DecFixed<T>(pub T);
 
 impl<T: DecodeOwned + Send + Sync + 'static, S: Stream> FromStream<S> for DecFixed<T> {
-    fn from_context(
+    fn from_stream(
         stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
@@ -110,7 +110,7 @@ impl<T: DecodeOwned + Send + Sync + 'static, S: Stream> FromStream<S> for DecFix
 }
 
 impl<S: Stream> FromStream<S> for () {
-    fn from_context(
+    fn from_stream(
         _stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
@@ -123,19 +123,19 @@ impl<S: Stream> FromStream<S> for () {
 pub struct Dec<T>(pub T);
 
 impl<T: DecodeOwned + Send + Sync, S: Stream> FromStream<S> for Dec<T> {
-    fn from_context(
+    fn from_stream(
         stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
-            let ReminderOwned(buffer) = ReminderOwned::from_context(stream, len).await?;
+            let ReminderOwned(buffer) = ReminderOwned::from_stream(stream, len).await?;
             Ok(Dec(T::decode_exact(&buffer).ok_or(io::ErrorKind::InvalidData)?))
         }
     }
 }
 
 impl<S: Stream> FromStream<S> for ReminderOwned {
-    fn from_context(
+    fn from_stream(
         stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
@@ -173,7 +173,7 @@ pub trait Handler<C, S, A, B>: Sized + Clone + Send + Sync + 'static {
         async move {
             let args = args.ok_or(io::ErrorKind::InvalidInput)?;
             let mut stream = Some(stream);
-            let res = self.call(args, B::from_context(&mut stream, len).await?).await;
+            let res = self.call(args, B::from_stream(&mut stream, len).await?).await;
             if let Some(ref mut stream) = stream {
                 let res = res.to_bytes();
                 if !res.is_empty() {

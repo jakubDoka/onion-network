@@ -419,14 +419,12 @@ pub trait RequestContext: Sized {
         let mut them = self.subscription_for(identity).await?;
         let keys = them.fetch_keys().await.context("fetching keys")?;
         let (cp, ss) = self.with_keys(|k| k.enc.encapsulate(&keys.enc, OsRng))?;
-        log::info!("encapsulated friend request: {:?} {:?}", ss, keys.enc);
         let (dr, init, id) = DoubleRatchet::sender(ss, OsRng);
 
         let us = self.with_keys(UserKeys::identity)?;
 
         let request = FriendRequest { username: self.with_keys(|k| k.name)?, identity: us, init };
         let mail = MailVariants::FriendRequest { cp, payload: Encrypted::new(request, ss) };
-        log::info!("sending friend request: {:?}", mail.to_bytes());
         them.send_mail(mail).await?;
 
         let friend = FriendMeta { dr, identity, id };
@@ -569,7 +567,6 @@ impl MailVariants {
         updates: &mut Vec<VaultKey>,
         messages: &mut Vec<(UserName, FriendMessage)>,
     ) -> anyhow::Result<()> {
-        log::info!("handling mail: {:?}", self.to_bytes());
         match self {
             MailVariants::ChatInvite { chat, cp } => {
                 let secret = ctx
@@ -582,12 +579,6 @@ impl MailVariants {
                 let secret = ctx
                     .with_keys(|k| k.enc.decapsulate(&cp))?
                     .context("fialed to decapsulate friend request")?;
-
-                log::info!(
-                    "decrypted friend request: {:?} {:?}",
-                    secret,
-                    ctx.with_keys(|k| k.enc.public_key())
-                );
 
                 let FriendRequest { username, identity, init } =
                     payload.decrypt(secret).context("failed to decrypt frined request")?;

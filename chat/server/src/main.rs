@@ -172,7 +172,8 @@ impl Server {
                     .include_in_vis(sender.clone()),
                 dht: dht::Behaviour::new(chain_api::filter_incoming),
                 report: topology_wrapper::report::new(receiver),
-                streaming: streaming::Behaviour::new().include_in_vis(sender),
+                streaming: streaming::Behaviour::new(|| chat_spec::PROTO_NAME)
+                    .include_in_vis(sender),
             },
             keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_tokio_executor()

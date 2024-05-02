@@ -12,10 +12,12 @@ use {
     arrayvec::ArrayVec,
     codec::Codec,
     crypto::proof::{Nonce, Proof},
+    libp2p::StreamProtocol,
     std::{io, num::NonZeroUsize},
 };
 
 pub const REPLICATION_FACTOR: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
+pub const PROTO_NAME: StreamProtocol = StreamProtocol::new("/orion-den/chat/0.1.0");
 
 pub type BlockNumber = u64;
 pub type Identity = crypto::Hash;

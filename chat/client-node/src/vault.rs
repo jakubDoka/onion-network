@@ -133,16 +133,12 @@ impl Vault {
     pub fn merkle_hash(&self) -> crypto::Hash {
         let VaultKeys(keys) = Storage::get([]).unwrap_or_default();
 
-        log::info!("keys: {:?}", keys);
-
         let mut hashes = keys
             .iter()
             .filter_map(|k| self.get_key(*k))
             .filter_map(|k| Storage::get(k).map(|VaultValue(v)| crypto::hash::kv(&k, &v)))
             .collect::<Vec<_>>();
         hashes.sort_unstable();
-
-        log::info!("hashes: {:?}", hashes);
 
         *hashes.into_iter().collect::<MerkleTree<_>>().root()
     }

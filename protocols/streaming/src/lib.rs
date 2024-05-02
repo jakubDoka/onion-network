@@ -24,8 +24,6 @@ use {
     },
 };
 
-component_utils::decl_stream_protocol!(PROTOCOL_NAME = "streaming");
-
 #[derive(Default, Debug)]
 pub struct Connection {
     id: Option<ConnectionId>,
@@ -38,16 +36,16 @@ impl Connection {
     }
 }
 
-#[derive(Default)]
 pub struct Behaviour {
     connections: HashMap<PeerId, Connection>,
     events: Vec<Event>,
     waker: Option<std::task::Waker>,
+    protocol: fn() -> StreamProtocol,
 }
 
 impl Behaviour {
-    pub fn new() -> Self {
-        Self { ..Default::default() }
+    pub fn new(proto: fn() -> StreamProtocol) -> Self {
+        Self { connections: HashMap::new(), events: Vec::new(), waker: None, protocol: proto }
     }
 
     pub fn is_resolving_stream_for(&self, peer: PeerId) -> bool {
@@ -66,7 +64,6 @@ impl Behaviour {
         &mut self,
         peer: PeerId,
         cid: ConnectionId,
-        proto: fn() -> StreamProtocol,
     ) -> Result<Handler, ConnectionDenied> {
         let conn = self.connections.entry(peer).or_default();
         if conn.id.is_some() && conn.id != Some(cid) {
@@ -74,7 +71,7 @@ impl Behaviour {
         }
         conn.id = Some(cid);
         conn.pending_requests += std::mem::take(&mut conn.new_requests);
-        Ok(Handler::new(conn.pending_requests, proto))
+        Ok(Handler::new(conn.pending_requests, self.protocol))
     }
 }
 
@@ -95,7 +92,7 @@ impl NetworkBehaviour for Behaviour {
         _: &libp2p::Multiaddr,
         _: &libp2p::Multiaddr,
     ) -> Result<libp2p::swarm::THandler<Self>, ConnectionDenied> {
-        self.new_handler(peer_id, cid, || PROTOCOL_NAME)
+        self.new_handler(peer_id, cid)
     }
 
     fn handle_established_outbound_connection(
@@ -105,7 +102,7 @@ impl NetworkBehaviour for Behaviour {
         _: &libp2p::Multiaddr,
         _: libp2p::core::Endpoint,
     ) -> Result<libp2p::swarm::THandler<Self>, ConnectionDenied> {
-        self.new_handler(peer_id, cid, || PROTOCOL_NAME)
+        self.new_handler(peer_id, cid)
     }
 
     fn on_swarm_event(&mut self, event: libp2p::swarm::FromSwarm) {
@@ -307,7 +304,7 @@ mod test {
         std::{future::Future, time::Duration},
     };
 
-    #[derive(NetworkBehaviour, Default)]
+    #[derive(NetworkBehaviour)]
     struct TestBehatiour {
         rpc: Behaviour,
         dht: dht::Behaviour,
@@ -322,7 +319,10 @@ mod test {
         let peer_ids = pks.iter().map(|kp| kp.to_peer_id()).collect::<Vec<_>>();
         let servers = pks.into_iter().enumerate().map(|(i, kp)| {
             let i = i + 1;
-            let beh = TestBehatiour::default();
+            let beh = TestBehatiour {
+                rpc: Behaviour::new(|| StreamProtocol::new("/foo/bar/1")),
+                dht: Default::default(),
+            };
             let transport = LatentTransport::new(
                 libp2p::core::transport::memory::MemoryTransport::default(),
                 Duration::from_millis(10),

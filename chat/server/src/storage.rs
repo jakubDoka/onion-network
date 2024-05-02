@@ -78,7 +78,6 @@ impl Storage {
             );
             hashes.sort_unstable();
             hashes.dedup();
-            log::info!("hashes: {:?}", hashes);
             let hashes = hashes.into_iter().collect::<MerkleTree<_>>();
             handlers::ensure!(*hashes.root() == proof.context, ChatError::InvalidProofContext);
         }

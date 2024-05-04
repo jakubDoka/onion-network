@@ -1,16 +1,19 @@
 use {
     super::Nonce,
-    crate::{BlockNumber, ChatError, Identity},
+    crate::{ChatError, Identity},
     arrayvec::ArrayString,
     codec::{Buffer, Codec, Decode, Encode, Reminder, ReminderOwned},
     std::{fmt::Display, iter, ops::Range, str::FromStr, time::SystemTime},
 };
 
 pub const CHAT_NAME_CAP: usize = 32;
+pub const MAX_MESSAGE_SIZE: usize = 1024 - 40;
+pub const MAX_MESSAGE_FETCH_SIZE: usize = MAX_MESSAGE_SIZE * 20;
 
 pub type Rank = u32;
 
 #[derive(Codec, Default, Clone, Copy, Debug)]
+#[repr(packed)]
 pub struct Member {
     pub action: Nonce,
     pub permissions: Permissions,
@@ -38,7 +41,13 @@ impl Member {
         }
         self.frozen_until = current_ms + self.action_cooldown_ms as u64;
 
-        self.permissions.contains(permission).then_some(()).ok_or(ChatError::NoPermission)
+        { self.permissions }.contains(permission).then_some(()).ok_or(ChatError::NoPermission)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(self as *const _ as *const u8, std::mem::size_of::<Self>())
+        }
     }
 }
 
@@ -149,15 +158,7 @@ pub struct Message<'a> {
     pub content: Reminder<'a>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Codec)]
-pub struct Cursor {
-    pub block: BlockNumber,
-    pub offset: usize,
-}
-
-impl Cursor {
-    pub const INIT: Self = Self { block: BlockNumber::MAX, offset: 0 };
-}
+pub type Cursor = u64;
 
 pub type ChatName = ArrayString<CHAT_NAME_CAP>;
 

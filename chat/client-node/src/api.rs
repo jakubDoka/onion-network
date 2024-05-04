@@ -401,32 +401,49 @@ impl Member {
 
     #[wasm_bindgen(getter)]
     pub fn can_send(&self) -> bool {
-        self.inner.permissions.contains(chat_spec::Permissions::SEND)
+        contains(self.inner.permissions, chat_spec::Permissions::SEND)
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_can_send(&mut self, can: bool) {
-        self.inner.permissions.set(chat_spec::Permissions::SEND, can);
+        self.inner.permissions = updated(self.inner.permissions, chat_spec::Permissions::SEND, can);
     }
 
     #[wasm_bindgen(getter)]
     pub fn can_kick(&self) -> bool {
-        self.inner.permissions.contains(chat_spec::Permissions::KICK)
+        contains(self.inner.permissions, chat_spec::Permissions::KICK)
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_can_kick(&mut self, can: bool) {
-        self.inner.permissions.set(chat_spec::Permissions::KICK, can);
+        self.inner.permissions = updated(self.inner.permissions, chat_spec::Permissions::KICK, can);
     }
 
     #[wasm_bindgen(getter)]
     pub fn can_invite(&self) -> bool {
-        self.inner.permissions.contains(chat_spec::Permissions::INVITE)
+        contains(self.inner.permissions, chat_spec::Permissions::INVITE)
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_can_invite(&mut self, can: bool) {
-        self.inner.permissions.set(chat_spec::Permissions::INVITE, can);
+        self.inner.permissions =
+            updated(self.inner.permissions, chat_spec::Permissions::INVITE, can);
+    }
+}
+
+fn contains(perms: chat_spec::Permissions, perm: chat_spec::Permissions) -> bool {
+    perms & perm != chat_spec::Permissions::empty()
+}
+
+fn updated(
+    perms: chat_spec::Permissions,
+    perm: chat_spec::Permissions,
+    can: bool,
+) -> chat_spec::Permissions {
+    if can {
+        perms | perm
+    } else {
+        perms & !perm
     }
 }
 

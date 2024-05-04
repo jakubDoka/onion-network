@@ -308,10 +308,19 @@ fn pick_route(
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 type Subs = RefCell<HashMap<NodeIdentity, RawSub>>;
 
-enum SubscriptionRequest {
-    Chat(ChatName, mpsc::Sender<ChatEvent>),
-    Profile(Identity, mpsc::Sender<MailVariants>),
-    Request(Prefix, Topic, Vec<u8>, oneshot::Sender<RawResponse>),
+struct SubscriptionRequest {
+    pub prefix: Prefix,
+    pub topic: Topic,
+    pub body: Vec<u8>,
+    pub rc: RegisteredCall,
+}
+
+enum RegisteredCall {
+    ChatSub(ChatName, mpsc::Sender<ChatEvent>),
+    NewChatSub(ChatName, mpsc::Sender<ChatEvent>),
+    Request(oneshot::Sender<RawResponse>),
+    ProfileSub(Identity, mpsc::Sender<MailVariants>),
+    NewProfileSub(Identity, mpsc::Sender<MailVariants>),
 }
 
 pub enum NodeRequest {
@@ -387,7 +396,7 @@ pub struct Sub<T> {
 impl Sub<ChatName> {
     pub async fn subscribe(&mut self) -> Option<mpsc::Receiver<ChatEvent>> {
         let (tx, rx) = mpsc::channel(10);
-        self.sub.requests.send(SubscriptionRequest::Chat(self.topic, tx)).await.ok()?;
+        self.subscribe_low(RegisteredCall::NewChatSub(self.topic, tx)).await?;
         Some(rx)
     }
 }
@@ -395,7 +404,7 @@ impl Sub<ChatName> {
 impl Sub<Identity> {
     pub async fn subscribe(&mut self) -> Option<mpsc::Receiver<MailVariants>> {
         let (tx, rx) = mpsc::channel(10);
-        self.sub.requests.send(SubscriptionRequest::Profile(self.topic, tx)).await.ok()?;
+        self.subscribe_low(RegisteredCall::NewProfileSub(self.topic, tx)).await?;
         Some(rx)
     }
 }
@@ -407,6 +416,16 @@ impl<T: Into<Topic> + Clone> Sub<T> {
         request: impl Encode,
     ) -> Result<R, anyhow::Error> {
         self.sub.request(prefix, self.topic.clone(), request).await
+    }
+
+    async fn subscribe_low(&mut self, rc: RegisteredCall) -> Option<()> {
+        let sr = SubscriptionRequest {
+            prefix: rpcs::SUBSCRIBE,
+            topic: self.topic.clone().into(),
+            body: vec![],
+            rc,
+        };
+        self.sub.requests.send(sr).await.ok()
     }
 }
 
@@ -454,9 +473,13 @@ impl RawSub {
         body: impl Encode,
     ) -> anyhow::Result<R> {
         let (tx, rx) = oneshot::channel();
-        self.requests
-            .send(SubscriptionRequest::Request(prefix, topic.into(), body.to_bytes(), tx))
-            .await?;
+        let sr = SubscriptionRequest {
+            prefix,
+            topic: topic.into(),
+            body: body.to_bytes(),
+            rc: RegisteredCall::Request(tx),
+        };
+        self.requests.send(sr).await?;
         R::decode_exact(&rx.await?).context("received invalid response")
     }
 
@@ -464,14 +487,6 @@ impl RawSub {
         mut stream: EncryptedStream,
         mut requests: mpsc::Receiver<SubscriptionRequest>,
     ) -> io::Result<!> {
-        enum RegisteredCall {
-            ChatSub(ChatName, mpsc::Sender<ChatEvent>),
-            NewChatSub(ChatName, mpsc::Sender<ChatEvent>),
-            Request(oneshot::Sender<RawResponse>),
-            ProfileSub(Identity, mpsc::Sender<MailVariants>),
-            NewProfileSub(Identity, mpsc::Sender<MailVariants>),
-        }
-
         type Calls = HashMap<CallId, RegisteredCall>;
 
         async fn handle_request(
@@ -479,26 +494,8 @@ impl RawSub {
             req: Option<SubscriptionRequest>,
             subs: &mut Calls,
         ) -> io::Result<()> {
-            let req = req.ok_or(io::ErrorKind::UnexpectedEof)?;
-
-            // FIXME: Pass this tupple instead
-            let (prefix, topic, body, rc) = match req {
-                SubscriptionRequest::Chat(chat, tx) => (
-                    rpcs::SUBSCRIBE,
-                    Topic::Chat(chat),
-                    vec![],
-                    RegisteredCall::NewChatSub(chat, tx),
-                ),
-                SubscriptionRequest::Profile(id, tx) => (
-                    rpcs::SUBSCRIBE,
-                    Topic::Profile(id),
-                    vec![],
-                    RegisteredCall::NewProfileSub(id, tx),
-                ),
-                SubscriptionRequest::Request(prefix, topic, body, tx) => {
-                    (prefix, topic, body, RegisteredCall::Request(tx))
-                }
-            };
+            let SubscriptionRequest { prefix, topic, body, rc } =
+                req.ok_or(io::ErrorKind::UnexpectedEof)?;
 
             let call_id = next_call_id();
             let len = (body.len() as u32).to_be_bytes();
@@ -525,80 +522,79 @@ impl RawSub {
             let mut data = vec![0u8; len];
             stream.read_exact(&mut data).await?;
 
-            let Some(rc) = subs.remove(&header.call_id) else {
+            let Some(mut rc) = subs.remove(&header.call_id) else {
                 log::error!("unexpected response");
                 return Ok(());
             };
 
-            match rc {
-                RegisteredCall::NewChatSub(chat, tx) => 'b: {
+            async fn unsubscribe(stream: &mut EncryptedStream, topic: Topic) -> io::Result<()> {
+                let header = RequestHeader {
+                    prefix: rpcs::UNSUBSCRIBE,
+                    call_id: next_call_id(),
+                    topic: topic.compress(),
+                    len: [0; 4],
+                };
+                stream.write_all(header.as_bytes()).await?;
+                stream.flush().await
+            }
+
+            match &mut rc {
+                RegisteredCall::NewChatSub(..) => {
                     let Some(res) = Result::<(), ChatError>::decode_exact(&data) else {
                         log::error!("invalid chat subscription response");
-                        break 'b;
+                        return Ok(());
                     };
 
                     if let Err(res) = res {
                         log::error!("cannot subscribe to chat: {res}");
-                        break 'b;
+                        return Ok(());
                     }
-
-                    subs.insert(header.call_id, RegisteredCall::ChatSub(chat, tx));
                 }
-                RegisteredCall::NewProfileSub(id, tx) => 'b: {
+                RegisteredCall::NewProfileSub(..) => {
                     let Some(res) = Result::<(), ChatError>::decode_exact(&data) else {
                         log::error!("invalid profile subscription response");
-                        break 'b;
+                        return Ok(());
                     };
 
                     if let Err(res) = res {
                         log::error!("cannot subscribe to profile: {res}");
-                        break 'b;
+                        return Ok(());
                     }
-
-                    subs.insert(header.call_id, RegisteredCall::ProfileSub(id, tx));
                 }
-                RegisteredCall::ChatSub(chat, mut ch) => {
-                    if let Some(ev) = ChatEvent::decode_exact(&data) {
-                        if ch.send(ev).await.is_err() {
-                            let header = RequestHeader {
-                                prefix: rpcs::UNSUBSCRIBE,
-                                call_id: next_call_id(),
-                                topic: Topic::Chat(chat).compress(),
-                                len: [0; 4],
-                            };
-                            stream.write_all(header.as_bytes()).await?;
-                            stream.flush().await?;
-                            return Ok(());
-                        }
-                    } else {
+                &mut RegisteredCall::ChatSub(chat, ref mut ch) => 'a: {
+                    let Some(ev) = ChatEvent::decode_exact(&data) else {
                         log::error!("invalid chat event received");
+                        break 'a;
+                    };
+
+                    if ch.send(ev).await.is_err() {
+                        return unsubscribe(stream, chat.into()).await;
                     }
-                    subs.insert(header.call_id, RegisteredCall::ChatSub(chat, ch));
                 }
-                RegisteredCall::ProfileSub(id, mut ch) => {
-                    if let Some(ev) = MailVariants::decode_exact(&data) {
-                        if ch.send(ev).await.is_err() {
-                            let header = RequestHeader {
-                                prefix: rpcs::UNSUBSCRIBE,
-                                call_id: next_call_id(),
-                                topic: Topic::Profile(id).compress(),
-                                len: [0; 4],
-                            };
-                            stream.write_all(header.as_bytes()).await?;
-                            stream.flush().await?;
-                            return Ok(());
-                        }
-                    } else {
-                        log::error!("invalid mail received: {data:?}");
+                &mut RegisteredCall::ProfileSub(id, ref mut ch) => 'a: {
+                    let Some(ev) = MailVariants::decode_exact(&data) else {
+                        log::error!("invalid chat event received");
+                        break 'a;
+                    };
+
+                    if ch.send(ev).await.is_err() {
+                        return unsubscribe(stream, id.into()).await;
                     }
-                    subs.insert(header.call_id, RegisteredCall::ProfileSub(id, ch));
                 }
+                RegisteredCall::Request(..) => {}
+            }
+
+            subs.insert(header.call_id, match rc {
+                RegisteredCall::NewProfileSub(id, ch) => RegisteredCall::ProfileSub(id, ch),
+                RegisteredCall::NewChatSub(chat, ch) => RegisteredCall::ChatSub(chat, ch),
                 RegisteredCall::Request(resp) => {
                     if resp.send(data).is_err() {
                         log::error!("cannot send response, receiver was dropped");
                     }
+                    return Ok(());
                 }
-            }
+                rc => rc,
+            });
 
             Ok(())
         }

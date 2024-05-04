@@ -206,6 +206,12 @@ impl<'a> Decode<'a> for io::ErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ReminderOwned(pub Vec<u8>);
 
+impl ReminderOwned {
+    pub fn as_slice(&self) -> crate::Reminder {
+        crate::Reminder(&self.0)
+    }
+}
+
 impl AsRef<[u8]> for ReminderOwned {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()

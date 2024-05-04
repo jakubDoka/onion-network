@@ -90,25 +90,6 @@ impl<S: Send + Stream> FromStream<S> for (S, usize) {
     }
 }
 
-#[derive(Codec)]
-pub struct DecFixed<T>(pub T);
-
-impl<T: DecodeOwned + Send + Sync + 'static, S: Stream> FromStream<S> for DecFixed<T> {
-    fn from_stream(
-        stream: &mut Option<S>,
-        len: usize,
-    ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
-        async move {
-            let stream = stream.as_mut().ok_or(io::ErrorKind::InvalidInput)?;
-            let mut result = std::mem::MaybeUninit::<T>::uninit();
-            let bytes = codec::uninit_to_zeroed_slice(&mut result);
-            debug_assert_eq!(bytes.len(), len);
-            stream.read_exact(bytes).await?;
-            Ok(DecFixed(T::decode_exact(&bytes).ok_or(io::ErrorKind::InvalidData)?))
-        }
-    }
-}
-
 impl<S: Stream> FromStream<S> for () {
     fn from_stream(
         _stream: &mut Option<S>,

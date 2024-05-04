@@ -4,7 +4,7 @@ use {
     chat_spec::{rpcs, ChatError, FetchProfileResp, Identity, Mail},
     codec::{Decode, Reminder, ReminderOwned},
     crypto::proof::Proof,
-    handlers::{Dec, DecFixed},
+    handlers::Dec,
     merkle_tree::MerkleTree,
     tokio::task::block_in_place,
 };
@@ -43,7 +43,7 @@ pub async fn remove_from_vault(
 pub async fn fetch_vault_key(
     cx: crate::Context,
     identity: Identity,
-    DecFixed(key): DecFixed<crypto::Hash>,
+    Dec(key): Dec<crypto::Hash>,
 ) -> Result<ReminderOwned> {
     _ = (cx, identity, key);
     Err(ChatError::Todo)

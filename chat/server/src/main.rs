@@ -16,7 +16,6 @@
 #![allow(unused_labels)]
 
 use {
-    self::api::chat::Chat,
     crate::api::State,
     anyhow::Context as _,
     api::{chat, profile, FullReplGroup},
@@ -52,12 +51,10 @@ use {
         net::Ipv4Addr,
         ops::DerefMut,
         path::PathBuf,
-        sync::Arc,
         task::Poll,
         time::{Duration, Instant},
     },
     storage::Storage,
-    tokio::sync::RwLock,
     topology_wrapper::BuildWrapped,
 };
 
@@ -209,7 +206,6 @@ impl Server {
                 storage: Storage::new(config.data_dir),
                 not_found: Default::default(),
                 online: Default::default(),
-                chats: Default::default(),
                 chat_subs: Default::default(),
                 clients: Default::default(),
                 profile_subs: Default::default(),
@@ -521,7 +517,6 @@ pub struct OwnedContext {
     storage: Storage,
     not_found: DashSet<Topic>,
     online: DashMap<Identity, OnlineLocation>,
-    chats: DashMap<ChatName, Arc<RwLock<Chat>>>,
     chat_subs: DashMap<ChatName, HashMap<PathId, CallId>>,
     profile_subs: DashMap<Identity, (PathId, CallId)>,
     ongoing_recovery: DashSet<Topic>,
@@ -599,7 +594,7 @@ impl OwnedContext {
         let msg = &body.to_bytes();
         let header = RequestHeader {
             prefix: send_mail,
-            call_id: [0; 4], // TODO: use call ids when we implement caching
+            call_id: [0; 4],
             topic: topic.compress(),
             len: (msg.len() as u32).to_be_bytes(),
         };
@@ -651,7 +646,7 @@ impl OwnedContext {
 
         let header = RequestHeader {
             prefix: id,
-            call_id: [0; 4], // TODO: use call ids when we implement caching
+            call_id: [0; 4],
             topic: topic.compress(),
             len: (msg.len() as u32).to_be_bytes(),
         };
@@ -704,17 +699,17 @@ impl OwnedContext {
         let topic = topic.into();
         let mut others =
             self.dht.read().closest::<{ REPLICATION_FACTOR.get() + 1 }>(topic.as_bytes());
-        others.retain(|peer| peer != &id.into());
+        others.retain(|peer| peer != &id);
         if others.is_full() {
             return None;
         }
-        Some(others)
+        Some(others.into_iter().map(Into::into).collect())
     }
 
     fn should_recover(&'static self, topic: Topic) -> bool {
         !match topic {
             Topic::Profile(profile) => self.storage.has_profile(profile),
-            Topic::Chat(chat) => self.chats.contains_key(&chat),
+            Topic::Chat(chat) => self.storage.has_chat(chat),
         }
     }
 }

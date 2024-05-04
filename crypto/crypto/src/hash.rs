@@ -28,3 +28,18 @@ pub fn kv(key: &[u8], value: &[u8]) -> Hash {
     hasher.update(value);
     hasher.finalize().into()
 }
+
+pub fn read<const BUFFER_SIZE: usize>(
+    reader: &mut impl std::io::Read,
+    mut len: usize,
+) -> std::io::Result<Hash> {
+    let mut buffer = [0; BUFFER_SIZE];
+    let mut hasher = blake3::Hasher::new();
+    while len > 0 {
+        let red = len.min(BUFFER_SIZE);
+        reader.read_exact(&mut buffer[..red])?;
+        hasher.update(&buffer[..red]);
+        len -= red;
+    }
+    Ok(hasher.finalize().into())
+}

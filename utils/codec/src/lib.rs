@@ -31,6 +31,11 @@ pub mod unsafe_as_raw_bytes {
     }
 }
 
+pub fn find_decode_reminder<'a, T: Decode<'a>>(mut buffer: &'a [u8]) -> &'a [u8] {
+    while let Some(_) = T::decode(&mut buffer) {}
+    buffer
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Reminder<'a>(pub &'a [u8]);
 
@@ -58,6 +63,14 @@ pub trait Buffer {
 pub trait Encode {
     #[must_use = "handle the error"]
     fn encode(&self, buffer: &mut impl Buffer) -> Option<()>;
+
+    fn encode_to_slice<'a>(&self, slice: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        let mut buffer = &mut *slice;
+        self.encode(&mut buffer)?;
+        let reminder = buffer.len();
+        let len = slice.len();
+        Some(&mut slice[..len - reminder])
+    }
 
     #[cfg(feature = "std")]
     fn to_bytes(&self) -> Vec<u8> {

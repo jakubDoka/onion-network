@@ -69,7 +69,7 @@ impl Sub<ChatName> {
     pub async fn fetch_messages(
         &mut self,
         cursor: Cursor,
-    ) -> anyhow::Result<(Cursor, ReminderOwned)> {
+    ) -> anyhow::Result<([u8; chat_spec::MAX_MESSAGE_FETCH_SIZE], Cursor)> {
         self.request(rpcs::FETCH_MESSAGES, cursor).await.map_err(Into::into)
     }
 
@@ -451,10 +451,11 @@ pub trait RequestContext: Sized {
     ) -> anyhow::Result<Vec<RawChatMessage>> {
         let chat_meta = self.with_chat_and_keys(name, |c, _| c.clone())?;
         let mut sub = self.subscription_for(name).await?;
-        let (new_cusor, ReminderOwned(mesages)) = sub.fetch_messages(*cursor).await?;
+        let (messages, new_cusor) = sub.fetch_messages(*cursor).await?;
         *cursor = new_cusor;
 
-        Ok(unpack_messages_ref(&mesages)
+        Ok(unpack_messages_ref(&messages)
+            .inspect(|m| *cursor -= m.len() as Cursor + 2)
             .map(|message| async move {
                 let chat_spec::Message { sender: identity, content, .. } =
                     chat_spec::Message::decode_exact(message).context("invalid message")?;

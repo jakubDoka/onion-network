@@ -1,6 +1,5 @@
 use {
     anyhow::Context,
-    base64::Engine,
     chat_spec::{ChatError, Identity},
     codec::{Codec, Decode, Encode},
     crypto::{
@@ -72,8 +71,7 @@ pub struct Handle {
 impl Handle {
     pub fn load(mut path: PathBuf, id: Identity) -> Result<Self, ChatError> {
         path.push(PROFILE_DIR);
-
-        push_id(&mut path, id)?;
+        super::push_id(&mut path, &id)?;
 
         if !path.exists() {
             return Err(ChatError::NotFound);
@@ -89,18 +87,8 @@ impl Handle {
         path.pop();
 
         path.push(VAULT);
-        let vault = {
-            let path = path.to_str().context("expected utf8 path")?;
-            let flags = lmdb_zero::open::Flags::empty();
-            let lmdb = unsafe {
-                lmdb_zero::EnvBuilder::new()
-                    .map_err(anyhow::Error::from)?
-                    .open(&path, flags, 0o600)
-                    .map_err(anyhow::Error::from)?
-            };
-            lmdb_zero::Database::open(lmdb, None, &lmdb_zero::DatabaseOptions::defaults())
-                .map_err(anyhow::Error::from)?
-        };
+        let vault = super::open_lmdb(&path).context("opening vault")?;
+        path.pop();
 
         Ok(Self { vault, root_file: root_file.into(), mailbox: mailbox.into() })
     }
@@ -157,8 +145,8 @@ impl Handle {
 
     pub fn create(mut path: PathBuf, root: Root, can_owerride: bool) -> Result<(), ChatError> {
         path.push(PROFILE_DIR);
+        super::push_id(&mut path, &root.sign.identity())?;
 
-        push_id(&mut path, root.sign.identity())?;
         if path.exists() {
             if !can_owerride {
                 return Err(ChatError::AlreadyExists);
@@ -274,13 +262,6 @@ impl Handle {
 
 pub(crate) fn exists(mut root: PathBuf, profile: Identity) -> bool {
     root.push(PROFILE_DIR);
-    _ = push_id(&mut root, profile).inspect_err(|e| log::error!("failed to push id: {e}"));
+    _ = super::push_id(&mut root, &profile).inspect_err(|e| log::error!("failed to push id: {e}"));
     root.exists()
-}
-
-fn push_id(root: &mut PathBuf, id: Identity) -> anyhow::Result<()> {
-    let mut id_buf = [0u8; 64];
-    let len = base64::prelude::BASE64_URL_SAFE_NO_PAD.encode_slice(id, &mut id_buf)?;
-    root.push(std::str::from_utf8(&id_buf[..len])?);
-    Ok(())
 }

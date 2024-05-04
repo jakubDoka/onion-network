@@ -137,7 +137,7 @@ impl RoutingTable {
         index.map(|index| &self.routes[index].addr).ok()
     }
 
-    pub fn closest<const COUNT: usize>(&self, key: &[u8]) -> ArrayVec<U256, COUNT> {
+    pub fn closest<const COUNT: usize>(&self, key: &[u8]) -> ArrayVec<[u8; 32], COUNT> {
         let &key = blake3::hash(key).as_bytes();
         let key = U256::from(key);
         let mut slots = ArrayVec::<U256, COUNT>::new();
@@ -158,7 +158,7 @@ impl RoutingTable {
 
         debug_assert!(slots.array_windows().all(|&[a, b]| a ^ key <= b ^ key));
 
-        slots
+        slots.into_iter().map(Into::into).collect()
     }
 }
 

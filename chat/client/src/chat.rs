@@ -55,7 +55,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     let (show_chat, set_show_chat) = create_signal(false);
     let (is_friend, set_is_friend) = create_signal(false);
     let messages = create_node_ref::<leptos::html::Div>();
-    let (cursor, set_cursor) = create_signal(Cursor::Normal(chat_spec::Cursor::INIT));
+    let (cursor, set_cursor) = create_signal(Cursor::Normal(chat_spec::Cursor::MAX));
     let (red_all_messages, set_red_all_messages) = create_signal(false);
 
     let hide_chat = move |_| set_show_chat(false);
@@ -113,7 +113,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
                 for message in state.fetch_messages(chat, &mut cursor).await? {
                     prepend_message(message.sender, message.content);
                 }
-                set_red_all_messages(cursor == chat_spec::Cursor::INIT);
+                set_red_all_messages(cursor == chat_spec::Cursor::MAX);
                 set_cursor(Cursor::Normal(cursor));
             }
             Cursor::Hardened(cursor) => {
@@ -246,7 +246,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             set_current_member(my_user);
             set_show_chat(true);
             set_red_all_messages(false);
-            set_cursor(Cursor::Normal(chat_spec::Cursor::INIT));
+            set_cursor(Cursor::Normal(chat_spec::Cursor::MAX));
             set_is_friend(if_friend);
             current_chat.set(Some(chat));
             crate::navigate_to(format_args!("/chat/{chat}"));
@@ -324,7 +324,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             maxlength: 32,
         },
         is_friend,
-        move || current_member.get().permissions.contains(chat_spec::Permissions::INVITE),
+        move || { current_member.get().permissions }.contains(chat_spec::Permissions::INVITE),
         move |name: String| async move {
             let name = UserName::try_from(name.as_str()).ok().context("invalid username")?;
             let chat = current_chat.get_untracked().context("no chat selected")?;
@@ -417,7 +417,8 @@ pub fn Chat(state: crate::State) -> impl IntoView {
     let hardened_chats_are_empty = move || state.vault.with(|v| v.friends.is_empty());
     let chat_selected = move || current_chat.with(Option::is_some);
     let get_chat = move || current_chat.get().unwrap_or_default().to_string();
-    let can_send = move || current_member.get().permissions.contains(chat_spec::Permissions::SEND);
+    let can_send =
+        move || { current_member.get().permissions }.contains(chat_spec::Permissions::SEND);
 
     request_idle_callback(|| _ = eval("setup_resizable_textarea()").unwrap());
 
@@ -570,7 +571,7 @@ fn member_view(
             id=hex::encode(identity)>
             <th>{mname.to_string()}</th>
             <th>{m.rank}</th>
-            <th>{m.permissions.to_string()}</th>
+            <th>{{ m.permissions }.to_string()}</th>
             <th>{m.action_cooldown_ms}</th>
         </tr>
     }
@@ -634,7 +635,7 @@ fn editable_member(
                 <th>{mname.to_string()}</th>
                 <th><input class="hov pc tac sf" type="number" value=m.rank form="member-form"
                     min=me.get_untracked().rank max=Rank::MAX node_ref=rank required /></th>
-                <th><input class="hov pc tac sf" type="text" value=m.permissions.to_string()
+                <th><input class="hov pc tac sf" type="text" value={ m.permissions }.to_string()
                     node_ref=permissions maxlength=Permissions::COUNT form="member-form"
                     required /></th>
                 <th><input class="hov pc tac sf" type="number" value=m.action_cooldown_ms

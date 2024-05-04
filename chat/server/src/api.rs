@@ -5,7 +5,6 @@ use {
         rpcs, ChatError, ChatName, GroupVec, Identity, Prefix, ReplVec, Topic, REPLICATION_FACTOR,
     },
     codec::{DecodeOwned, Encode},
-    dht::U256,
     handlers::CallId,
     libp2p::PeerId,
     onion::{EncryptedStream, PathId},
@@ -17,26 +16,24 @@ pub mod chat;
 pub mod profile;
 
 type Result<T, E = ChatError> = std::result::Result<T, E>;
-pub type ReplGroup = ReplVec<U256>;
-pub type FullReplGroup = GroupVec<U256>;
+pub type ReplGroup = ReplVec<crypto::Hash>;
+pub type FullReplGroup = GroupVec<crypto::Hash>;
 pub type Origin = PeerId;
 
 pub async fn subscribe(
     cx: Context,
     topic: Topic,
     user: PathId,
-    loc: OnlineLocation,
     cid: CallId,
     _: (),
 ) -> Result<(), ChatError> {
     match topic {
-        Topic::Chat(name) if cx.chats.contains_key(&name) => {
+        Topic::Chat(name) if cx.storage.has_chat(name) => {
             cx.chat_subs.entry(name).or_default().insert(user, cid);
             Ok(())
         }
-        Topic::Profile(id) => {
+        Topic::Profile(id) if cx.storage.has_profile(id) => {
             cx.profile_subs.insert(id, (user, cid));
-            cx.online.insert(id, loc);
             Ok(())
         }
         _ => Err(ChatError::NotFound),
@@ -81,7 +78,7 @@ handlers::router! { pub server_router(Prefix, State, libp2p::Stream):
     rpcs::CREATE_CHAT => chat::create;
     rpcs::ADD_MEMBER => chat::add_member.restored();
     rpcs::KICK_MEMBER => chat::kick_member.restored();
-    rpcs::SEND_BLOCK => chat::handle_message_block
+    rpcs::SEND_BLOCK => chat::proposal
         .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
         .restored();
     rpcs::FETCH_CHAT_DATA => chat::fetch_chat_data.rated(rate_map!(40));

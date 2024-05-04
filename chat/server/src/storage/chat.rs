@@ -43,15 +43,6 @@ pub fn exists(mut root: PathBuf, chat: ChatName) -> bool {
     root.exists()
 }
 
-//#[derive(Default)]
-//pub struct Chat {
-//    pub members: BTreeMap<Identity, Member>,
-//    pub finalized: VecDeque<Block>,
-//    pub number: BlockNumber,
-//    pub buffer: Vec<u8>,
-//    pub votes: VecDeque<BlockVote>,
-//}
-
 #[repr(packed)]
 #[derive(Default)]
 struct Root {

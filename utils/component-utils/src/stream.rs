@@ -1,6 +1,5 @@
 use {
     codec::{Buffer, DecodeOwned, Encode, Reminder},
-    futures::Future,
     std::{future::poll_fn, io, pin::Pin, task::Poll},
 };
 
@@ -318,29 +317,6 @@ impl Drop for PacketWriterGuard<'_> {
                 target.set_len(end);
             },
             PacketWriterGuard::Replacing { end, written, .. } => **end += *written,
-        }
-    }
-}
-
-pub struct ClosingStream<S> {
-    stream: S,
-    error: u8,
-}
-
-impl<S> ClosingStream<S> {
-    pub const fn new(stream: S, error: u8) -> Self {
-        Self { stream, error }
-    }
-}
-
-impl<S: futures::AsyncWrite + Unpin> Future for ClosingStream<S> {
-    type Output = Result<(), io::Error>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
-        match futures::ready!(Pin::new(&mut this.stream).poll_write(cx, &[this.error]))? {
-            0 => Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
-            _ => Poll::Ready(Ok(())),
         }
     }
 }

@@ -13,7 +13,13 @@ use {
     multihash::Multihash,
     primitive_types::U256,
     rand_core::CryptoRngCore,
-    std::{io, ops::DerefMut, pin::Pin, task::Poll, u16, usize},
+    std::{
+        io::{self, Write},
+        ops::DerefMut,
+        pin::Pin,
+        task::Poll,
+        u16, usize,
+    },
 };
 
 #[derive(Clone)]
@@ -25,7 +31,7 @@ pub struct Config<R> {
 
 impl<R> Config<R> {
     pub fn new(rng: R, kp: sign::Keypair) -> Self {
-        Self { kp, rng, buffer_size: 1024 * 32 }
+        Self { kp, rng, buffer_size: 1024 * 64 }
     }
 
     /// configure buffer size, must be greater than crypto::TAG_SIZE
@@ -273,6 +279,7 @@ where
 
         let mut updated = true;
         while std::mem::take(&mut updated) {
+            std::io::stdout().flush().unwrap();
             'encrypt: {
                 if s.write_buffer.len() - s.writable_end < s.write_buffer.capacity() / 2 {
                     break 'encrypt;
@@ -301,7 +308,9 @@ where
             }
 
             'gc: {
-                if s.write_buffer.len() < s.write_buffer.capacity() - TAG_SIZE {
+                if s.write_buffer.len() < s.write_buffer.capacity() - TAG_SIZE
+                    || s.writable_start == 0
+                {
                     break 'gc;
                 }
 
@@ -377,8 +386,9 @@ where
 
         let mut updated = true;
         while std::mem::take(&mut updated) {
+            std::io::stdout().flush().unwrap();
             'gc: {
-                if s.read_buffer.len() != s.read_buffer.capacity() {
+                if s.read_buffer.len() != s.read_buffer.capacity() || s.readable_start == 0 {
                     break 'gc;
                 }
 
@@ -543,28 +553,25 @@ impl PeerIdExt for PeerId {
 #[cfg(test)]
 mod tests {
     use {
-        futures::StreamExt,
-        libp2p::{Multiaddr, Transport},
+        futures::{AsyncReadExt, AsyncWriteExt, StreamExt},
+        libp2p::{swarm::NetworkBehaviour, Multiaddr, StreamProtocol, Transport},
         libp2p_core::upgrade::Version,
         rand_core::OsRng,
         std::time::Duration,
     };
 
-    fn create_swarm() -> (libp2p::Swarm<libp2p::ping::Behaviour>, crypto::sign::Keypair) {
+    fn create_swarm<T: NetworkBehaviour>(beh: T) -> (libp2p::Swarm<T>, crypto::sign::Keypair) {
         let kp = crypto::sign::Keypair::new(OsRng);
         let transport = libp2p::tcp::tokio::Transport::default()
             .upgrade(Version::V1)
             .authenticate(super::Config::new(OsRng, kp).with_buffer_size(300))
             .multiplex(libp2p::yamux::Config::default())
             .boxed();
-        let behaviour = libp2p::ping::Behaviour::new(
-            libp2p::ping::Config::new().with_interval(Duration::from_millis(1)),
-        );
 
         (
             libp2p::Swarm::new(
                 transport,
-                behaviour,
+                beh,
                 super::hash_to_peer_id(kp.identity()),
                 libp2p::swarm::Config::with_tokio_executor()
                     .with_idle_connection_timeout(Duration::MAX),
@@ -574,11 +581,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test() {
+    async fn test_ping() {
         _ = env_logger::builder().is_test(true).try_init();
 
-        let (mut swarm1, _kp1) = create_swarm();
-        let (mut swarm2, _kp2) = create_swarm();
+        let (mut swarm1, _kp1) = create_swarm(libp2p::ping::Behaviour::new(
+            libp2p::ping::Config::new().with_interval(Duration::from_millis(1)),
+        ));
+        let (mut swarm2, _kp2) = create_swarm(libp2p::ping::Behaviour::new(
+            libp2p::ping::Config::new().with_interval(Duration::from_millis(1)),
+        ));
 
         swarm1.listen_on("/ip4/0.0.0.0/tcp/7000".parse().unwrap()).unwrap();
         swarm2.dial("/ip4/127.0.0.1/tcp/7000".parse::<Multiaddr>().unwrap()).unwrap();
@@ -592,5 +603,58 @@ mod tests {
             }
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_big_packets() {
+        _ = env_logger::builder().is_test(true).try_init();
+
+        let (mut swarm1, _kp1) =
+            create_swarm(streaming::Behaviour::new(|| StreamProtocol::new("/foo")));
+        let (mut swarm2, _kp2) =
+            create_swarm(streaming::Behaviour::new(|| StreamProtocol::new("/foo")));
+
+        swarm1.listen_on("/ip4/0.0.0.0/tcp/7001".parse().unwrap()).unwrap();
+        swarm2.dial("/ip4/127.0.0.1/tcp/7001".parse::<Multiaddr>().unwrap()).unwrap();
+
+        let (mut stream1, mut stream2) = (None::<libp2p::Stream>, None::<libp2p::Stream>);
+        let (mut stram1, mut stream2) = loop {
+            tokio::select! {
+                e = swarm1.next() => match e {
+                    Some(libp2p::swarm::SwarmEvent::Behaviour(streaming::Event::OutgoingStream(_, inbound))) => {
+                        stream1 = Some(inbound.unwrap());
+                    }
+                    Some(libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, ..}) => {
+                        swarm1.behaviour_mut().create_stream(peer_id);
+                    }
+                    _ => log::info!("event1: {:?}", e),
+                },
+                e = swarm2.next() => match e {
+                    Some(libp2p::swarm::SwarmEvent::Behaviour(streaming::Event::IncomingStream(_, inbound))) => {
+                        stream2 = Some(inbound);
+                    }
+                    _ => log::info!("event2: {:?}", e),
+                },
+            }
+
+            if stream1.is_some() && stream2.is_some() {
+                break (stream1.unwrap(), stream2.unwrap());
+            }
+        };
+
+        tokio::spawn(async move {
+            let mut buf = [0; 150];
+            loop {
+                let n = stram1.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+
+        for i in 0..20000 {
+            let buf = [0; 2000];
+            stream2.write_all(&buf[..i % 1000 + 1000]).await.unwrap();
+        }
     }
 }

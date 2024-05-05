@@ -8,7 +8,7 @@ use {
 
 pub const CHAT_NAME_CAP: usize = 32;
 pub const MAX_MESSAGE_SIZE: usize = 1024 - 40;
-pub const MAX_MESSAGE_FETCH_SIZE: usize = MAX_MESSAGE_SIZE * 20;
+pub const MAX_MESSAGE_FETCH_SIZE: usize = MAX_MESSAGE_SIZE * 4;
 
 pub type Rank = u32;
 

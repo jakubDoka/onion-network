@@ -474,8 +474,10 @@ async fn run_client(
         tokio::select! {
             event = events.select_next_some() => handle_event(&mut stream, event).await?,
             res = stream.read_exact(&mut buf) => {
+                log::info!("peer {path_id:?} sent a request");
                 stream = handle_request(path_id, stream, res, buf, cx).await?;
                 stream.flush().await?;
+                log::info!("peer {path_id:?} request handled");
             },
         }
     }

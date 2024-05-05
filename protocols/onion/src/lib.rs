@@ -8,6 +8,7 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unwrap_infallible)]
 #![feature(extract_if)]
+#![feature(never_type)]
 
 mod behaviour;
 pub mod key_share;

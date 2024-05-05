@@ -58,6 +58,7 @@ handlers::router! { pub client_router(Prefix, State, EncryptedStream):
     rpcs::CREATE_CHAT => chat::create.repld();
     rpcs::ADD_MEMBER => chat::add_member.repld();
     rpcs::KICK_MEMBER => chat::kick_member.repld();
+    rpcs::UPDATE_MEMBER => chat::update_member.repld();
     rpcs::SEND_MESSAGE => chat::send_message.repld();
     rpcs::FETCH_MESSAGES => chat::fetch_messages;
     rpcs::FETCH_MEMBERS => chat::fetch_members;
@@ -77,6 +78,7 @@ handlers::router! { pub client_router(Prefix, State, EncryptedStream):
 handlers::router! { pub server_router(Prefix, State, libp2p::Stream):
     rpcs::CREATE_CHAT => chat::create;
     rpcs::ADD_MEMBER => chat::add_member.restored();
+    rpcs::UPDATE_MEMBER => chat::update_member.restored();
     rpcs::KICK_MEMBER => chat::kick_member.restored();
     rpcs::SEND_BLOCK => chat::proposal
         .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })

@@ -455,8 +455,9 @@ pub trait RequestContext: Sized {
         *cursor = new_cusor;
 
         Ok(unpack_messages_ref(&messages)
-            .inspect(|m| *cursor -= m.len() as Cursor + 2)
+            .take_while(|m| !m.is_empty())
             .map(|message| async move {
+                log::info!("message: {:?}", message);
                 let chat_spec::Message { sender: identity, content, .. } =
                     chat_spec::Message::decode_exact(message).context("invalid message")?;
                 let content = chain_api::decrypt(content.0.to_owned(), chat_meta.secret)
@@ -482,7 +483,7 @@ pub trait RequestContext: Sized {
     ) -> anyhow::Result<()> {
         let proof = self
             .with_chat_and_keys(name, |c, k| Proof::new(&k.sign, &mut c.action_no, name, OsRng))?;
-        self.subscription_for(name).await?.add_member(proof, member, config).await
+        self.subscription_for(name).await?.update_member(proof, member, config).await
     }
 }
 

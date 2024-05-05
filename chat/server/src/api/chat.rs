@@ -33,6 +33,15 @@ pub async fn add_member(
     Ok(())
 }
 
+pub async fn update_member(
+    cx: crate::Context,
+    Dec((proof, identity, member)): Dec<(Proof<ChatName>, Identity, Member)>,
+) -> Result<()> {
+    block_in_place(|| cx.storage.get_chat(proof.context)?.update_member(proof, identity, member))?;
+    cx.push_chat_event(proof.context, ChatEvent::Member(identity, member)).await;
+    Ok(())
+}
+
 pub async fn kick_member(
     cx: crate::Context,
     Dec((proof, identity)): Dec<(Proof<ChatName>, Identity)>,

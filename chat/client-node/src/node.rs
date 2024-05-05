@@ -164,8 +164,9 @@ impl Node {
             match swarm.select_next_some().await {
                 SwarmEvent::Behaviour(BehaviourEvent::Onion(onion::Event::OutboundStream(
                     stream,
+                    peer,
                     id,
-                ))) if id == pid => break stream.context("opening profile route")?,
+                ))) if id == pid => break (stream.context("opening profile route")?, peer),
                 e => log::debug!("{:?}", e),
             }
         };
@@ -240,9 +241,10 @@ impl Node {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Onion(onion::Event::OutboundStream(
                 stream,
+                peer,
                 id,
             ))) => {
-                if let Ok((stream, peer)) = stream {
+                if let Ok(stream) = stream {
                     if let Some(tx) = self.pending_streams.remove(&(peer, id)) {
                         tx.send((peer.to_hash(), stream)).ok();
                     }
@@ -309,10 +311,10 @@ type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
 type Subs = RefCell<HashMap<NodeIdentity, RawSub>>;
 
 struct SubscriptionRequest {
-    pub prefix: Prefix,
-    pub topic: Topic,
-    pub body: Vec<u8>,
-    pub rc: RegisteredCall,
+    prefix: Prefix,
+    topic: Topic,
+    body: Vec<u8>,
+    rc: RegisteredCall,
 }
 
 enum RegisteredCall {
@@ -398,6 +400,15 @@ impl Sub<ChatName> {
         let (tx, rx) = mpsc::channel(10);
         self.subscribe_low(RegisteredCall::NewChatSub(self.topic, tx)).await?;
         Some(rx)
+    }
+
+    pub async fn update_member(
+        &mut self,
+        proof: Proof<ChatName>,
+        member: Identity,
+        config: Member,
+    ) -> Result<(), anyhow::Error> {
+        self.request(rpcs::UPDATE_MEMBER, (proof, member, config)).await
     }
 }
 
@@ -494,6 +505,7 @@ impl RawSub {
             req: Option<SubscriptionRequest>,
             subs: &mut Calls,
         ) -> io::Result<()> {
+            log::debug!("handling request");
             let SubscriptionRequest { prefix, topic, body, rc } =
                 req.ok_or(io::ErrorKind::UnexpectedEof)?;
 
@@ -514,6 +526,7 @@ impl RawSub {
             buf: [u8; std::mem::size_of::<ResponseHeader>()],
             subs: &mut Calls,
         ) -> io::Result<()> {
+            log::debug!("handling response");
             res?;
 
             let header = ResponseHeader::from_array(buf);

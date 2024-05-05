@@ -5,8 +5,8 @@ use {
     },
     aes_gcm::aead::OsRng,
     codec::Encode,
-    component_utils::{ClosingStream, FindAndRemove},
-    core::{fmt, slice},
+    component_utils::FindAndRemove,
+    core::slice,
     futures::{
         stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future,
         FutureExt, StreamExt,
@@ -16,24 +16,139 @@ use {
         identity::PeerId,
         swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError, ToSwarm as TS},
     },
-    std::{
-        collections::VecDeque, convert::Infallible, io, ops::DerefMut, pin::Pin, sync::Arc,
-        task::Poll,
-    },
+    std::{collections::VecDeque, io, pin::Pin, task::Poll},
     thiserror::Error,
 };
 
+type ClosingStream = impl Future<Output = io::Result<()>>;
+
+struct Route {
+    last_packet: instant::Instant,
+    forward: Channel,
+    backward: Channel,
+    from: libp2p::Stream,
+    to: libp2p::Stream,
+    close_waker: Option<std::task::Waker>,
+    closed: bool,
+}
+
+impl Route {
+    fn new(from: libp2p::Stream, to: libp2p::Stream) -> Self {
+        Self {
+            forward: Channel::new(),
+            backward: Channel::new(),
+            from,
+            to,
+            last_packet: instant::Instant::now(),
+            close_waker: None,
+            closed: false,
+        }
+    }
+
+    fn try_close(&mut self, interval: Duration) -> bool {
+        if self.last_packet.elapsed() > interval {
+            if let Some(waker) = self.close_waker.take() {
+                waker.wake();
+            }
+            self.closed = true;
+            false
+        } else {
+            true
+        }
+    }
+}
+
+impl Future for Route {
+    type Output = io::Result<!>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        if self.closed {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+
+        let s = self.get_mut();
+        s.close_waker = Some(cx.waker().clone());
+        _ = s.forward.poll(cx, &mut s.from, &mut s.to)?;
+        _ = s.backward.poll(cx, &mut s.to, &mut s.from)?;
+        s.last_packet = instant::Instant::now();
+        Poll::Pending
+    }
+}
+
+struct Channel {
+    buf: [u8; 1 << 14],
+    readable_start: usize,
+    written_end: usize,
+}
+
+impl Channel {
+    fn new() -> Channel {
+        Channel { buf: [0; 1 << 14], readable_start: 0, written_end: 0 }
+    }
+
+    fn poll(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        from: &mut libp2p::Stream,
+        to: &mut libp2p::Stream,
+    ) -> Poll<io::Result<!>> {
+        let mut updated = true;
+        while std::mem::take(&mut updated) {
+            if self.written_end == self.buf.len() && self.readable_start != 0 {
+                self.buf.copy_within(self.readable_start..self.written_end, 0);
+                self.written_end -= self.readable_start;
+                self.readable_start = 0;
+            }
+
+            let read_buf = &mut self.buf[self.written_end..];
+            if !read_buf.is_empty() {
+                match Pin::new(&mut *from).poll_read(cx, read_buf)? {
+                    Poll::Ready(0) => {
+                        if self.readable_start == self.written_end {
+                            std::task::ready!(Pin::new(&mut *to).poll_flush(cx))?;
+                            std::task::ready!(Pin::new(&mut *to).poll_close(cx))?;
+                            return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+                        }
+                    }
+                    Poll::Ready(n) => {
+                        self.written_end += n;
+                        updated = true;
+                    }
+                    Poll::Pending => {}
+                }
+            }
+
+            let write_buf = &self.buf[self.readable_start..self.written_end];
+            if !write_buf.is_empty() {
+                match Pin::new(&mut *to).poll_write(cx, write_buf)? {
+                    Poll::Ready(0) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
+                    Poll::Ready(n) => {
+                        self.readable_start += n;
+                        updated = true;
+                    }
+                    Poll::Pending => {}
+                }
+            }
+        }
+
+        Poll::Pending
+    }
+}
+
+fn close_stream(mut stream: libp2p::Stream, code: u8) -> ClosingStream {
+    async move { stream.write_all(&[code]).await }
+}
+
 pub struct Behaviour {
     config: Config,
-    router: FuturesUnordered<Channel>,
-    error_streams: FuturesUnordered<component_utils::ClosingStream<libp2p::swarm::Stream>>,
+    router: FuturesUnordered<Route>,
+    error_streams: FuturesUnordered<ClosingStream>,
     inbound: FuturesUnordered<IUpgrade>,
     outbound: FuturesUnordered<OUpgrade>,
     streaming: streaming::Behaviour,
     events: VecDeque<TS<Event, usize>>,
     pending_connections: Vec<IncomingStream>,
     pending_requests: Vec<StreamRequest>,
-    buffer: Arc<spin::Mutex<[u8; 1 << 16]>>,
 }
 
 impl Default for Behaviour {
@@ -55,7 +170,6 @@ impl Behaviour {
             pending_connections: Default::default(),
             pending_requests: Default::default(),
             error_streams: Default::default(),
-            buffer: Arc::new(spin::Mutex::new([0; 1 << 16])),
 
             config,
         }
@@ -103,21 +217,6 @@ impl Behaviour {
         self.pending_requests.push(sr);
     }
 
-    /// Must be called when a peer cannot be found, otherwise a pending connection information is
-    /// leaked for each `ConnectionRequest`.
-    pub fn report_unreachable(&mut self, peer: PeerId) {
-        for p in self.pending_connections.extract_if(|p| p.meta.to == peer) {
-            self.error_streams.push(ClosingStream::new(p.stream, MISSING_PEER));
-        }
-
-        for r in self.pending_requests.extract_if(|p| p.to == peer) {
-            self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
-                Err(StreamUpgradeError::Apply(OUpgradeError::MissingPeer)),
-                r.path_id,
-            )));
-        }
-    }
-
     pub fn poll_inbound(&mut self, cx: &mut std::task::Context<'_>) {
         while let Poll::Ready(Some((_, res))) = self.inbound.poll_next_unpin(cx) {
             let res = match res {
@@ -144,21 +243,13 @@ impl Behaviour {
     }
 
     pub fn poll_outbound(&mut self, cx: &mut std::task::Context<'_>) {
-        while let Poll::Ready(Some(res)) = self.outbound.poll_next_unpin(cx) {
-            let ChannelMeta { from, to } = match res {
-                Ok(r) => r,
-                Err(e) => {
-                    log::debug!("outbound error: {}", e);
-                    continue;
-                }
-            };
-
+        while let Poll::Ready(Some(ChannelMeta { from, to })) = self.outbound.poll_next_unpin(cx) {
             match from {
-                ChannelSource::Relay(from) => 'b: {
+                ChannelSource::Relay(Ok(from)) => 'b: {
                     let valid_stream_count = self
                         .router
                         .iter_mut()
-                        .filter_map(|c| c.is_valid(self.config.keep_alive_interval).then_some(()))
+                        .filter_map(|c| c.try_close(self.config.keep_alive_interval).then_some(()))
                         .count();
                     if valid_stream_count + self.pending_connections.len() > self.config.max_streams
                     {
@@ -168,24 +259,22 @@ impl Behaviour {
                             break 'b;
                         }
 
-                        self.error_streams.push(ClosingStream::new(from, packet::OCCUPIED_PEER));
+                        self.error_streams.push(close_stream(from, packet::OCCUPIED_PEER));
                         break 'b;
                     }
 
                     log::debug!("received valid relay channel");
-                    self.router.push(Channel::new(
-                        from,
-                        to,
-                        self.config.buffer_cap,
-                        self.buffer.clone(),
-                    ));
+                    self.router.push(Route::new(from, to));
+                }
+                ChannelSource::Relay(Err(e)) => {
+                    log::warn!("received invalid relay channel: {}", e);
                 }
                 ChannelSource::ThisNode(secret, path_id, peer_id) => {
                     self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
-                        Ok((
-                            EncryptedStream::new(to, OsRng, secret, self.config.buffer_cap),
-                            peer_id,
-                        )),
+                        secret
+                            .map(|s| EncryptedStream::new(to, OsRng, s, self.config.buffer_cap))
+                            .map_err(StreamUpgradeError::Apply),
+                        peer_id,
                         path_id,
                     )));
                 }
@@ -252,7 +341,7 @@ impl Behaviour {
                         if let Some(conn) =
                             self.pending_connections.find_and_remove(|r| r.meta.to == peer)
                         {
-                            self.error_streams.push(ClosingStream::new(conn.stream, MISSING_PEER));
+                            self.error_streams.push(close_stream(conn.stream, MISSING_PEER));
                             break 'b;
                         }
 
@@ -262,6 +351,7 @@ impl Behaviour {
 
                     self.events.push_back(TS::GenerateEvent(Event::OutboundStream(
                         Err(err.map_upgrade_err(|v| void::unreachable(v))),
+                        peer,
                         request.path_id,
                     )));
                 }
@@ -367,141 +457,15 @@ impl Config {
 
 #[derive(Debug)]
 pub enum Event {
-    SearchRequest(PeerId),
     InboundStream(EncryptedStream, PathId),
-    OutboundStream(Result<(EncryptedStream, PeerId), StreamUpgradeError<OUpgradeError>>, PathId),
+    OutboundStream(Result<EncryptedStream, StreamUpgradeError<OUpgradeError>>, PeerId, PathId),
 }
 
 component_utils::gen_unique_id!(pub PathId);
 
 pub type EncryptedStream = opfusk::Output<OsRng, libp2p::Stream>;
 
-#[derive(Debug)]
-pub struct Stream {
-    pub(crate) inner: libp2p::swarm::Stream,
-    pub(crate) poll_cache: Vec<u8>,
-    pub(crate) written: usize,
-}
-
-impl Stream {
-    pub(crate) fn new(inner: libp2p::swarm::Stream, cap: usize) -> Self {
-        Self { inner, poll_cache: Vec::with_capacity(cap), written: 0 }
-    }
-
-    fn forward_from(
-        &mut self,
-        from: &mut libp2p::swarm::Stream,
-        temp: &mut [u8],
-        last_packet: &mut instant::Instant,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<Infallible, io::Error>> {
-        loop {
-            while self.written < self.poll_cache.len() {
-                let w = futures::ready!(
-                    Pin::new(&mut self.inner).poll_write(cx, &self.poll_cache[self.written..])
-                )?;
-                if w == 0 {
-                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                }
-                self.written += w;
-            }
-            self.poll_cache.clear();
-
-            loop {
-                let n = futures::ready!(Pin::new(&mut *from).poll_read(cx, temp))?;
-                if n == 0 {
-                    return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
-                }
-                *last_packet = instant::Instant::now();
-                let w = match Pin::new(&mut self.inner).poll_write(cx, &temp[..n])? {
-                    Poll::Ready(w) => w,
-                    Poll::Pending => 0,
-                };
-                if w == 0 {
-                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                }
-                if w != n {
-                    self.poll_cache.extend_from_slice(&temp[w..n]);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-pub struct Channel {
-    from: Stream,
-    to: Stream,
-    waker: Option<std::task::Waker>,
-    invalid: bool,
-    buffer: Arc<spin::Mutex<[u8; 1 << 16]>>,
-    last_packet: instant::Instant,
-}
-
-impl fmt::Debug for Channel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Channel").finish()
-    }
-}
-
-impl Channel {
-    pub fn new(
-        from: libp2p::Stream,
-        to: libp2p::Stream,
-        buffer_cap: usize,
-        buffer: Arc<spin::Mutex<[u8; 1 << 16]>>,
-    ) -> Self {
-        Self {
-            from: Stream::new(from, buffer_cap),
-            to: Stream::new(to, buffer_cap),
-            waker: None,
-            invalid: false,
-            buffer,
-            last_packet: instant::Instant::now(),
-        }
-    }
-
-    pub fn poll(&mut self, cx: &mut std::task::Context<'_>) -> Poll<io::Result<Infallible>> {
-        if self.invalid {
-            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
-        }
-        component_utils::set_waker(&mut self.waker, cx.waker());
-        let temp = &mut self.buffer.lock()[..];
-        if let Poll::Ready(e) =
-            self.from.forward_from(&mut self.to.inner, temp, &mut self.last_packet, cx)
-        {
-            return Poll::Ready(e);
-        }
-        self.to.forward_from(&mut self.from.inner, temp, &mut self.last_packet, cx)
-    }
-
-    fn is_valid(&mut self, timeout: Duration) -> bool {
-        if self.invalid {
-            return false;
-        }
-
-        if self.last_packet + timeout > instant::Instant::now() {
-            return true;
-        }
-
-        self.invalid = true;
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
-
-        false
-    }
-}
-
-impl std::future::Future for Channel {
-    type Output = io::Result<Infallible>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        self.deref_mut().poll(cx)
-    }
-}
-
-type OUpgrade = impl Future<Output = Result<ChannelMeta, OUpgradeError>>;
+type OUpgrade = impl Future<Output = ChannelMeta>;
 
 fn upgrade_outbound(
     keypair: Keypair,
@@ -515,7 +479,7 @@ async fn upgrade_outbound_low(
     keypair: Keypair,
     incoming: IncomingOrRequest,
     mut stream: libp2p::swarm::Stream,
-) -> Result<ChannelMeta, OUpgradeError> {
+) -> ChannelMeta {
     let mut written_packet = vec![];
     let mut ss = [0; 32];
     let (buffer, peer_id) = match &incoming {
@@ -530,46 +494,57 @@ async fn upgrade_outbound_low(
                                                                        // this case
     };
 
-    stream
-        .write_all(&(buffer.len() as u16).to_be_bytes())
-        .await
-        .map_err(OUpgradeError::WritePacketLength)?;
-    log::debug!("wrote packet length: {}", buffer.len());
-    stream.write_all(buffer).await.map_err(OUpgradeError::WritePacket)?;
-    log::debug!("wrote packet");
+    let write = async {
+        stream
+            .write_all(&(buffer.len() as u16).to_be_bytes())
+            .await
+            .map_err(OUpgradeError::WritePacketLength)?;
+        log::debug!("wrote packet length: {}", buffer.len());
+        stream.write_all(buffer).await.map_err(OUpgradeError::WritePacket)?;
+        log::debug!("wrote packet");
+        Ok(())
+    }
+    .await;
 
     let request = match incoming {
         IncomingOrRequest::Incoming(i) => {
+            let s = write.map(|_| i.stream);
             log::debug!("received incoming routable stream");
-            return Ok(ChannelMeta { from: ChannelSource::Relay(i.stream), to: stream });
+            return ChannelMeta { from: ChannelSource::Relay(s), to: stream };
         }
         IncomingOrRequest::Request(r) => r,
     };
 
-    let mut kind = 0;
-    stream.read_exact(slice::from_mut(&mut kind)).await.map_err(OUpgradeError::ReadPacketKind)?;
-    log::debug!("read packet kind: {}", kind);
+    let read = async {
+        write?;
+        let mut kind = 0;
+        stream
+            .read_exact(slice::from_mut(&mut kind))
+            .await
+            .map_err(OUpgradeError::ReadPacketKind)?;
+        log::debug!("read packet kind: {}", kind);
 
-    match kind {
-        crate::packet::OK => {
-            log::debug!("received auth packet");
-            let mut buffer = written_packet;
-            buffer.resize(crypto::TAG_SIZE, 0);
-            stream.read(&mut buffer).await.map_err(OUpgradeError::ReadPacket)?;
+        match kind {
+            crate::packet::OK => {
+                log::debug!("received auth packet");
+                let mut buffer = written_packet;
+                buffer.resize(crypto::TAG_SIZE, 0);
+                stream.read(&mut buffer).await.map_err(OUpgradeError::ReadPacket)?;
 
-            if crypto::decrypt(&mut buffer, ss).is_none() {
-                Err(OUpgradeError::AuthenticationFailed)
-            } else {
-                Ok(ChannelMeta {
-                    from: ChannelSource::ThisNode(ss, request.path_id, peer_id),
-                    to: stream,
-                })
+                if crypto::decrypt(&mut buffer, ss).is_none() {
+                    Err(OUpgradeError::AuthenticationFailed)
+                } else {
+                    Ok(ss)
+                }
             }
+            crate::packet::MISSING_PEER => Err(OUpgradeError::MissingPeer),
+            crate::packet::OCCUPIED_PEER => Err(OUpgradeError::OccupiedPeer),
+            _ => Err(OUpgradeError::UnknownPacketKind(kind)),
         }
-        crate::packet::MISSING_PEER => Err(OUpgradeError::MissingPeer),
-        crate::packet::OCCUPIED_PEER => Err(OUpgradeError::OccupiedPeer),
-        _ => Err(OUpgradeError::UnknownPacketKind(kind)),
     }
+    .await;
+
+    ChannelMeta { from: ChannelSource::ThisNode(read, request.path_id, peer_id), to: stream }
 }
 
 type IUpgrade = impl Future<Output = (PeerId, Result<IncomingOrResponse, IUpgradeError>)>;
@@ -675,9 +650,9 @@ pub enum IUpgradeError {
 }
 
 #[derive(Debug)]
-pub enum ChannelSource {
-    Relay(libp2p::Stream),
-    ThisNode(SharedSecret, PathId, PeerId),
+enum ChannelSource {
+    Relay(Result<libp2p::Stream, OUpgradeError>),
+    ThisNode(Result<SharedSecret, OUpgradeError>, PathId, PeerId),
 }
 
 #[derive(Debug)]

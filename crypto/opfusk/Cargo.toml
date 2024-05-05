@@ -24,5 +24,7 @@ thiserror.workspace = true
 workspace = true
 
 [dev-dependencies]
+dht.workspace = true
 libp2p = { workspace = true, features = ["ping", "tcp", "tokio", "yamux"] }
+streaming.workspace = true
 tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "time"] }

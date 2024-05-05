@@ -37,6 +37,7 @@ pub mod rpcs {
     rpcs! {
         CREATE_CHAT;
         ADD_MEMBER;
+        UPDATE_MEMBER;
         KICK_MEMBER;
         SEND_MESSAGE;
         SEND_BLOCK;

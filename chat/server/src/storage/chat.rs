@@ -9,6 +9,7 @@ use {
     codec::{Encode, ReminderOwned},
     crypto::proof::{NonceInt, Proof},
     dht::U256,
+    lmdb_zero::traits::LmdbResultExt,
     lru::LruCache,
     std::{
         collections::{HashMap, HashSet},
@@ -183,7 +184,9 @@ impl Handle {
 
             cursor
                 .put(&mut access, &id, &super::DontCare(member), lmdb_zero::put::NOOVERWRITE)
-                .context("putting added member")?;
+                .map(|()| Ok(()))
+                .ignore_exists(Err(ChatError::AlreadyExists))
+                .context("putting added member")??;
         }
 
         txn.commit().context("committing add member transaction").map_err(Into::into)
@@ -236,7 +239,13 @@ impl Handle {
             let iter = lmdb_zero::CursorIter::new(
                 lmdb_zero::MaybeOwned::Owned(cursor),
                 &access,
-                |cursor, access| cursor.seek_k_both(access, &from),
+                |cursor, access| {
+                    if from != crypto::Hash::default() {
+                        cursor.seek_k_both(access, &from)
+                    } else {
+                        cursor.first(access)
+                    }
+                },
                 lmdb_zero::Cursor::next::<Identity, super::DontCare<Member>>,
             )
             .context("creating iterator")?;
@@ -512,7 +521,22 @@ impl Handle {
         let mut buf = [0; MAX_MESSAGE_FETCH_SIZE];
 
         let offset = cursor - self.discarded_bytes.load(std::sync::atomic::Ordering::Relaxed);
-        blocks.read_exact_at(&mut buf, offset - MAX_MESSAGE_FETCH_SIZE as u64)?;
+
+        let final_offset = offset.saturating_sub(MAX_MESSAGE_FETCH_SIZE as u64);
+        let red = offset - final_offset;
+
+        blocks.read_exact_at(
+            &mut buf[MAX_MESSAGE_FETCH_SIZE - red as usize..],
+            final_offset as u64,
+        )?;
+
+        cursor -= chat_spec::unpack_messages_ref(&buf[MAX_MESSAGE_FETCH_SIZE - red as usize..])
+            .map(|msg| msg.len() + 2)
+            .sum::<usize>() as u64;
+
+        if red == 0 {
+            cursor = Cursor::MAX;
+        }
 
         Ok((buf, cursor))
     }
@@ -529,6 +553,7 @@ impl Handle {
 
         {
             let mut access = txn.access();
+            access.clear_db(&self.members).context("clearing members")?;
             let mut cursor = txn.cursor(&self.members).context("opening recover members cursor")?;
 
             for (id, member) in chat_data {
@@ -578,6 +603,47 @@ impl Handle {
         }
 
         root.store(&mut root_file)
+    }
+
+    pub fn update_member(
+        &self,
+        by: Proof<ChatName>,
+        id: Identity,
+        member: Member,
+    ) -> Result<(), ChatError> {
+        handlers::ensure!(by.verify(), ChatError::InvalidProof);
+
+        let txn = lmdb_zero::WriteTransaction::new(self.members.env())
+            .context("starting add member transaction")?;
+
+        {
+            let mut access = txn.access();
+            let mut cursor = txn.cursor(&self.members).context("opening add member cursor")?;
+            let by_id = by.identity();
+
+            let super::DontCare(by_member): &mut super::DontCare<Member> = cursor
+                .overwrite_in_place(&mut access, &by_id, lmdb_zero::put::Flags::empty())
+                .context("overwriting by member")?;
+
+            by_member.action = advance_nonce(by_member.action, by.nonce)?;
+            let rank = by_member.rank;
+
+            let member = Member {
+                rank: by_member.rank.max(member.rank),
+                permissions: member.permissions & by_member.permissions,
+                action_cooldown_ms: by_member.action_cooldown_ms.max(member.action_cooldown_ms),
+                ..Default::default()
+            };
+
+            let super::DontCare(dest): &mut super::DontCare<Member> = cursor
+                .overwrite_in_place(&mut access, &id, lmdb_zero::put::Flags::empty())
+                .context("overwriting member")?;
+
+            handlers::ensure!(dest.rank > rank, ChatError::NoPermission);
+            *dest = member;
+        }
+
+        txn.commit().context("committing add member transaction").map_err(Into::into)
     }
 }
 

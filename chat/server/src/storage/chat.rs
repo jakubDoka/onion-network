@@ -29,7 +29,7 @@ const ROOT_PATH: &str = "root.bin";
 
 const BLOCK_SIZE: usize = 1024 * 16;
 const MAX_UNFINALIZED_BLOCKS: usize = 5;
-const UNFINALIZED_BUFFER_CAP: usize = BLOCK_SIZE * MAX_UNFINALIZED_BLOCKS;
+pub const UNFINALIZED_BUFFER_CAP: usize = BLOCK_SIZE * MAX_UNFINALIZED_BLOCKS;
 const BLOCK_HISTORY: usize = 8;
 
 pub type Storage = Mutex<LruCache<ChatName, Arc<Handle>>>;

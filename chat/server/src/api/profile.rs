@@ -4,7 +4,8 @@ use {
     chat_spec::{rpcs, ChatError, FetchProfileResp, Identity, Mail},
     codec::{Decode, Reminder, ReminderOwned},
     crypto::proof::Proof,
-    handlers::Dec,
+    handlers::{self as hds, Dec},
+    hds::ArrDec,
     merkle_tree::MerkleTree,
     tokio::task::block_in_place,
 };
@@ -14,7 +15,7 @@ type Result<T, E = ChatError> = std::result::Result<T, E>;
 pub async fn create(
     cx: super::Context,
     identity: Identity,
-    Dec((proof, enc)): Dec<(Proof<crypto::Hash>, crypto::enc::PublicKey)>,
+    Dec((proof, enc)): hds::dec!(Proof<crypto::Hash>, crypto::enc::PublicKey),
 ) -> Result<()> {
     block_in_place(|| cx.storage.create_profile(proof, enc))?;
     cx.not_found.remove(&identity.into());
@@ -26,7 +27,7 @@ pub async fn create(
 pub async fn insert_to_vault(
     cx: crate::Context,
     identity: Identity,
-    Dec((proof, changes)): Dec<(Proof<crypto::Hash>, Vec<(crypto::Hash, Vec<u8>)>)>,
+    Dec((proof, changes)): hds::dec!(Proof<crypto::Hash>, Vec<(crypto::Hash, Vec<u8>)>; chat_spec::MAX_VAULT_UPDATE_SIZE),
 ) -> Result<()> {
     block_in_place(|| cx.storage.insert_to_vault(identity, changes, proof))
 }
@@ -34,7 +35,7 @@ pub async fn insert_to_vault(
 pub async fn remove_from_vault(
     cx: crate::Context,
     identity: Identity,
-    Dec((proof, key)): Dec<(Proof<crypto::Hash>, crypto::Hash)>,
+    Dec((proof, key)): hds::dec!(Proof<crypto::Hash>, crypto::Hash),
 ) -> Result<()> {
     _ = (cx, identity, proof, key);
     Err(ChatError::Todo)
@@ -43,7 +44,7 @@ pub async fn remove_from_vault(
 pub async fn fetch_vault_key(
     cx: crate::Context,
     identity: Identity,
-    Dec(key): Dec<crypto::Hash>,
+    Dec(key): hds::dec!(crypto::Hash),
 ) -> Result<ReminderOwned> {
     _ = (cx, identity, key);
     Err(ChatError::Todo)
@@ -52,7 +53,7 @@ pub async fn fetch_vault_key(
 pub async fn read_mail(
     cx: super::Context,
     location: OnlineLocation,
-    Dec(proof): Dec<Proof<Mail>>,
+    Dec(proof): hds::dec!(Proof<Mail>; 4),
 ) -> Result<ReminderOwned> {
     let mail = block_in_place(|| cx.storage.read_mail(proof))?;
     cx.online.insert(proof.identity(), location);
@@ -80,7 +81,7 @@ pub async fn send_mail(
     cx: super::Context,
     origin: OnlineLocation,
     for_who: Identity,
-    ReminderOwned(mail): ReminderOwned,
+    mail: ArrDec<{ chat_spec::MAX_MAIL_SIZE }>,
 ) -> Result<()> {
     let push_mail = || block_in_place(|| cx.storage.get_profile(for_who)?.append_mail(&mail));
 
@@ -101,9 +102,8 @@ pub async fn send_mail(
                 break 'b;
             }
 
-            let Ok(Err(ChatError::SentDirectly)) = cx
-                .send_rpc::<Result<()>>(for_who, peer, rpcs::SEND_MAIL, Reminder(mail.as_slice()))
-                .await
+            let Ok(Err(ChatError::SentDirectly)) =
+                cx.send_rpc::<Result<()>>(for_who, peer, rpcs::SEND_MAIL, Reminder(&mail)).await
             else {
                 break 'b;
             };

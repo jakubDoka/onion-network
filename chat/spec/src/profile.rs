@@ -7,8 +7,10 @@ use {
 };
 
 pub const MAIL_BOX_CAP: usize = 1024 * 1024;
+pub const MAX_MAIL_SIZE: usize = 1024 * 8;
 pub const MAX_VAULT_KEY_COUNT: usize = 4096;
 pub const MAX_VAULT_VALUE_SIZE: usize = 1024 * 8;
+pub const MAX_VAULT_UPDATE_SIZE: usize = 1024 * 32;
 
 pub type UserName = ArrayString<32>;
 

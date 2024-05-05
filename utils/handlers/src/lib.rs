@@ -6,12 +6,26 @@
 #![feature(trait_alias)]
 
 use {
-    codec::{Codec, DecodeOwned, Encode, ReminderOwned},
+    codec::{Codec, Decode, DecodeOwned, Encode, ReminderOwned},
     futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    std::io,
+    std::{io, ops::Deref},
 };
 
 pub type CallId = [u8; 4];
+
+#[macro_export]
+macro_rules! dec {
+    ($($ty:ty),* $(; $cap:expr)?) => {
+        $crate::Dec::<($($ty),*), { std::mem::size_of::<($($ty),*)>() $(+ $cap)* }>
+    };
+}
+
+#[macro_export]
+macro_rules! bdec {
+    ($($ty:ty),* $(; $cap:expr)?) => {
+        $crate::BorrowedDec::<'_, ($($ty),*), { std::mem::size_of::<($($ty),*)>() $(+ $cap)* }>
+    };
+}
 
 #[macro_export]
 macro_rules! ensure {
@@ -95,22 +109,82 @@ impl<S: Stream> FromStream<S> for () {
         _stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
-        debug_assert_eq!(len, 0);
-        async move { Ok(()) }
+        async move {
+            ensure!(len == 0, io::ErrorKind::InvalidInput.into());
+            Ok(())
+        }
     }
 }
 
 #[derive(Codec)]
-pub struct Dec<T>(pub T);
+pub struct Dec<T, const BUFFER_SIZE: usize>(pub T);
 
-impl<T: DecodeOwned + Send + Sync, S: Stream> FromStream<S> for Dec<T> {
+impl<T: DecodeOwned + Send + Sync, S: Stream, const BUFFER_SIZE: usize> FromStream<S>
+    for Dec<T, BUFFER_SIZE>
+{
     fn from_stream(
         stream: &mut Option<S>,
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
-            let ReminderOwned(buffer) = ReminderOwned::from_stream(stream, len).await?;
-            Ok(Dec(T::decode_exact(&buffer).ok_or(io::ErrorKind::InvalidData)?))
+            ensure!(len <= BUFFER_SIZE, io::ErrorKind::InvalidInput.into());
+            let mut buffer = [0; BUFFER_SIZE];
+            stream
+                .as_mut()
+                .ok_or(io::ErrorKind::InvalidInput)?
+                .read_exact(&mut buffer[..len])
+                .await?;
+            Ok(Dec(T::decode_exact(&buffer[..len]).ok_or(io::ErrorKind::InvalidData)?))
+        }
+    }
+}
+
+pub struct ArrDec<const BUFFER_LEN: usize> {
+    len: u32,
+    buffer: [u8; BUFFER_LEN],
+}
+
+impl<const BUFFER_LEN: usize> Deref for ArrDec<BUFFER_LEN> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.buffer[..self.len as _]
+    }
+}
+
+impl<const BUFFER_LEN: usize> ArrDec<BUFFER_LEN> {}
+
+impl<const BUFFER_LEN: usize> Encode for ArrDec<BUFFER_LEN> {
+    fn encode(&self, buffer: &mut impl codec::Buffer) -> Option<()> {
+        buffer.extend_from_slice(&self.buffer[..self.len as _])
+    }
+}
+
+impl<'a, const BUFFER_LEN: usize> Decode<'a> for ArrDec<BUFFER_LEN> {
+    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+        let len = u32::decode(buffer)?;
+        let len = len as usize;
+        let buff = buffer.get(..len)?;
+        let mut buffer = [0; BUFFER_LEN];
+        buffer[..len].copy_from_slice(buff);
+        Some(Self { len: len as u32, buffer })
+    }
+}
+
+impl<S: Stream, const BUFFER_LEN: usize> FromStream<S> for ArrDec<BUFFER_LEN> {
+    fn from_stream(
+        stream: &mut Option<S>,
+        len: usize,
+    ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
+        async move {
+            ensure!(len <= BUFFER_LEN, io::ErrorKind::InvalidInput.into());
+            let mut buffer = [0; BUFFER_LEN];
+            stream
+                .as_mut()
+                .ok_or(io::ErrorKind::InvalidInput)?
+                .read_exact(&mut buffer[..len])
+                .await?;
+            Ok(ArrDec { len: len as u32, buffer })
         }
     }
 }

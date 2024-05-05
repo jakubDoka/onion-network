@@ -1,4 +1,5 @@
 use {
+    crate::storage::chat::UNFINALIZED_BUFFER_CAP,
     chain_api::NodeIdentity,
     chat_spec::{
         rpcs, BlockNumber, ChatError, ChatEvent, ChatName, Cursor, Identity, Member, ReplVec,
@@ -6,7 +7,7 @@ use {
     },
     codec::ReminderOwned,
     crypto::proof::Proof,
-    handlers::Dec,
+    handlers::{self as hds, Dec},
     opfusk::PeerIdExt,
     std::collections::HashMap,
     tokio::task::block_in_place,
@@ -17,7 +18,7 @@ type Result<T, E = ChatError> = std::result::Result<T, E>;
 pub async fn create(
     cx: crate::Context,
     name: ChatName,
-    Dec(identity): Dec<Identity>,
+    Dec(identity): hds::dec!(Identity),
 ) -> Result<()> {
     block_in_place(|| cx.storage.create_chat(name, identity))?;
     cx.not_found.remove(&name.into());
@@ -26,7 +27,7 @@ pub async fn create(
 
 pub async fn add_member(
     cx: crate::Context,
-    Dec((proof, identity, member)): Dec<(Proof<ChatName>, Identity, Member)>,
+    Dec((proof, identity, member)): hds::dec!(Proof<ChatName>, Identity, Member),
 ) -> Result<()> {
     block_in_place(|| cx.storage.get_chat(proof.context)?.add_member(proof, identity, member))?;
     cx.push_chat_event(proof.context, ChatEvent::Member(identity, member)).await;
@@ -35,7 +36,7 @@ pub async fn add_member(
 
 pub async fn update_member(
     cx: crate::Context,
-    Dec((proof, identity, member)): Dec<(Proof<ChatName>, Identity, Member)>,
+    Dec((proof, identity, member)): hds::dec!(Proof<ChatName>, Identity, Member),
 ) -> Result<()> {
     block_in_place(|| cx.storage.get_chat(proof.context)?.update_member(proof, identity, member))?;
     cx.push_chat_event(proof.context, ChatEvent::Member(identity, member)).await;
@@ -44,7 +45,7 @@ pub async fn update_member(
 
 pub async fn kick_member(
     cx: crate::Context,
-    Dec((proof, identity)): Dec<(Proof<ChatName>, Identity)>,
+    Dec((proof, identity)): hds::dec!(Proof<ChatName>, Identity),
 ) -> Result<()> {
     block_in_place(|| cx.storage.get_chat(proof.context)?.kick_member(proof, identity))?;
     cx.push_chat_event(proof.context, ChatEvent::MemberRemoved(identity)).await;
@@ -54,7 +55,7 @@ pub async fn kick_member(
 pub async fn fetch_members(
     cx: crate::Context,
     name: ChatName,
-    Dec((identity, count)): Dec<(Identity, usize)>,
+    Dec((identity, count)): hds::dec!(Identity, usize),
 ) -> Result<Vec<(Identity, Member)>> {
     block_in_place(|| cx.storage.get_chat(name)?.fetch_members(identity, count))
 }
@@ -63,7 +64,7 @@ pub async fn send_message(
     cx: crate::Context,
     group: super::FullReplGroup,
     name: ChatName,
-    Dec(proof): Dec<Proof<ReminderOwned>>,
+    Dec(proof): hds::dec!(Proof<ReminderOwned>; chat_spec::MAX_MESSAGE_SIZE),
 ) -> Result<()> {
     let finalization =
         block_in_place(|| cx.storage.get_chat(name)?.send_message(cx, group, &proof))?;
@@ -79,7 +80,7 @@ pub async fn vote(
     origin: super::Origin,
     group: super::ReplGroup,
     name: ChatName,
-    Dec((hash, bn, agrees)): Dec<(crypto::Hash, BlockNumber, bool)>,
+    Dec((hash, bn, agrees)): hds::dec!(crypto::Hash, BlockNumber, bool),
 ) -> Result<()> {
     origin.try_to_hash().filter(|c| group.contains(c)).ok_or(ChatError::NoReplicator)?;
     block_in_place(|| cx.storage.get_chat(name)?.vote(cx.local_peer_id, bn, hash, agrees))
@@ -90,7 +91,7 @@ pub async fn proposal(
     origin: super::Origin,
     group: super::FullReplGroup,
     name: ChatName,
-    Dec((number, ReminderOwned(block))): Dec<(BlockNumber, ReminderOwned)>,
+    Dec((number, ReminderOwned(block))): hds::dec!(BlockNumber, ReminderOwned; UNFINALIZED_BUFFER_CAP),
 ) -> Result<()> {
     // FIXME: make this check when processing request header
     let origin =
@@ -120,7 +121,7 @@ pub async fn fetch_chat_data(
 pub async fn fetch_messages(
     cx: crate::Context,
     name: ChatName,
-    Dec(cursor): Dec<Cursor>,
+    Dec(cursor): hds::dec!(Cursor),
 ) -> Result<([u8; chat_spec::MAX_MESSAGE_FETCH_SIZE], Cursor)> {
     block_in_place(|| cx.storage.get_chat(name)?.fetch_messages(cursor))
 }

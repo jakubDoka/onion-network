@@ -505,7 +505,6 @@ impl RawSub {
             req: Option<SubscriptionRequest>,
             subs: &mut Calls,
         ) -> io::Result<()> {
-            log::debug!("handling request");
             let SubscriptionRequest { prefix, topic, body, rc } =
                 req.ok_or(io::ErrorKind::UnexpectedEof)?;
 
@@ -526,7 +525,6 @@ impl RawSub {
             buf: [u8; std::mem::size_of::<ResponseHeader>()],
             subs: &mut Calls,
         ) -> io::Result<()> {
-            log::debug!("handling response");
             res?;
 
             let header = ResponseHeader::from_array(buf);

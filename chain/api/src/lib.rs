@@ -269,6 +269,11 @@ impl NodeKeys {
         let mut rng = ChaChaRng::from_seed(seed);
         Self { enc: enc::Keypair::new(&mut rng), sign: sign::Keypair::new(rng) }
     }
+
+    pub fn random() -> Self {
+        let mut rng = OsRng;
+        Self { enc: enc::Keypair::new(&mut rng), sign: sign::Keypair::new(rng) }
+    }
 }
 
 #[derive(clap::Parser, Clone)]
@@ -406,20 +411,24 @@ pub fn unpack_addr(addr: impl Into<SocketAddr>) -> Multiaddr {
 }
 
 pub fn filter_incoming(
-    table: &mut dht::RoutingTable,
-    peer: PeerId,
-    local_addr: &Multiaddr,
+    _table: &mut dht::RoutingTable,
+    _peer: PeerId,
+    _local_addr: &Multiaddr,
     _: &Multiaddr,
 ) -> Result<(), libp2p::swarm::ConnectionDenied> {
-    if local_addr.iter().any(|p| matches!(p, multiaddr::Protocol::Ws(_))) {
-        return Ok(());
-    }
+    // if local_addr.iter().any(|p| matches!(p, multiaddr::Protocol::Ws(_))) {
+    //     return Ok(());
+    // }
 
-    if table.get(peer).is_some() {
-        return Ok(());
-    }
+    // if table.get(peer).is_some() {
+    //     return Ok(());
+    // }
 
-    Err(libp2p::swarm::ConnectionDenied::new("not registered as a node"))
+    // Err(libp2p::swarm::ConnectionDenied::new("not registered as a node"))
+
+    // FIXME: we need filtering but this also need access to config to deterimne what the port
+    // means, for now we ignore this
+    Ok(())
 }
 
 #[derive(Clone)]

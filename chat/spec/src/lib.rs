@@ -109,8 +109,12 @@ pub enum ChatError {
     NoReplicator,
     #[error("block contains unexpected messages")]
     BlockUnexpectedMessages,
-    #[error("block is not expected")]
-    BlockNotExpected,
+    #[error("outdated block number")]
+    OutdatedBlockNumber,
+    #[error("wrong block proposer")]
+    WrongProposer,
+    #[error("wrong block number")]
+    WrongBlockNumber,
     #[error("no majority to confirm the request")]
     NoMajority,
     #[error("already voted")]

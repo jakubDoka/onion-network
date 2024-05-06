@@ -81,12 +81,16 @@ handlers::router! { pub server_router(Prefix, State, libp2p::Stream):
     rpcs::UPDATE_MEMBER => chat::update_member.restored();
     rpcs::KICK_MEMBER => chat::kick_member.restored();
     rpcs::SEND_BLOCK => chat::proposal
-        .rated(rate_map! { BlockNotExpected => 10, BlockUnexpectedMessages => 100, Outdated => 5 })
-        .restored();
+        // FIXME: rating
+        .rated(rate_map! { BlockUnexpectedMessages => 100, Outdated => 5 })
+        .restored()
+        .no_resp();
     rpcs::FETCH_CHAT_DATA => chat::fetch_chat_data.rated(rate_map!(40));
     rpcs::SEND_MESSAGE => chat::send_message.restored();
     rpcs::VOTE_BLOCK => chat::vote
-        .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 }).restored();
+        .rated(rate_map! { NoReplicator => 50, NotFound => 5, AlreadyVoted => 30 })
+        .restored()
+        .no_resp();
     rpcs::CREATE_PROFILE => profile::create;
     rpcs::SEND_MAIL => profile::send_mail.restored();
     rpcs::READ_MAIL => profile::read_mail.restored();
@@ -127,8 +131,8 @@ handlers::quick_impl_from_request! {State => [
     Prefix => |state| state.prefix,
     OnlineLocation => |state| state.location,
     Origin => |state| match state.location {
-        OnlineLocation::Local(_) => return None,
         OnlineLocation::Remote(p) => p.to_peer_id(),
+        _ => return None,
     },
     PathId => |state| match state.location {
         OnlineLocation::Local(p) => p,
@@ -152,6 +156,32 @@ pub trait Handler: Sized {
 
     fn rated<F>(self, rater: F) -> Rated<Self, F> {
         Rated::new(self, rater)
+    }
+
+    fn no_resp(self) -> NoResp<Self> {
+        NoResp(self)
+    }
+}
+
+#[derive(Clone)]
+pub struct NoResp<F>(F);
+
+impl<C, S, A, B, F, E> handlers::Handler<C, S, A, B> for NoResp<F>
+where
+    F: handlers::Handler<C, S, A, B>,
+    F::Future: Future<Output = Result<(), E>>,
+    E: std::fmt::Display + Send + 'static,
+    A: Send + 'static,
+    B: Send + 'static,
+{
+    type Future = impl Future<Output = ()> + Send;
+
+    fn call(self, args: A, stream: B) -> Self::Future {
+        async move {
+            if let Err(e) = self.0.call(args, stream).await {
+                log::warn!("Error in {}: {}", std::any::type_name::<F>(), e);
+            }
+        }
     }
 }
 

@@ -23,8 +23,14 @@ use {
     codec::{Decode, ReminderOwned},
     leptos::*,
     leptos_router::{Route, Router, Routes, A},
-    libp2p::futures::{FutureExt, StreamExt},
-    std::{cmp::Ordering, convert::identity, fmt::Display, future::Future, time::Duration},
+    libp2p::{
+        futures::{FutureExt, StreamExt},
+        Multiaddr,
+    },
+    std::{
+        cmp::Ordering, convert::identity, fmt::Display, future::Future, net::SocketAddr,
+        time::Duration,
+    },
     web_sys::wasm_bindgen::JsValue,
 };
 
@@ -42,6 +48,9 @@ pub fn main() {
         log::Level::Error
     });
 
+    #[cfg(target_arch = "wasm32")]
+    chat_client_node::Storage::set_backend(chat_client_node::LocalStorageCache);
+
     mount_to_body(App)
 }
 
@@ -55,7 +64,7 @@ struct State {
     friend_messages: RwSignal<Option<(ChatName, db::Message)>>,
 }
 
-type Result<T> = anyhow::Result<T>;
+type Result<T, E = anyhow::Error> = std::result::Result<T, E>;
 
 fn rc_error(name: &'static str) -> impl FnOnce() -> String {
     move || format!("{name} not available, might need to reload")
@@ -138,6 +147,11 @@ fn App() -> impl IntoView {
         Ok(())
     }
 
+    fn translate_addr(addr: SocketAddr) -> Multiaddr {
+        let addr = chain_api::unpack_addr_offset(addr, 1);
+        addr.with(libp2p::multiaddr::Protocol::Ws("/".into()))
+    }
+
     create_effect(move |_| {
         let Some(keys) = state.keys.get() else {
             return;
@@ -147,7 +161,7 @@ fn App() -> impl IntoView {
             let identity = keys.identity();
             navigate_to("/");
             let (node, vault, dispatch, vault_version, mail_action) =
-                Node::new(keys, |s| wboot_phase(Some(s)))
+                Node::new(keys, |s| wboot_phase(Some(s)), translate_addr)
                     .await
                     .inspect_err(|_| navigate_to("/login"))?;
 
@@ -429,4 +443,32 @@ fn handled_spawn_local(
             errors.set(Some(e));
         }
     });
+}
+
+pub fn try_set_color(name: &str, value: u32) -> Result<(), JsValue> {
+    web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .body()
+        .ok_or("no body")?
+        .style()
+        .set_property(name, &format!("#{:08x}", value))
+}
+
+pub fn try_load_color_from_style(name: &str) -> Result<u32, JsValue> {
+    u32::from_str_radix(
+        web_sys::window()
+            .unwrap()
+            .document()
+            .unwrap()
+            .body()
+            .ok_or("no body")?
+            .style()
+            .get_property_value(name)?
+            .strip_prefix('#')
+            .ok_or("expected # to start the color")?,
+        16,
+    )
+    .map_err(|e| e.to_string().into())
 }

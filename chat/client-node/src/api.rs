@@ -1,3 +1,4 @@
+#![cfg(feature = "api")]
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 
@@ -6,77 +7,22 @@ use {
     anyhow::Context as _,
     chat_spec::{ChatName, Identity, UserName},
     codec::ReminderOwned,
-    crypto::proof::Nonce,
-    libp2p::futures::{channel::mpsc, future::TryJoinAll, StreamExt, TryFutureExt},
-    std::{
-        cell::{Cell, RefCell},
-        ops::Deref,
-        rc::Rc,
-        str::FromStr,
-    },
-    wasm_bindgen_futures::{
-        spawn_local,
-        wasm_bindgen::{self, prelude::wasm_bindgen},
-    },
+    libp2p::futures::{channel::mpsc, future::TryJoinAll, StreamExt},
+    std::{cell::Cell, ops::Deref, rc::Rc, str::FromStr},
+    wasm_bindgen_futures::wasm_bindgen::{self, prelude::wasm_bindgen},
     web_sys::wasm_bindgen::JsValue,
 };
 
-pub struct Inner {
-    vault: RefCell<crate::Vault>,
-    vault_nonce: Cell<Nonce>,
-    mail_action: Cell<Nonce>,
-    keys: crate::UserKeys,
-    node_handle: crate::NodeHandle,
-}
-
 #[wasm_bindgen]
 pub struct Context {
-    inner: Rc<Inner>,
+    inner: Rc<crate::TrivialContext>,
 }
 
 impl Deref for Context {
-    type Target = Inner;
+    type Target = crate::TrivialContext;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
-    }
-}
-
-impl RequestContext for Context {
-    fn try_with_vault<R>(
-        &self,
-        action: impl FnOnce(&mut crate::Vault) -> anyhow::Result<R>,
-    ) -> anyhow::Result<R> {
-        action(&mut self.vault.borrow_mut())
-    }
-
-    fn with_vault<R>(&self, action: impl FnOnce(&mut crate::Vault) -> R) -> anyhow::Result<R> {
-        Ok(action(&mut self.vault.borrow_mut()))
-    }
-
-    fn with_keys<R>(&self, action: impl FnOnce(&crate::UserKeys) -> R) -> anyhow::Result<R> {
-        Ok(action(&self.keys))
-    }
-
-    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R> {
-        let mut vault_nonce = self.vault_nonce.get();
-        let res = action(&mut vault_nonce);
-        self.vault_nonce.set(vault_nonce);
-        Ok(res)
-    }
-
-    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R> {
-        let mut mail_action = self.mail_action.get();
-        let res = action(&mut mail_action);
-        self.mail_action.set(mail_action);
-        Ok(res)
-    }
-
-    fn subscription_for<T: Into<chat_spec::Topic> + Clone>(
-        &self,
-        topic: T,
-    ) -> impl std::future::Future<Output = anyhow::Result<crate::Sub<T>>> {
-        self.node_handle.subscription_for(topic).map_err(Into::into)
     }
 }
 
@@ -85,20 +31,8 @@ impl Context {
     /// @throw
     #[wasm_bindgen]
     pub async fn new(user_keys: UserKeys) -> Result<Context, Error> {
-        let (inner, vault, reqs, vault_nonce, mail_action) =
-            crate::Node::new(user_keys.inner.clone(), |v| _ = v).await?;
-
-        spawn_local(async move { _ = inner.await });
-
-        Ok(Self {
-            inner: Rc::new(Inner {
-                vault: RefCell::new(vault),
-                vault_nonce: Cell::new(vault_nonce),
-                mail_action: Cell::new(mail_action),
-                keys: user_keys.inner,
-                node_handle: reqs,
-            }),
-        })
+        crate::Storage::set_backend(crate::LocalStorageCache);
+        Ok(Self { inner: Rc::new(crate::TrivialContext::new(user_keys.inner).await?) })
     }
 
     /// @throw
@@ -285,7 +219,7 @@ impl ProfileSubscription {
         let mut messages = Vec::new();
         let mut changes = Vec::new();
         while let Some(mail) = self.stream.next().await {
-            mail.handle(&self.cx, &mut changes, &mut messages).await?;
+            mail.handle(&*self.cx, &mut changes, &mut messages).await?;
 
             self.cx.save_vault_components(changes.drain(..)).await?;
 
@@ -456,9 +390,9 @@ pub struct UserKeys {
 impl UserKeys {
     /// @throw
     #[wasm_bindgen]
-    pub fn new(username: &str, password: &str) -> Result<UserKeys, Error> {
+    pub fn new(username: &str, password: &str, chain_node: &str) -> Result<UserKeys, Error> {
         let name = parse_username(username)?;
-        Ok(UserKeys { inner: crate::UserKeys::new(name, password) })
+        Ok(UserKeys { inner: crate::UserKeys::new(name, password, chain_node) })
     }
 }
 

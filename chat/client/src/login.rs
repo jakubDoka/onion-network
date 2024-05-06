@@ -37,7 +37,8 @@ fn form(state: State, register: bool) -> impl IntoView {
         let password = crate::get_value(password);
         let username = UserName::try_from(username.as_str()).ok().context("invalid username")?;
 
-        let keys = UserKeys::new(username, password.as_str());
+        let url = option_env!("CHAIN_NODES").unwrap_or("ws://localhost:9944");
+        let keys = UserKeys::new(username, password.as_str(), url);
 
         if register {
             let account_id = keys.chain_client().await?.account_id();

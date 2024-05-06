@@ -23,14 +23,14 @@ use {
     opfusk::{PeerIdExt, ToPeerId},
     rand::{rngs::OsRng, seq::IteratorRandom},
     std::{
-        cell::RefCell,
         collections::HashMap,
         convert::Infallible,
         future::Future,
         io,
+        net::SocketAddr,
         ops::DerefMut,
         pin,
-        rc::{self, Rc},
+        sync::{self, Arc, RwLock},
         task::Poll,
     },
 };
@@ -51,13 +51,14 @@ pub struct Node {
     pending_streams: HashMap<(PeerId, PathId), oneshot::Sender<(NodeIdentity, EncryptedStream)>>,
     requests: mpsc::Receiver<NodeRequest>,
     #[allow(dead_code)]
-    subs: Rc<Subs>,
+    subs: Arc<Subs>,
 }
 
 impl Node {
     pub async fn new(
         keys: UserKeys,
         mut wboot_phase: impl FnMut(BootPhase),
+        translate_addr: fn(SocketAddr) -> Multiaddr,
     ) -> anyhow::Result<(Self, Vault, NodeHandle, Nonce, Nonce)> {
         macro_rules! set_state { ($($t:tt)*) => {wboot_phase(BootPhase::$($t)*)}; }
 
@@ -65,8 +66,18 @@ impl Node {
 
         Storage::set_id(keys.identity());
 
+        wasm_if! {
+            let transport = websocket_websys::Transport::default(),
+            let transport = libp2p::tcp::tokio::Transport::default()
+        }
+
+        wasm_if! {
+            let config = libp2p::swarm::Config::with_wasm_executor(),
+            let config = libp2p::swarm::Config::with_tokio_executor()
+        }
+
         let mut swarm = libp2p::Swarm::new(
-            websocket_websys::Transport::default()
+            transport
                 .upgrade(Version::V1)
                 .authenticate(opfusk::Config::new(OsRng, keys.sign))
                 .multiplex(libp2p::yamux::Config::default())
@@ -82,12 +93,11 @@ impl Node {
                 streaming: streaming::Behaviour::new(|| chat_spec::PROTO_NAME),
             },
             keys.sign.to_peer_id(),
-            libp2p::swarm::Config::with_wasm_executor()
-                .with_idle_connection_timeout(std::time::Duration::from_secs(10)),
+            config.with_idle_connection_timeout(std::time::Duration::from_secs(10)),
         );
 
         let (commands_rx, requests) = mpsc::channel(10);
-        let subs = Rc::new(Subs::default());
+        let subs = Arc::new(Subs::default());
         let handle = NodeHandle::new(commands_rx, &subs, swarm.behaviour_mut().chat_dht.table);
         let chain_api = keys.chain_client().await?;
         let node_request = chain_api.list_chat_nodes();
@@ -106,17 +116,12 @@ impl Node {
         let mut reminimg = node_data.len() - swarm.behaviour_mut().key_share.keys.len();
         set_state!(CollecringKeys(reminimg));
 
-        let nodes = node_data.into_iter().map(|(id, addr)| {
-            let addr = chain_api::unpack_addr_offset(addr, 1);
-            Route::new(id, addr.with(multiaddr::Protocol::Ws("/".into())))
-        });
-        swarm.behaviour_mut().chat_dht.table.write().bulk_insert(nodes);
-
-        let satelites = satelite_data.into_iter().map(|(id, addr)| {
-            let addr = chain_api::unpack_addr_offset(addr, 1);
-            Route::new(id, addr.with(multiaddr::Protocol::Ws("/".into())))
-        });
-        swarm.behaviour_mut().satelite_dht.table.write().bulk_insert(satelites);
+        let node_data =
+            node_data.into_iter().map(|(id, addr)| Route::new(id, translate_addr(addr)));
+        swarm.behaviour_mut().chat_dht.table.write().bulk_insert(node_data);
+        let satelite_data =
+            satelite_data.into_iter().map(|(id, addr)| Route::new(id, translate_addr(addr)));
+        swarm.behaviour_mut().satelite_dht.table.write().bulk_insert(satelite_data);
 
         let routes = swarm.behaviour_mut().chat_dht.table.read();
         for route in { routes }.iter() {
@@ -220,11 +225,10 @@ impl Node {
                 Vault::from_storage(keys.vault).context("welp, your account is fucked")?
             }
         };
-        let _ = vault.theme.apply();
 
         let id = profile_stream_peer.to_hash();
         let sub = RawSub::new(profile_stream, handle.subs.clone(), id);
-        subs.borrow_mut().insert(id, sub);
+        subs.write().unwrap().insert(id, sub);
 
         set_state!(ChatRun);
 
@@ -308,7 +312,7 @@ fn pick_route(
 }
 
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
-type Subs = RefCell<HashMap<NodeIdentity, RawSub>>;
+type Subs = RwLock<HashMap<NodeIdentity, RawSub>>;
 
 struct SubscriptionRequest {
     prefix: Prefix,
@@ -330,7 +334,7 @@ pub enum NodeRequest {
 }
 
 pub struct NodeHandle {
-    subs: rc::Weak<Subs>,
+    subs: sync::Weak<Subs>,
     requests: mpsc::Sender<NodeRequest>,
     dht: dht::SharedRoutingTable,
 }
@@ -338,13 +342,13 @@ pub struct NodeHandle {
 impl NodeHandle {
     fn new(
         requests: mpsc::Sender<NodeRequest>,
-        subs: &Rc<Subs>,
+        subs: &Arc<Subs>,
         dht: dht::SharedRoutingTable,
     ) -> Self {
-        Self { requests, subs: Rc::downgrade(subs), dht }
+        Self { requests, subs: Arc::downgrade(subs), dht }
     }
 
-    fn upgrade(&self) -> io::Result<Rc<RefCell<HashMap<NodeIdentity, RawSub>>>> {
+    fn upgrade(&self) -> io::Result<Arc<RwLock<HashMap<NodeIdentity, RawSub>>>> {
         self.subs.upgrade().ok_or(io::ErrorKind::ConnectionReset.into())
     }
 
@@ -362,7 +366,7 @@ impl NodeHandle {
             let subs = subs?;
 
             for repl in replicatios.clone() {
-                if let Some(sub) = subs.borrow().get(&NodeIdentity::from(repl)) {
+                if let Some(sub) = subs.read().unwrap().get(&NodeIdentity::from(repl)) {
                     return Ok(Sub { topic, sub: sub.clone() });
                 }
             }
@@ -373,8 +377,8 @@ impl NodeHandle {
                 .map_err(|_| io::ErrorKind::ConnectionReset)?;
             let (node, stream) = rx.await.map_err(|_| io::ErrorKind::ConnectionAborted)?;
             debug_assert!(replicatios.contains(&node.into()));
-            let sub = RawSub::new(stream, Rc::downgrade(&subs), node);
-            subs.borrow_mut().insert(node, sub.clone());
+            let sub = RawSub::new(stream, Arc::downgrade(&subs), node);
+            subs.write().unwrap().insert(node, sub.clone());
             Ok(Sub { topic, sub })
         }
     }
@@ -383,7 +387,7 @@ impl NodeHandle {
 impl Drop for NodeHandle {
     fn drop(&mut self) {
         if let Ok(subs) = self.upgrade() {
-            subs.borrow_mut().clear();
+            subs.write().unwrap().clear();
         }
         self.requests.close_channel();
     }
@@ -446,18 +450,24 @@ pub(crate) struct RawSub {
 }
 
 impl RawSub {
-    pub fn new(stream: EncryptedStream, subscriptions: rc::Weak<Subs>, id: NodeIdentity) -> Self {
+    pub fn new(
+        stream: EncryptedStream,
+        subscriptions: std::sync::Weak<Subs>,
+        id: NodeIdentity,
+    ) -> Self {
         let (requests, inner_requests) = mpsc::channel(10);
 
-        wasm_bindgen_futures::spawn_local(async move {
+        let task = async move {
             if let Err(e) = Self::run(stream, inner_requests).await {
                 log::error!("subscription error: {e}");
             }
 
             if let Some(u) = subscriptions.upgrade() {
-                u.borrow_mut().remove(&id);
+                u.write().unwrap().remove(&id);
             }
-        });
+        };
+
+        crate::spawn(task);
 
         Self { requests }
     }

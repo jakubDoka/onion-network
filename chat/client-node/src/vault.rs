@@ -10,7 +10,6 @@ use {
     onion::SharedSecret,
     rand::rngs::OsRng,
     std::collections::{BTreeSet, HashMap, HashSet},
-    web_sys::wasm_bindgen::JsValue,
 };
 
 pub type FriendId = SharedSecret;
@@ -142,11 +141,12 @@ impl Vault {
         *hashes.into_iter().collect::<MerkleTree<_>>().root()
     }
 
-    pub fn changes(&mut self) -> Vec<(crypto::Hash, Vec<u8>)> {
+    pub fn changes(&mut self, forced: bool) -> Vec<(crypto::Hash, Vec<u8>)> {
         let VaultChanges(changes) = Storage::get([]).unwrap_or_default();
         if self.change_count > 40
             || self.last_update.elapsed() > instant::Duration::from_secs(60)
             || changes.len() > 10
+            || forced
         {
             changes
                 .into_iter()
@@ -264,34 +264,6 @@ pub struct RawChatMessage {
     pub sender: UserName,
 }
 
-pub fn try_set_color(name: &str, value: u32) -> Result<(), JsValue> {
-    web_sys::window()
-        .unwrap()
-        .document()
-        .unwrap()
-        .body()
-        .ok_or("no body")?
-        .style()
-        .set_property(name, &format!("#{:08x}", value))
-}
-
-pub fn try_load_color_from_style(name: &str) -> Result<u32, JsValue> {
-    u32::from_str_radix(
-        web_sys::window()
-            .unwrap()
-            .document()
-            .unwrap()
-            .body()
-            .ok_or("no body")?
-            .style()
-            .get_property_value(name)?
-            .strip_prefix('#')
-            .ok_or("expected # to start the color")?,
-        16,
-    )
-    .map_err(|e| e.to_string().into())
-}
-
 macro_rules! gen_theme {
     ($(
         $name:ident: $value:literal,
@@ -302,14 +274,14 @@ macro_rules! gen_theme {
         )* }
 
         impl Theme {
-            pub fn apply(self) -> Result<(), JsValue> {
-                $(try_set_color(concat!("--", stringify!($name), "-color"), self.$name)?;)*
+            pub fn apply<E>(self, setter: fn(&str, u32) -> Result<(), E>) -> Result<(), E> {
+                $(setter(concat!("--", stringify!($name), "-color"), self.$name)?;)*
                 Ok(())
             }
 
-            pub fn from_current() -> Result<Self, JsValue> {
+            pub fn from_current<E>(getter: fn(&str) -> Result<u32, E>) -> Result<Self, E> {
                 Ok(Self { $(
-                    $name: try_load_color_from_style(concat!("--", stringify!($name), "-color"))?,
+                    $name: getter(concat!("--", stringify!($name), "-color"))?,
                 )* })
             }
 

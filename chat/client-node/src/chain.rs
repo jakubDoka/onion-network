@@ -2,12 +2,11 @@ pub use chain_api::Client;
 use {
     crate::{VaultChanges, VaultKeys, VaultValue, VaultVersion},
     anyhow::Context,
-    base64::Engine,
     chain_api::{Nonce, Profile},
     chat_spec::{username_from_raw, username_to_raw, FetchProfileResp, Identity, UserName},
-    codec::{Codec, DecodeOwned, Encode},
+    codec::{Codec, Encode},
     libp2p::futures::TryFutureExt,
-    std::{cell::RefCell, collections::BTreeMap, future::Future},
+    std::{collections::BTreeMap, future::Future, sync::Mutex},
 };
 
 #[allow(async_fn_in_trait)]
@@ -43,25 +42,37 @@ impl ChainClientExt for Client {
 }
 
 pub fn min_nodes() -> usize {
-    component_utils::build_env!(MIN_NODES);
-    MIN_NODES.parse().unwrap()
+    chat_spec::REPLICATION_FACTOR.get() + 1
+}
+
+pub trait StorageBackend: Send + Sync {
+    fn load(&mut self, key: crypto::Hash) -> Option<Vec<u8>>;
+    fn store(&mut self, key: crypto::Hash, value: &[u8]);
 }
 
 pub struct Storage {
     id: Identity,
     hot_entries: BTreeMap<crypto::Hash, Vec<u8>>,
+    backend: Option<Box<dyn StorageBackend>>,
 }
 
-thread_local! {
-    static INSTANCE: RefCell<Storage> = Storage {
+fn with_instance<T>(f: impl FnOnce(&mut Storage) -> T) -> T {
+    static INSTANCE: Mutex<Option<Storage>> = Mutex::new(None);
+    let mut r = INSTANCE.lock().unwrap();
+    f(r.get_or_insert(Storage {
         id: Identity::default(),
         hot_entries: BTreeMap::new(),
-    }.into();
+        backend: None,
+    }))
 }
 
 impl Storage {
     pub fn set_id(id: Identity) {
-        INSTANCE.with(|i| i.borrow_mut().id = id);
+        with_instance(|i| i.id = id);
+    }
+
+    pub fn set_backend(impl_: impl StorageBackend + 'static) {
+        with_instance(|i| i.backend = Some(Box::new(impl_)));
     }
 
     pub async fn get_or_insert<K: AsRef<[u8]>, T: Cached, F: Future<Output = anyhow::Result<T>>>(
@@ -129,39 +140,36 @@ impl Storage {
     }
 
     fn compute_key<T: Cached>(key: impl AsRef<[u8]>) -> crypto::Hash {
-        let id = INSTANCE.with(|i| i.borrow().id);
+        let id = with_instance(|i| i.id);
         debug_assert_ne!(id, Identity::default());
 
         crypto::xor_secrets(crypto::hash::with_nonce(key.as_ref(), T::NONCE), id)
     }
 
     fn get_low<T: Codec>(key: crypto::Hash) -> Option<T> {
-        if let Some(entry) = INSTANCE.with(|i| i.borrow().hot_entries.get(&key).cloned())
-            && let Some(res) = T::decode_exact(&entry)
-        {
-            return Some(res);
-        }
+        with_instance(|i| {
+            if let Some(res) = i.hot_entries.get(&key).and_then(|v| T::decode_exact(v)) {
+                return Some(res);
+            }
 
-        if let Some(win) = web_sys::window()
-            && let Some(local_storage) = win.local_storage().unwrap()
-            && let Some(value) = local_storage.get(&encode_base64(&key)).unwrap()
-            && let Some(res) = decode_base64::<T>(&value)
-        {
-            INSTANCE.with(|i| i.borrow_mut().hot_entries.insert(key, res.to_bytes()));
-            return Some(res);
-        }
+            if let Some(be) = i.backend.as_mut() {
+                if let Some(value) = be.load(key) {
+                    return T::decode_exact(&value);
+                }
+            }
 
-        None
+            None
+        })
     }
 
-    pub fn insert_low<T: Codec>(key: crypto::Hash, value: &T) {
-        INSTANCE.with(|i| i.borrow_mut().hot_entries.insert(key, value.to_bytes()));
-
-        if let Some(win) = web_sys::window()
-            && let Some(local_storage) = win.local_storage().unwrap()
-        {
-            local_storage.set(&encode_base64(&key), &encode_base64(&value)).unwrap();
-        }
+    pub fn insert_low<T: Encode>(key: crypto::Hash, value: &T) {
+        let bytes = value.to_bytes();
+        with_instance(|i| {
+            if let Some(be) = i.backend.as_mut() {
+                be.store(key, &bytes);
+            }
+            i.hot_entries.insert(key, bytes);
+        });
     }
 }
 
@@ -185,10 +193,42 @@ impl_cached! {
     Identity,
 }
 
-fn encode_base64<T: Encode>(t: &T) -> String {
-    base64::prelude::BASE64_STANDARD_NO_PAD.encode(&t.to_bytes())
+#[cfg(target_arch = "wasm32")]
+pub struct LocalStorageCache;
+
+#[cfg(target_arch = "wasm32")]
+impl StorageBackend for LocalStorageCache {
+    fn load(&mut self, key: crypto::Hash) -> Option<Vec<u8>> {
+        web_sys::window()?
+            .local_storage()
+            .unwrap()?
+            .get(&encode_base64(&key))
+            .unwrap()
+            .and_then(|v| decode_base64(&v))
+    }
+
+    fn store(&mut self, key: crypto::Hash, value: &[u8]) {
+        let store = || {
+            web_sys::window()?
+                .local_storage()
+                .unwrap()?
+                .set(&encode_base64(&key), &encode_base64(value))
+                .unwrap();
+            Some(())
+        };
+
+        store();
+    }
 }
 
-fn decode_base64<T: DecodeOwned>(s: &str) -> Option<T> {
-    base64::prelude::BASE64_STANDARD_NO_PAD.decode(s).ok().and_then(|b| T::decode_exact(&b))
+#[cfg(target_arch = "wasm32")]
+fn encode_base64(t: &[u8]) -> String {
+    use base64::Engine;
+    base64::prelude::BASE64_STANDARD_NO_PAD.encode(t)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_base64(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::prelude::BASE64_STANDARD_NO_PAD.decode(s).ok()
 }

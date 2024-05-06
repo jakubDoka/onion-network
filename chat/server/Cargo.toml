@@ -40,3 +40,6 @@ merkle-tree = { version = "0.1.0", path = "../../crypto/merkle-tree" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+chat-client-node.workspace = true

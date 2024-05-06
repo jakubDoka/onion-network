@@ -247,9 +247,12 @@ impl Server {
                     return;
                 };
 
-                let Ok(stream) =
-                    stream.inspect_err(|e| log::warn!("peer {peer} is not reachable: {e}"))
-                else {
+                let Ok(stream) = stream.inspect_err(|e| {
+                    log::warn!(
+                        "peer {peer} is not reachable ({}): {e}",
+                        self.swarm.local_peer_id() < &peer
+                    )
+                }) else {
                     return;
                 };
 

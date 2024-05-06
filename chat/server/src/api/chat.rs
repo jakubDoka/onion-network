@@ -82,8 +82,9 @@ pub async fn vote(
     name: ChatName,
     Dec((hash, bn, agrees)): hds::dec!(crypto::Hash, BlockNumber, bool),
 ) -> Result<()> {
-    origin.try_to_hash().filter(|c| group.contains(c)).ok_or(ChatError::NoReplicator)?;
-    block_in_place(|| cx.storage.get_chat(name)?.vote(cx.local_peer_id, bn, hash, agrees))
+    let origin =
+        origin.try_to_hash().filter(|c| group.contains(c)).ok_or(ChatError::NoReplicator)?;
+    block_in_place(|| cx.storage.get_chat(name)?.vote(origin, bn, hash, agrees))
 }
 
 pub async fn proposal(
@@ -96,14 +97,12 @@ pub async fn proposal(
     // FIXME: make this check when processing request header
     let origin =
         origin.try_to_hash().filter(|c| group.contains(c)).ok_or(ChatError::NoReplicator)?;
-    let vote =
+    let (base_hash, error) =
         block_in_place(|| cx.storage.get_chat(name)?.proposal(origin, group, number, block))?;
 
-    if let Some((base_hash, vote, error)) = vote {
-        _ = cx.repl_rpc::<()>(name, rpcs::VOTE_BLOCK, (number, base_hash, vote)).await;
-        if let Some(error) = error {
-            return Err(error);
-        }
+    _ = cx.repl_rpc::<()>(name, rpcs::VOTE_BLOCK, (base_hash, number, error.is_none())).await;
+    if let Some(error) = error {
+        return Err(error);
     }
 
     Ok(())
@@ -121,7 +120,7 @@ pub async fn fetch_chat_data(
 pub async fn fetch_messages(
     cx: crate::Context,
     name: ChatName,
-    Dec(cursor): hds::dec!(Cursor),
+    Dec(cursor): hds::dec!(Cursor; 2),
 ) -> Result<([u8; chat_spec::MAX_MESSAGE_FETCH_SIZE], Cursor)> {
     block_in_place(|| cx.storage.get_chat(name)?.fetch_messages(cursor))
 }

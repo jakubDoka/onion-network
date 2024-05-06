@@ -32,7 +32,7 @@ pub fn Profile(state: crate::State) -> impl IntoView {
     });
 
     let on_save = crate::handled_async_callback("saving theme", move |_| async move {
-        let them = Theme::from_current().unwrap_or_default();
+        let them = Theme::from_current(crate::try_load_color_from_style).unwrap_or_default();
         state.set_theme(them).await
     });
 

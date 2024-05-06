@@ -1,7 +1,7 @@
 use {
     crate::{
-        ChainClientExt, ChatMeta, FriendMeta, RawChatMessage, RecoverMail, Storage, Sub, Theme,
-        UserKeys, Vault, VaultKey,
+        ChainClientExt, ChatMeta, FriendMeta, Node, NodeHandle, RawChatMessage, RecoverMail,
+        Storage, Sub, Theme, UserKeys, Vault, VaultKey,
     },
     anyhow::Context,
     chain_api::Encrypted,
@@ -12,9 +12,9 @@ use {
         proof::{Nonce, Proof},
     },
     double_ratchet::{DoubleRatchet, MessageHeader},
-    libp2p::futures::future::JoinAll,
+    libp2p::futures::{future::JoinAll, TryFutureExt},
     rand::rngs::OsRng,
-    std::{collections::HashSet, future::Future},
+    std::{cell::RefCell, collections::HashSet, future::Future},
 };
 
 impl Sub<Identity> {
@@ -284,10 +284,6 @@ impl Sub<ChatName> {
 
 #[allow(async_fn_in_trait)]
 pub trait RequestContext: Sized {
-    fn try_with_vault<R>(
-        &self,
-        action: impl FnOnce(&mut Vault) -> anyhow::Result<R>,
-    ) -> anyhow::Result<R>;
     fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> anyhow::Result<R>;
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> anyhow::Result<R>;
     fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> anyhow::Result<R>;
@@ -296,6 +292,13 @@ pub trait RequestContext: Sized {
         &self,
         topic: T,
     ) -> impl Future<Output = anyhow::Result<Sub<T>>>;
+
+    fn try_with_vault<R>(
+        &self,
+        action: impl FnOnce(&mut Vault) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
+        self.with_vault(|v| action(v))?
+    }
 
     async fn profile_subscription(&self) -> anyhow::Result<Sub<Identity>> {
         self.subscription_for(self.with_keys(UserKeys::identity)?).await
@@ -333,11 +336,23 @@ pub trait RequestContext: Sized {
         &self,
         id: impl IntoIterator<Item = VaultKey>,
     ) -> anyhow::Result<()> {
+        self.save_vault_components_low(id, false).await
+    }
+
+    async fn flush_vault(&self) -> anyhow::Result<()> {
+        self.save_vault_components_low([], true).await
+    }
+
+    async fn save_vault_components_low(
+        &self,
+        id: impl IntoIterator<Item = VaultKey>,
+        forced: bool,
+    ) -> anyhow::Result<()> {
         let chnages = {
             let key = self.with_keys(|k| k.vault)?;
             self.with_vault(|v| {
                 id.into_iter().for_each(|id| _ = v.update(id, key));
-                v.changes()
+                v.changes(forced)
             })?
         };
         if chnages.is_empty() {
@@ -516,6 +531,62 @@ impl<RC: RequestContext> RequestContext for &RC {
         topic: T,
     ) -> impl Future<Output = anyhow::Result<Sub<T>>> {
         (*self).subscription_for(topic)
+    }
+}
+
+pub struct TrivialContext {
+    pub vault: RefCell<Vault>,
+    pub keys: UserKeys,
+    pub mail_action: RefCell<crypto::proof::Nonce>,
+    pub vault_version: RefCell<crypto::proof::Nonce>,
+    pub requests: NodeHandle,
+}
+
+impl TrivialContext {
+    pub async fn new(keys: UserKeys) -> anyhow::Result<Self> {
+        let (node, vault, requests, vault_version, mail_action) =
+            Node::new(keys.clone(), |_| (), chain_api::unpack_addr).await?;
+
+        crate::spawn(node);
+
+        Ok(Self {
+            vault: RefCell::new(vault),
+            keys,
+            mail_action: RefCell::new(mail_action),
+            vault_version: RefCell::new(vault_version),
+            requests,
+        })
+    }
+}
+
+impl RequestContext for TrivialContext {
+    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> anyhow::Result<R> {
+        Ok(action(&mut self.vault.borrow_mut()))
+    }
+
+    fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> anyhow::Result<R> {
+        Ok(action(&self.keys))
+    }
+
+    fn with_vault_version<R>(
+        &self,
+        action: impl FnOnce(&mut crypto::proof::Nonce) -> R,
+    ) -> anyhow::Result<R> {
+        Ok(action(&mut self.vault_version.borrow_mut()))
+    }
+
+    fn with_mail_action<R>(
+        &self,
+        action: impl FnOnce(&mut crypto::proof::Nonce) -> R,
+    ) -> anyhow::Result<R> {
+        Ok(action(&mut self.mail_action.borrow_mut()))
+    }
+
+    fn subscription_for<T: Into<chat_spec::Topic> + Clone>(
+        &self,
+        topic: T,
+    ) -> impl libp2p::futures::prelude::Future<Output = anyhow::Result<Sub<T>>> {
+        self.requests.subscription_for(topic).map_err(Into::into)
     }
 }
 

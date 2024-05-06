@@ -48,11 +48,13 @@ crypto = { path = "crypto/crypto", features = ["codec"] }
 falcon = { path = "crypto/falcon/falcon" }
 opfusk = { path = "crypto/opfusk" }
 double-ratchet = { path = "crypto/double-ratchet" }
+merkle-tree = { path = "crypto/merkle-tree" }
 
 codec-derive = { path = "utils/codec-derive" }
 codec = { path = "utils/codec" }
 component-utils = { path = "utils/component-utils" }
 handlers = { path = "utils/handlers" }
+websocket-websys = { path = "utils/websocket-websys" }
 
 chain-api = { path = "chain/api", default-features = false }
 chain-types = { path = "chain/types", default-features = false }

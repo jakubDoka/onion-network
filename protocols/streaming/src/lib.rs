@@ -26,10 +26,10 @@ use {
 
 #[derive(Default, Debug)]
 pub struct Connection {
-    id: Option<ConnectionId>,
     pending_requests: usize,
     new_requests: usize,
 }
+
 impl Connection {
     fn total_requests(&self) -> usize {
         self.pending_requests + self.new_requests
@@ -37,8 +37,8 @@ impl Connection {
 }
 
 pub struct Behaviour {
-    connections: HashMap<PeerId, Connection>,
-    events: Vec<Event>,
+    connections: HashMap<PeerId, HashMap<ConnectionId, Connection>>,
+    events: Vec<libp2p::swarm::ToSwarm<Event, libp2p::swarm::THandlerInEvent<Self>>>,
     waker: Option<std::task::Waker>,
     protocol: fn() -> StreamProtocol,
 }
@@ -49,11 +49,18 @@ impl Behaviour {
     }
 
     pub fn is_resolving_stream_for(&self, peer: PeerId) -> bool {
-        self.connections.get(&peer).is_some_and(|c| c.pending_requests > 0 || c.new_requests > 0)
+        self.connections.get(&peer).is_some_and(|c| c.iter().any(|(_, c)| c.total_requests() > 0))
     }
 
     pub fn create_stream(&mut self, with: PeerId) {
-        self.connections.entry(with).or_default().new_requests += 1;
+        let connes = self.connections.entry(with).or_default();
+        if let Some(conn) = connes.values_mut().next() {
+            conn.new_requests += 1;
+        } else {
+            let (cid, opts) = new_dial_opts(with);
+            connes.insert(cid, Connection { pending_requests: 0, new_requests: 1 });
+            self.events.push(libp2p::swarm::ToSwarm::Dial { opts });
+        }
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }
@@ -64,20 +71,15 @@ impl Behaviour {
         peer: PeerId,
         cid: ConnectionId,
     ) -> Result<Handler, ConnectionDenied> {
-        let conn = self.connections.entry(peer).or_default();
-        if conn.id.is_some() && conn.id != Some(cid) {
-            return Err(ConnectionDenied::new("duplicate connection"));
-        }
-        conn.id = Some(cid);
+        let conn = self.connections.entry(peer).or_default().entry(cid).or_default();
         conn.pending_requests += std::mem::take(&mut conn.new_requests);
         Ok(Handler::new(conn.pending_requests, self.protocol))
     }
 }
 
-fn new_dial_opts(peer: PeerId, id: &mut Option<ConnectionId>) -> DialOpts {
+fn new_dial_opts(peer: PeerId) -> (ConnectionId, DialOpts) {
     let opts = DialOpts::peer_id(peer).condition(PeerCondition::DisconnectedAndNotDialing).build();
-    *id = Some(opts.connection_id());
-    opts
+    (opts.connection_id(), opts)
 }
 
 impl NetworkBehaviour for Behaviour {
@@ -111,32 +113,53 @@ impl NetworkBehaviour for Behaviour {
                 peer_id: Some(peer_id),
                 connection_id,
                 ..
-            }) if let Entry::Occupied(conn) = self.connections.entry(peer_id)
-                && conn.get().id == Some(connection_id) =>
+            }) if let Entry::Occupied(mut cgroup) = self.connections.entry(peer_id)
+                && let Entry::Occupied(conn) = cgroup.get_mut().entry(connection_id) =>
             {
                 if !matches!(error, DialError::DialPeerConditionFalse(_)) {
-                    for _ in 0..conn.get().total_requests() {
-                        self.events.push(Event::OutgoingStream(
-                            peer_id,
-                            Err(StreamUpgradeError::Io(io::Error::other(error.to_string()))),
-                        ));
-                    }
+                    let total = conn.get().total_requests();
                     conn.remove();
+
+                    if let Some(other) = cgroup.get_mut().values_mut().next() {
+                        other.new_requests += total;
+                    } else {
+                        for _ in 0..total {
+                            self.events.push(libp2p::swarm::ToSwarm::GenerateEvent(
+                                Event::OutgoingStream(
+                                    peer_id,
+                                    Err(StreamUpgradeError::Io(io::Error::other(
+                                        error.to_string(),
+                                    ))),
+                                ),
+                            ));
+                        }
+                        cgroup.remove();
+                    }
                 }
             }
             libp2p::swarm::FromSwarm::ConnectionClosed(c) => {
-                if let Entry::Occupied(conn) = self.connections.entry(c.peer_id) {
-                    for _ in 0..conn.get().total_requests() {
-                        self.events.push(Event::OutgoingStream(
-                            c.peer_id,
-                            Err(StreamUpgradeError::Io(io::ErrorKind::ConnectionReset.into())),
-                        ));
-                    }
+                if let Entry::Occupied(mut cgroup) = self.connections.entry(c.peer_id)
+                    && let Entry::Occupied(conn) = cgroup.get_mut().entry(c.connection_id)
+                {
+                    let total = conn.get().total_requests();
                     conn.remove();
+
+                    if let Some(other) = cgroup.get_mut().values_mut().next() {
+                        other.new_requests += total;
+                    } else {
+                        for _ in 0..total {
+                            self.events.push(libp2p::swarm::ToSwarm::GenerateEvent(
+                                Event::OutgoingStream(
+                                    c.peer_id,
+                                    Err(StreamUpgradeError::Io(
+                                        io::ErrorKind::ConnectionReset.into(),
+                                    )),
+                                ),
+                            ));
+                        }
+                        cgroup.remove();
+                    }
                 }
-            }
-            libp2p::swarm::FromSwarm::ConnectionEstablished(c) => {
-                self.connections.entry(c.peer_id).or_default().id = Some(c.connection_id);
             }
             _ => {}
         }
@@ -145,44 +168,42 @@ impl NetworkBehaviour for Behaviour {
     fn on_connection_handler_event(
         &mut self,
         peer_id: PeerId,
-        _connection_id: ConnectionId,
+        connection_id: ConnectionId,
         event: libp2p::swarm::THandlerOutEvent<Self>,
     ) {
-        self.events.push(match event {
+        self.events.push(libp2p::swarm::ToSwarm::GenerateEvent(match event {
             HEvent::Incoming(stream) => Event::IncomingStream(peer_id, stream),
             HEvent::Outgoing(e) => {
-                self.connections.entry(peer_id).and_modify(|c| c.pending_requests -= 1);
+                if let Some(cgroup) = self.connections.get_mut(&peer_id)
+                    && let Some(conn) = cgroup.get_mut(&connection_id)
+                {
+                    conn.pending_requests -= 1;
+                }
                 Event::OutgoingStream(peer_id, e)
             }
-        });
+        }));
     }
 
     fn poll(
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>> {
-        if let Some((peer, conn)) = self.connections.iter_mut().find(|(_, c)| c.id.is_none()) {
-            return Poll::Ready(libp2p::swarm::ToSwarm::Dial {
-                opts: new_dial_opts(*peer, &mut conn.id),
-            });
-        }
-
         if let Some((peer, id, conn)) = self
             .connections
             .iter_mut()
-            .filter(|(_, c)| c.new_requests > 0)
-            .find_map(|(p, c)| c.id.map(|id| (p, id, c)))
+            .flat_map(|(p, c)| c.iter_mut().map(move |(id, c)| (p, id, c)))
+            .find(|(_, _, c)| c.new_requests > 0)
         {
             conn.pending_requests += conn.new_requests;
             return Poll::Ready(libp2p::swarm::ToSwarm::NotifyHandler {
                 peer_id: *peer,
-                handler: NotifyHandler::One(id),
+                handler: NotifyHandler::One(*id),
                 event: std::mem::take(&mut conn.new_requests),
             });
         }
 
         if let Some(event) = self.events.pop() {
-            return Poll::Ready(libp2p::swarm::ToSwarm::GenerateEvent(event));
+            return Poll::Ready(event);
         }
 
         component_utils::set_waker(&mut self.waker, cx.waker());

@@ -5,6 +5,18 @@
 #![feature(never_type)]
 #![feature(type_alias_impl_trait)]
 
+#[macro_export]
+macro_rules! wasm_if {
+    ($wasm:stmt $(, $not_wasm:stmt)?) => {
+        #[cfg(target_arch = "wasm32")]
+        $wasm;
+        $(
+            #[cfg(not(target_arch = "wasm32"))]
+            $not_wasm;
+        )?
+    };
+}
+
 use {
     anyhow::Context,
     argon2::Argon2,
@@ -14,12 +26,8 @@ use {
     crypto::{enc, sign},
     libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     rand::{CryptoRng, RngCore},
-    std::{future::Future, io, pin, task::Poll, time::Duration},
+    std::{future::Future, io, sync::Arc, time::Duration},
     storage_spec::ClientError,
-    web_sys::{
-        wasm_bindgen::{closure::Closure, JsCast},
-        window,
-    },
 };
 pub use {
     chain::*,
@@ -31,7 +39,6 @@ pub type SubscriptionMessage = Vec<u8>;
 pub type RawResponse = Vec<u8>;
 pub type MessageContent = String;
 
-#[cfg(feature = "api")]
 mod api;
 
 mod chain;
@@ -101,10 +108,11 @@ pub struct UserKeys {
     pub enc: enc::Keypair,
     pub vault: crypto::SharedSecret,
     pub hot_wallet: crypto::SharedSecret,
+    pub chain_url: Arc<str>,
 }
 
 impl UserKeys {
-    pub fn new(name: UserName, password: &str) -> Self {
+    pub fn new(name: UserName, password: &str, chain_url: &str) -> Self {
         struct Entropy<'a>(&'a [u8]);
 
         impl RngCore for Entropy<'_> {
@@ -144,7 +152,7 @@ impl UserKeys {
         let enc = enc::Keypair::new(&mut entropy);
         let vault = crypto::new_secret(&mut entropy);
         let hot_wallet = crypto::new_secret(&mut entropy);
-        Self { name, sign, enc, vault, hot_wallet }
+        Self { name, sign, enc, vault, hot_wallet, chain_url: chain_url.into() }
     }
 
     pub fn identity(&self) -> Identity {
@@ -156,25 +164,14 @@ impl UserKeys {
     }
 
     pub fn chain_client(&self) -> impl Future<Output = chain_api::Result<chain::Client>> {
-        component_utils::build_env!(CHAIN_NODES);
-
-        thread_local! {
-            static CLIENT: std::cell::RefCell<Option<chain::Client>> = std::cell::RefCell::new(None);
-        }
-
         let kp = chain_api::Keypair::from_seed(self.vault).expect("right amount of seed");
-        async move {
-            if CLIENT.with(|client| client.borrow().is_none()) {
-                let client = chain_api::Client::with_signer(CHAIN_NODES, kp).await?;
-                CLIENT.with(|cl| *cl.borrow_mut() = Some(client));
-            }
-
-            Ok(CLIENT.with(|client| client.borrow().as_ref().unwrap().clone()))
-        }
+        let chain_url = self.chain_url.clone();
+        async move { chain_api::Client::with_signer(&chain_url, kp).await }
     }
 
     pub async fn register(&self) -> anyhow::Result<()> {
         let client = self.chain_client().await.context("connecting to chain")?;
+
         let username = username_to_raw(self.name);
 
         if client.user_exists(username).await.context("checking if username is free")? {
@@ -188,8 +185,17 @@ impl UserKeys {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 pub async fn timeout<F: Future>(duration: Duration, f: F) -> Option<F::Output> {
-    let mut fut = pin::pin!(f);
+    use {
+        std::task::Poll,
+        web_sys::{
+            wasm_bindgen::{closure::Closure, JsCast},
+            window,
+        },
+    };
+
+    let mut fut = std::pin::pin!(f);
     let mut callback = None::<(Closure<dyn FnMut()>, i32)>;
     let until = instant::Instant::now() + duration;
     std::future::poll_fn(|cx| {
@@ -221,6 +227,11 @@ pub async fn timeout<F: Future>(duration: Duration, f: F) -> Option<F::Output> {
         Poll::Pending
     })
     .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn timeout<F: Future>(duration: Duration, f: F) -> Option<F::Output> {
+    tokio::time::timeout(duration, f).await.ok()
 }
 
 pub async fn send_request<R: DecodeOwned>(
@@ -262,4 +273,9 @@ pub async fn send_request_low<R: DecodeOwned>(
     let mut buf = vec![0; header.get_len()];
     stream.read_exact(&mut buf).await?;
     R::decode_exact(&buf).ok_or(io::ErrorKind::InvalidData.into())
+}
+
+pub fn spawn(fut: impl Future + Send + 'static) {
+    let task = async move { _ = fut.await };
+    wasm_if!(wasm_bindgen_futures::spawn_local(task), tokio::spawn(task));
 }

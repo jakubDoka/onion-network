@@ -127,7 +127,7 @@ impl<T: DecodeOwned + Send + Sync, S: Stream, const BUFFER_SIZE: usize> FromStre
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
-            ensure!(len <= BUFFER_SIZE, io::ErrorKind::InvalidInput.into());
+            ensure!(len <= BUFFER_SIZE, io::ErrorKind::OutOfMemory.into());
             let mut buffer = [0; BUFFER_SIZE];
             stream
                 .as_mut()
@@ -177,7 +177,7 @@ impl<S: Stream, const BUFFER_LEN: usize> FromStream<S> for ArrDec<BUFFER_LEN> {
         len: usize,
     ) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_ {
         async move {
-            ensure!(len <= BUFFER_LEN, io::ErrorKind::InvalidInput.into());
+            ensure!(len <= BUFFER_LEN, io::ErrorKind::OutOfMemory.into());
             let mut buffer = [0; BUFFER_LEN];
             stream
                 .as_mut()

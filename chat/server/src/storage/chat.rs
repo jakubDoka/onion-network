@@ -80,6 +80,7 @@ fn select_finalizer(
     mut members: FullReplGroup,
     block_len: usize,
 ) -> crypto::Hash {
+    debug_assert!(members.is_full());
     let selector = U256::from(selector);
     let round_count = block_len / BLOCK_SIZE;
     members.sort_unstable_by_key(|&member| U256::from(member) ^ selector);
@@ -267,7 +268,7 @@ impl Handle {
         cx: Context,
         members: FullReplGroup,
         by: &Proof<ReminderOwned>,
-    ) -> Result<Option<(BlockNumber, crypto::Hash, Vec<u8>)>, ChatError> {
+    ) -> Result<Option<(BlockNumber, ReminderOwned)>, ChatError> {
         let sender = by.identity();
         handlers::ensure!(by.verify(), ChatError::InvalidProof);
 
@@ -322,9 +323,11 @@ impl Handle {
             }
             blocks.set_len(copied)?;
             self.discarded_bytes.fetch_add(copied, std::sync::atomic::Ordering::Relaxed);
+            root.checkpoint = file_len - root.checkpoint - root.buffer_len as u64;
         }
 
         if root.buffer_len > UNFINALIZED_BUFFER_CAP {
+            log::warn!("discarding oldest unfinalized block");
             let mut block = vec![0; root.buffer_len];
             blocks.seek(root.buffer_start())?;
             blocks.read_exact(&mut block)?;
@@ -340,8 +343,12 @@ impl Handle {
             let pos = blocks.seek(root.buffer_start())?;
             blocks.write_all(&block[block.len() - kept_chunk_len..])?;
             blocks.set_len(pos + kept_chunk_len as u64)?;
-            return Ok(None);
+
+            root.buffer_len = kept_chunk_len;
         }
+
+        root.store(&mut root_file)?;
+        let root = root;
 
         let should_finalize = root.buffer_len > BLOCK_SIZE
             && root.buffer_len % BLOCK_SIZE > BLOCK_SIZE / 2
@@ -366,7 +373,7 @@ impl Handle {
             let mut block_size = root.buffer_len;
             for message in chat_spec::unpack_messages(&mut block) {
                 block_size -= message.len() + 2;
-                if block_size < desired_block_size {
+                if block_size <= desired_block_size {
                     break;
                 }
             }
@@ -383,7 +390,7 @@ impl Handle {
             votes: ReplVec::new(),
         });
 
-        Ok(Some((root.number, latest_hash, block)))
+        Ok(Some((root.number, ReminderOwned(block))))
     }
 
     pub fn vote(
@@ -398,7 +405,7 @@ impl Handle {
             .entry(hash)
             .or_insert_with(|| BlockProposal { number: bn, ..Default::default() });
 
-        handlers::ensure!(proposal.number == bn, ChatError::BlockNotExpected);
+        handlers::ensure!(proposal.number == bn, ChatError::WrongBlockNumber);
         handlers::ensure!(!proposal.votes.contains(&origin), ChatError::AlreadyVoted);
 
         proposal.votes.push(origin);
@@ -421,11 +428,10 @@ impl Handle {
         group: FullReplGroup,
         number: BlockNumber,
         block: Vec<u8>,
-    ) -> Result<Option<(crypto::Hash, bool, Option<ChatError>)>, ChatError> {
-        let mut root_file = self.root.lock().unwrap();
-        let root = Root::load(&mut root_file)?;
+    ) -> Result<(crypto::Hash, Option<ChatError>), ChatError> {
+        let root = Root::load(&mut self.root.lock().unwrap())?;
 
-        handlers::ensure!(number > root.number, ChatError::BlockNotExpected);
+        handlers::ensure!(number >= root.number, ChatError::OutdatedBlockNumber);
         let base_hash = crypto::hash::new(&block);
 
         let mut voting = self.voting.lock().unwrap();
@@ -435,18 +441,17 @@ impl Handle {
 
         let res = self.proposal_low(origin, group, number, block, proposal, &root);
         proposal.no += res.is_err() as usize;
+        proposal.yes += res.is_ok() as usize;
 
         if let Some(decision) = proposal.try_resolve() {
             if let Some(block) = decision {
                 self.accept_block(base_hash, number, block, &mut voting)?;
-                Ok(Some((base_hash, true, res.err())))
             } else {
                 voting.remove(&base_hash);
-                Ok(Some((base_hash, false, res.err())))
             }
-        } else {
-            res.map(|()| None)
         }
+
+        Ok((base_hash, res.err()))
     }
 
     fn proposal_low(
@@ -463,12 +468,12 @@ impl Handle {
         handlers::ensure!(matches!(proposal.proposal, Proposal::Absent), CE::AlreadyVoted);
         handlers::ensure!(!proposal.votes.contains(&origin), CE::AlreadyVoted);
         let selected = select_finalizer(root.latest_block, group, block.len() + BLOCK_SIZE - 1);
-        handlers::ensure!(selected == origin, CE::BlockNotExpected);
+        handlers::ensure!(selected == origin, CE::WrongProposer);
 
         proposal.proposal = Proposal::Remote(block);
         let Proposal::Remote(block) = &proposal.proposal else { unreachable!() };
 
-        handlers::ensure!(proposal.number == number, CE::BlockNotExpected);
+        handlers::ensure!(proposal.number == number, CE::WrongBlockNumber);
 
         // FIXME: dont allocate buffer, use fixed buffer to count messages
         let buffer = {
@@ -575,7 +580,7 @@ impl Handle {
     ) -> Result<(), ChatError> {
         let mut root_file = self.root.lock().unwrap();
         let mut root = Root::load(&mut root_file)?;
-        root.number = number + 1;
+        root.number = number;
         root.latest_block = hash;
 
         voting.retain(|_, proposal| proposal.number >= root.number);

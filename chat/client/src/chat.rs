@@ -187,6 +187,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
         let Some(secret) = state.chat_secret(chat) else { return };
 
         handled_spawn_local("reading chat messages", async move {
+            // FIXME: we might be leaking futures here
             let mut sub = state
                 .subscription_for(chat)
                 .await?

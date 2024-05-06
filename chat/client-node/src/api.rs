@@ -216,15 +216,9 @@ impl ProfileSubscription {
     /// @throw
     #[wasm_bindgen]
     pub async fn next(&mut self) -> Result<FriendMessage, Error> {
-        let mut messages = Vec::new();
-        let mut changes = Vec::new();
         while let Some(mail) = self.stream.next().await {
-            mail.handle(&*self.cx, &mut changes, &mut messages).await?;
-
-            self.cx.save_vault_components(changes.drain(..)).await?;
-
             if let Some((username, crate::FriendMessage::DirectMessage { content })) =
-                messages.pop()
+                mail.handle(&*self.cx).await?
             {
                 return Ok(FriendMessage { sender: username.to_string(), content });
             }

@@ -17,7 +17,7 @@ use {
     chain_api::Nonce,
     chat_client_node::{
         encode_direct_chat_name, BootPhase, FriendMessage, MailVariants, Node, NodeHandle,
-        RequestContext, Sub, UserKeys, Vault, VaultKey,
+        RequestContext, Sub, UserKeys, Vault,
     },
     chat_spec::{ChatName, Topic},
     codec::{Decode, ReminderOwned},
@@ -129,12 +129,11 @@ fn App() -> impl IntoView {
     async fn handle_mail(
         mail: MailVariants,
         new_messages: &mut Vec<db::Message>,
-        vault_updates: &mut Vec<VaultKey>,
         state: State,
     ) -> Result<()> {
-        let mut messages = Vec::new();
-        mail.handle(&state, vault_updates, &mut messages).await?;
-        if let Some((sender, FriendMessage::DirectMessage { content })) = messages.pop() {
+        if let Some((sender, FriendMessage::DirectMessage { content })) =
+            mail.handle(&state).await?
+        {
             let message = db::Message {
                 sender,
                 owner: state.with_keys(|k| k.name)?,
@@ -166,7 +165,6 @@ fn App() -> impl IntoView {
                     .inspect_err(|_| navigate_to("/login"))?;
 
             let listen = async move {
-                let mut vault_updates = Vec::new();
                 let mut new_messages = Vec::new();
                 loop {
                     let read_mail = async {
@@ -175,15 +173,9 @@ fn App() -> impl IntoView {
                         for mail in chat_spec::unpack_mail(&list) {
                             let mail = MailVariants::decode_exact(mail)
                                 .with_context(|| format!("cant decode mail: {mail:?}"))?;
-                            handle_error(
-                                handle_mail(mail, &mut new_messages, &mut vault_updates, state)
-                                    .await,
-                            );
+                            handle_error(handle_mail(mail, &mut new_messages, state).await);
                         }
-                        db::save_messages(&new_messages).await?;
-                        vault_updates.sort_unstable();
-                        vault_updates.dedup();
-                        state.save_vault_components(vault_updates.drain(..)).await
+                        db::save_messages(&new_messages).await
                     };
                     handle_error(read_mail.await);
 
@@ -192,9 +184,8 @@ fn App() -> impl IntoView {
                         profile_sub.subscribe().await.context("subscribin to account")?;
                     while let Some(mail) = account.next().await {
                         let task = async {
-                            handle_mail(mail, &mut new_messages, &mut vault_updates, state).await?;
-                            db::save_messages(&new_messages).await?;
-                            state.save_vault_components(vault_updates.drain(..)).await
+                            handle_mail(mail, &mut new_messages, state).await?;
+                            db::save_messages(&new_messages).await
                         };
                         handle_error(task.await);
                         new_messages.clear();

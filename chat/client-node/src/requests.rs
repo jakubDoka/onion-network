@@ -637,16 +637,14 @@ impl MailVariants {
     pub async fn handle(
         self,
         ctx: &impl RequestContext,
-        updates: &mut Vec<VaultKey>,
-        messages: &mut Vec<(UserName, FriendMessage)>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<(UserName, FriendMessage)>> {
         match self {
             MailVariants::ChatInvite { chat, cp } => {
                 let secret = ctx
                     .with_keys(|k| k.enc.decapsulate_choosen(&cp))?
                     .context("failed to decapsulate invite")?;
                 ctx.with_vault(|v| v.chats.insert(chat, ChatMeta::from_secret(secret)))?;
-                updates.push(VaultKey::Chats);
+                ctx.save_vault_components([VaultKey::Chats]).await?;
             }
             MailVariants::FriendRequest { cp, mut payload } => {
                 let secret = ctx
@@ -657,8 +655,8 @@ impl MailVariants {
                     payload.decrypt(secret).context("failed to decrypt frined request")?;
 
                 let (dr, id) = DoubleRatchet::recipient(secret, init, OsRng);
-                updates.push(VaultKey::Friend(username));
-                updates.push(VaultKey::FriendNames);
+                ctx.save_vault_components([VaultKey::Friend(username), VaultKey::FriendNames])
+                    .await?;
 
                 let friend = FriendMeta { dr, identity, id };
                 ctx.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), username))?;
@@ -681,11 +679,12 @@ impl MailVariants {
                     Ok((nm, message))
                 })?;
 
-                updates.push(VaultKey::Friend(name));
-                messages.push(message);
+                ctx.save_vault_components([VaultKey::Friend(name)]).await?;
+
+                return Ok(Some(message));
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 }

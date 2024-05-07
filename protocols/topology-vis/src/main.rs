@@ -2,8 +2,11 @@ use {
     crypto::rand_core::OsRng,
     dht::Route,
     libp2p::{
-        core::upgrade::Version, futures::StreamExt, multiaddr, swarm::NetworkBehaviour, PeerId,
-        Transport,
+        core::upgrade::Version,
+        futures::StreamExt,
+        multiaddr,
+        swarm::{ConnectionId, NetworkBehaviour},
+        PeerId, Transport,
     },
     macroquad::prelude::*,
     opfusk::ToPeerId as _,
@@ -166,7 +169,7 @@ struct Edge {
     start: usize,
     end: usize,
     protocol: usize,
-    connection: usize,
+    connection: ConnectionId,
 }
 
 type EdgeVaule = f32;
@@ -311,19 +314,19 @@ impl topology_wrapper::World for WorldRc {
 
         let index = by_peer_id(&s.nodes, peer)
             .unwrap_or_else(|| s.add_node(Node::new(width, height, peer)));
-        let other = by_peer_id(&s.nodes, update.peer.0)
-            .unwrap_or_else(|| s.add_node(Node::new(width, height, update.peer.0)));
+        let other = by_peer_id(&s.nodes, update.peer)
+            .unwrap_or_else(|| s.add_node(Node::new(width, height, update.peer)));
 
         if index == other {
             return;
         }
 
         use topology_wrapper::Event as E;
-        let (protocol, brightness) = match update.event {
-            E::Stream(p) => (p, 0.5),
-            E::Packet(p) => (p, 1.0),
-            E::Closed(p) => {
-                let protocol = s.add_protocol(p);
+        let brightness = match update.event {
+            E::Stream => 0.5,
+            E::Packet => 1.0,
+            E::Closed => {
+                let protocol = s.add_protocol(update.protocol.as_ref());
                 s.edges.retain(|edge, _| {
                     (edge.start != index || edge.end != other)
                         && (edge.start != other || edge.end != index)
@@ -332,17 +335,9 @@ impl topology_wrapper::World for WorldRc {
                 });
                 return;
             }
-            E::Disconnected => {
-                s.edges.retain(|edge, _| {
-                    (edge.start != index || edge.end != other)
-                        && (edge.start != other || edge.end != index)
-                        || edge.connection != update.connection
-                });
-                return;
-            }
         };
 
-        let protocol = s.add_protocol(protocol);
+        let protocol = s.add_protocol(update.protocol.as_ref());
         if let Some(node) = s.nodes.get_mut(index) {
             node.brightness = 1.0;
         }
@@ -376,12 +371,7 @@ fn chain_node() -> String {
 #[macroquad::main("Topology-Vis")]
 async fn main() {
     console_error_panic_hook::set_once();
-    console_log::init_with_level(if cfg!(debug_assertions) {
-        log::Level::Debug
-    } else {
-        log::Level::Info
-    })
-    .unwrap();
+    console_log::init_with_level(log::Level::Info).unwrap();
 
     let kp = crypto::sign::Keypair::new(OsRng);
     let peer_id = kp.to_peer_id();
@@ -409,7 +399,6 @@ async fn main() {
             .list_chat_nodes()
             .await
             .unwrap();
-        log::info!("detected {} nodes", nodes.len());
         for (id, addr) in nodes {
             let addr =
                 chain_api::unpack_addr_offset(addr, 1).with(multiaddr::Protocol::Ws("/".into()));

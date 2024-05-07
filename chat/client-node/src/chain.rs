@@ -17,7 +17,7 @@ pub trait ChainClientExt {
 
 impl ChainClientExt for Client {
     async fn fetch_profile(&self, name: UserName) -> Result<Profile, anyhow::Error> {
-        match Storage::get_or_insert_opt(username_to_raw(name), self.user, |name| {
+        match Storage::get_or_insert_opt(username_to_raw(name), Default::default(), |name| {
             self.get_profile_by_name(name).map_err(anyhow::Error::from)
         })
         .await
@@ -29,7 +29,7 @@ impl ChainClientExt for Client {
     }
 
     async fn fetch_username(&self, id: Identity) -> Result<UserName, anyhow::Error> {
-        match Storage::get_or_insert_opt(id, self.user, |id| {
+        match Storage::get_or_insert_opt(id, Default::default(), |id| {
             self.get_username(id).map_err(anyhow::Error::from)
         })
         .await

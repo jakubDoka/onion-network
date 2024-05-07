@@ -497,6 +497,8 @@ pub trait RequestContext: Sized {
         let (messages, new_cusor) = sub.fetch_messages(*cursor).await?;
         *cursor = new_cusor;
 
+        let client = &self.with_keys(|k| k.chain_client()).await?;
+
         Ok(unpack_messages_ref(&messages)
             .take_while(|m| !m.is_empty())
             .map(|message| async move {
@@ -505,7 +507,6 @@ pub trait RequestContext: Sized {
                     chat_spec::Message::decode_exact(message).context("invalid message")?;
                 let content = chain_api::decrypt(content.0.to_owned(), chat_meta.secret)
                     .context("decrypt content")?;
-                let client = self.with_keys(|k| k.chain_client()).await?;
                 let sender = client.fetch_username(identity).await?;
                 String::from_utf8(content)
                     .map(|content| RawChatMessage { identity, sender, content })

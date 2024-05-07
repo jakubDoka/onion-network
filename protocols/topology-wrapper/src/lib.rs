@@ -1,4 +1,6 @@
 #![feature(impl_trait_in_assoc_type)]
+#![feature(type_alias_impl_trait)]
+#![feature(let_chains)]
 #![feature(assert_matches)]
 #![feature(macro_metavar_expr)]
 #![feature(slice_take)]
@@ -6,21 +8,22 @@
 pub use impls::{channel, new, Behaviour, EventReceiver, EventSender};
 use {
     codec::{Buffer, Codec, Decode, Encode, WritableBuffer},
-    libp2p::{multihash::Multihash, swarm::NetworkBehaviour, PeerId},
+    libp2p::{
+        multihash::Multihash,
+        swarm::{ConnectionId, NetworkBehaviour},
+        PeerId, StreamProtocol,
+    },
 };
 
-pub enum ExtraEvent {
-    Stream(String),
-    Disconnected,
+#[derive(Codec, Clone)]
+pub struct PacketMeta {
+    #[codec(with = peer_id_codec)]
+    peer: PeerId,
+    #[codec(with = connection_id_codec)]
+    connection: ConnectionId,
+    #[codec(with = stream_protocol_codec)]
+    protocol: StreamProtocol,
 }
-
-pub enum PacketKind {
-    Sent,
-    Closed,
-}
-
-pub type ExtraEventAndMeta = (ExtraEvent, PeerIdWrapper, libp2p::swarm::ConnectionId);
-pub type PacketMeta = (PeerIdWrapper, usize, String);
 
 pub trait World: 'static {
     fn handle_update(&mut self, peer: PeerId, update: Update);
@@ -39,19 +42,22 @@ impl<T: NetworkBehaviour> BuildWrapped for T {
 #[cfg(not(feature = "disabled"))]
 const INIT_TAG: [u8; 32] = [0xff; 32];
 
-#[derive(Codec)]
-pub struct Update<'a> {
-    pub event: Event<'a>,
-    pub peer: PeerIdWrapper,
-    pub connection: usize,
+#[derive(Codec, Clone, Debug)]
+pub struct Update {
+    pub event: Event,
+    #[codec(with = peer_id_codec)]
+    pub peer: PeerId,
+    #[codec(with = connection_id_codec)]
+    pub connection: ConnectionId,
+    #[codec(with = stream_protocol_codec)]
+    pub protocol: StreamProtocol,
 }
 
-#[derive(Codec)]
-pub enum Event<'a> {
-    Stream(&'a str),
-    Packet(&'a str),
-    Closed(&'a str),
-    Disconnected,
+#[derive(Codec, Clone, Debug)]
+pub enum Event {
+    Stream,
+    Packet,
+    Closed,
 }
 
 #[cfg(feature = "disabled")]
@@ -136,39 +142,42 @@ pub mod collector {
         crate::{Update, World},
         codec::Decode,
         libp2p::{
-            futures::{stream::SelectAll, StreamExt},
+            futures::{stream::SelectAll, AsyncReadExt, StreamExt},
             swarm::NetworkBehaviour,
             PeerId,
         },
-        std::{convert::Infallible, io},
+        std::convert::Infallible,
     };
 
     pub fn new<W: World>(peer_id: PeerId, world: W) -> Behaviour<W> {
         Behaviour::new(peer_id, world)
     }
 
-    struct UpdateStream {
-        peer: libp2p::PeerId,
-        inner: libp2p::Stream,
-        reader: component_utils::stream::PacketReader,
-    }
+    mod foo {
+        use {super::*, std::io};
 
-    impl libp2p::futures::Stream for UpdateStream {
-        type Item = (io::Result<Vec<u8>>, PeerId);
+        pub type UpdateStream =
+            impl libp2p::futures::Stream<Item = (io::Result<Update>, PeerId)> + Unpin;
 
-        fn poll_next(
-            self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            let s = self.get_mut();
-            s.reader.poll_packet(cx, &mut s.inner).map(|r| Some((r.map(|r| r.to_vec()), s.peer)))
+        pub fn update_stream(stream: libp2p::Stream, peer_id: PeerId) -> UpdateStream {
+            Box::pin(libp2p::futures::stream::unfold(stream, move |mut stream| async move {
+                let mut buffer = [0u8; 1024];
+                let mut len = [0u8; 2];
+                let res = async {
+                    stream.read_exact(&mut len).await?;
+                    let len = u16::from_be_bytes(len) as usize;
+                    stream.read_exact(&mut buffer[..len]).await?;
+                    Update::decode_exact(&buffer[..len]).ok_or(io::ErrorKind::InvalidData.into())
+                };
+                Some(((res.await, peer_id), stream))
+            }))
         }
     }
 
     pub struct Behaviour<W: World> {
         peer_id: PeerId,
         world: W,
-        listeners: SelectAll<UpdateStream>,
+        listeners: SelectAll<foo::UpdateStream>,
         pending_connections: Vec<PeerId>,
     }
 
@@ -223,14 +232,7 @@ pub mod collector {
             _connection_id: libp2p::swarm::ConnectionId,
             event: libp2p::swarm::THandlerOutEvent<Self>,
         ) {
-            if self.listeners.iter().any(|l| l.peer == peer_id) {
-                return;
-            }
-            self.listeners.push(UpdateStream {
-                peer: peer_id,
-                inner: event,
-                reader: component_utils::stream::PacketReader::default(),
-            });
+            self.listeners.push(foo::update_stream(event, peer_id));
         }
 
         fn poll(
@@ -244,24 +246,19 @@ pub mod collector {
             }
 
             loop {
-                let Some((packet, peer)) =
+                let Some((update, peer)) =
                     libp2p::futures::ready!(self.listeners.poll_next_unpin(cx))
                 else {
                     return std::task::Poll::Pending;
                 };
 
-                let Ok(packet) =
-                    packet.inspect_err(|e| log::error!("Error while reading update: {}", e))
+                let Ok(update) =
+                    update.inspect_err(|e| log::error!("Error while decoding update: {}", e))
                 else {
-                    return std::task::Poll::Pending;
+                    continue;
                 };
 
-                let Some(update) = Update::decode(&mut packet.as_slice()) else {
-                    log::error!("Invalid update received, {:?}", packet);
-                    return std::task::Poll::Pending;
-                };
-
-                if update.peer.0 != self.peer_id {
+                if update.peer != self.peer_id {
                     self.world.handle_update(peer, update);
                 }
             }
@@ -279,7 +276,7 @@ pub mod muxer {
 #[cfg(not(feature = "disabled"))]
 pub mod muxer {
     use {
-        crate::{PacketKind, PacketMeta},
+        crate::{Event, PacketMeta, Update},
         libp2p::{
             core::StreamMuxer,
             futures::{AsyncRead, AsyncWrite, SinkExt},
@@ -320,7 +317,6 @@ pub mod muxer {
                 sender,
                 meta: None,
                 sending: false,
-                closing_res: None,
             }))
         }
 
@@ -335,7 +331,6 @@ pub mod muxer {
                 sender,
                 meta: None,
                 sending: false,
-                closing_res: None,
             }))
         }
 
@@ -359,7 +354,6 @@ pub mod muxer {
         sender: crate::EventSender,
         meta: Option<crate::PacketMeta>,
         sending: bool,
-        closing_res: Option<std::io::Result<()>>,
     }
 
     impl<T: AsyncRead + Unpin> AsyncRead for Substream<T> {
@@ -390,13 +384,18 @@ pub mod muxer {
 
             if !self.sending
                 && buf.len() > 4
-                && libp2p::futures::ready!(self.sender.packets.poll_ready(cx)).is_ok()
+                && libp2p::futures::ready!(self.sender.events.poll_ready(cx)).is_ok()
             {
                 if let Some(meta) = self.meta.clone() {
-                    let _ = self.sender.packets.start_send((meta, PacketKind::Sent));
+                    let _ = self.sender.events.start_send(Update {
+                        event: Event::Packet,
+                        peer: meta.peer,
+                        connection: meta.connection,
+                        protocol: meta.protocol,
+                    });
                 }
             }
-            _ = self.sender.packets.poll_flush_unpin(cx);
+            _ = self.sender.events.poll_flush_unpin(cx);
 
             self.sending = true;
             let res = libp2p::futures::ready!(Pin::new(&mut self.inner).poll_write(cx, buf));
@@ -408,7 +407,7 @@ pub mod muxer {
             mut self: std::pin::Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            _ = self.sender.packets.poll_flush_unpin(cx);
+            std::task::ready!(self.sender.events.poll_flush_unpin(cx)).unwrap();
             Pin::new(&mut self.inner).poll_flush(cx)
         }
 
@@ -416,26 +415,22 @@ pub mod muxer {
             mut self: std::pin::Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            if self.closing_res.is_none() {
-                self.closing_res =
-                    Some(libp2p::futures::ready!(Pin::new(&mut self.inner).poll_close(cx)));
-            }
-
-            if libp2p::futures::ready!(self.sender.packets.poll_ready(cx)).is_ok() {
-                if let Some(meta) = self.meta.take() {
-                    _ = self.sender.packets.start_send((meta, PacketKind::Closed));
-                }
-            }
-            _ = libp2p::futures::ready!(self.sender.packets.poll_flush_unpin(cx));
-
-            std::task::Poll::Ready(self.closing_res.take().unwrap())
+            Pin::new(&mut self.inner).poll_close(cx)
         }
     }
 
     impl<T> Drop for Substream<T> {
         fn drop(&mut self) {
             if let Some(meta) = self.meta.take() {
-                self.sender.packets.try_send((meta, PacketKind::Closed)).unwrap();
+                self.sender
+                    .events
+                    .try_send(Update {
+                        event: Event::Closed,
+                        peer: meta.peer,
+                        connection: meta.connection,
+                        protocol: meta.protocol,
+                    })
+                    .unwrap();
             }
         }
     }
@@ -455,48 +450,114 @@ pub mod report {
 #[cfg(not(feature = "disabled"))]
 pub mod report {
     use {
-        crate::{Event, EventReceiver, ExtraEvent, PeerIdWrapper, Update},
-        component_utils::PacketWriter,
+        crate::{Event, EventReceiver, Update},
+        codec::Encode,
         libp2p::{
             core::upgrade::ReadyUpgrade,
-            futures::{stream::FuturesUnordered, StreamExt},
-            swarm::{ConnectionHandler, NetworkBehaviour},
+            futures::{channel::mpsc, stream::FuturesUnordered, AsyncWriteExt, StreamExt},
+            swarm::{ConnectionHandler, ConnectionId, NetworkBehaviour},
             PeerId, StreamProtocol,
         },
         std::{
             collections::{hash_map::Entry, HashMap},
             convert::Infallible,
-            io,
         },
     };
 
     #[must_use]
     pub fn new(recv: EventReceiver) -> Behaviour {
-        Behaviour { listeners: Default::default(), topology: Default::default(), recv }
+        Behaviour {
+            listeners: Default::default(),
+            topology: Default::default(),
+            recv,
+            listener_tasks: Default::default(),
+        }
+    }
+
+    type StreamTask = impl std::future::Future<Output = ()>;
+    type Topology = HashMap<PeerId, HashMap<ConnectionId, HashMap<StreamProtocol, isize>>>;
+
+    fn update_topology(
+        topology: &mut Topology,
+        peer: PeerId,
+        conn: ConnectionId,
+        proto: StreamProtocol,
+        value: isize,
+    ) -> bool {
+        let counter = topology
+            .entry(peer)
+            .or_default()
+            .entry(conn)
+            .or_default()
+            .entry(proto.clone())
+            .or_default();
+
+        let was_there = *counter > 0;
+        *counter += value;
+        let is_there = *counter > 0;
+
+        if *counter == 0
+            && let Entry::Occupied(mut peer) = topology.entry(peer)
+            && let Entry::Occupied(mut connection) = peer.get_mut().entry(conn)
+            && let Entry::Occupied(proto) = connection.get_mut().entry(proto)
+        {
+            proto.remove();
+            if connection.get().is_empty() {
+                connection.remove();
+            }
+            if peer.get().is_empty() {
+                peer.remove();
+            }
+        }
+
+        was_there != is_there
+    }
+
+    fn stream_task(
+        mut stream: libp2p::Stream,
+        mut updates: mpsc::Receiver<Update>,
+        topology: Topology,
+    ) -> StreamTask {
+        async move {
+            let mut buf = [0u8; 1024];
+            for (peer, conns) in topology {
+                for (connection, streams) in conns {
+                    for (protocol, count) in streams {
+                        debug_assert!(count > 0);
+                        let meta =
+                            crate::Update { peer, connection, event: Event::Stream, protocol };
+                        let len = meta.encoded_len();
+                        meta.encode(&mut &mut buf[2..len + 2]).unwrap();
+                        buf[..2].copy_from_slice(&(len as u16).to_be_bytes());
+                        if let Err(e) = stream.write_all(&buf[..len + 2]).await {
+                            log::error!("Error while writing update: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            while let Some(update) = updates.next().await {
+                let len = update.encoded_len();
+                update.encode(&mut &mut buf[2..len + 2]).unwrap();
+                buf[..2].copy_from_slice(&(len as u16).to_be_bytes());
+                if let Err(e) = stream.write_all(&buf[..len + 2]).await {
+                    log::error!("Error while writing update: {}", e);
+                    break;
+                }
+            }
+        }
     }
 
     struct UpdateStream {
         peer: PeerId,
-        inner: libp2p::Stream,
-        writer: component_utils::stream::PacketWriter,
-    }
-
-    impl std::future::Future for UpdateStream {
-        type Output = io::Result<()>;
-
-        fn poll(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Self::Output> {
-            let s = &mut *self;
-            libp2p::futures::ready!(s.writer.poll(cx, &mut s.inner))?;
-            std::task::Poll::Pending
-        }
+        sender: mpsc::Sender<Update>,
     }
 
     pub struct Behaviour {
-        listeners: FuturesUnordered<UpdateStream>,
-        topology: HashMap<PeerIdWrapper, HashMap<usize, HashMap<String, usize>>>,
+        listeners: Vec<UpdateStream>,
+        listener_tasks: FuturesUnordered<StreamTask>,
+        topology: Topology,
         recv: EventReceiver,
     }
 
@@ -535,22 +596,9 @@ pub mod report {
             if self.listeners.iter().any(|l| l.peer == peer_id) {
                 return;
             }
-            let mut stream =
-                UpdateStream { peer: peer_id, inner: event, writer: PacketWriter::new(1 << 13) };
-
-            for (peer, connections) in &self.topology {
-                for (connection, protocols) in connections {
-                    for (protocol, val) in protocols {
-                        debug_assert!(*val > 0);
-                        let update = Update {
-                            event: Event::Stream(protocol.as_str()),
-                            peer: *peer,
-                            connection: *connection,
-                        };
-                        stream.writer.write_packet(&update).unwrap();
-                    }
-                }
-            }
+            let (sender, receiver) = mpsc::channel(100);
+            let stream = UpdateStream { peer: peer_id, sender };
+            self.listener_tasks.push(stream_task(event, receiver, self.topology.clone()));
 
             self.listeners.push(stream);
         }
@@ -561,75 +609,42 @@ pub mod report {
         ) -> std::task::Poll<
             libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>,
         > {
-            if let std::task::Poll::Ready(Some(Err(e))) = self.listeners.poll_next_unpin(cx) {
-                log::error!("Error while writing update: {}", e);
-            }
-
-            while let std::task::Poll::Ready(Some((extra, peer, connection))) =
+            while let std::task::Poll::Ready(Some(mut update)) =
                 self.recv.events.poll_next_unpin(cx)
             {
-                let event = match &extra {
-                    ExtraEvent::Stream(i) => Event::Stream(i.as_ref()),
-                    ExtraEvent::Disconnected => Event::Disconnected,
+                let should_update = match &update.event {
+                    Event::Stream => update_topology(
+                        &mut self.topology,
+                        update.peer,
+                        update.connection,
+                        update.protocol.clone(),
+                        1,
+                    ),
+                    Event::Packet => true,
+                    Event::Closed => update_topology(
+                        &mut self.topology,
+                        update.peer,
+                        update.connection,
+                        update.protocol.clone(),
+                        -1,
+                    ),
                 };
 
-                let connection = unsafe { std::mem::transmute(connection) };
-                let update = Update { event, peer, connection };
-                for l in &mut self.listeners {
-                    l.writer.write_packet(&update).unwrap();
-                }
+                if should_update {
+                    self.listeners.retain_mut(|l| l.sender.try_send(update.clone()).is_ok());
 
-                match extra {
-                    ExtraEvent::Stream(p) => {
-                        *self
-                            .topology
-                            .entry(peer)
-                            .or_default()
-                            .entry(connection)
-                            .or_default()
-                            .entry(p)
-                            .or_default() += 1;
-                    }
-                    ExtraEvent::Disconnected => {
-                        let peer_state = self.topology.entry(peer).or_default();
-                        peer_state.remove(&update.connection);
-                        if peer_state.is_empty() {
-                            self.topology.remove(&peer);
-                        }
-                    }
-                };
-            }
-
-            while let std::task::Poll::Ready(Some(((peer, connection, proto), kind))) =
-                self.recv.packets.poll_next_unpin(cx)
-            {
-                let event = match kind {
-                    crate::PacketKind::Sent => Event::Packet(proto.as_str()),
-                    crate::PacketKind::Closed => Event::Closed(proto.as_str()),
-                };
-
-                let update = Update { event, peer, connection };
-                for l in &mut self.listeners {
-                    l.writer.write_packet(&update).unwrap();
-                }
-
-                if matches!(kind, crate::PacketKind::Closed) {
-                    let entry = self
-                        .topology
-                        .entry(peer)
-                        .or_default()
-                        .entry(connection)
-                        .or_default()
-                        .entry(proto);
-
-                    if let Entry::Occupied(mut o) = entry {
-                        *o.get_mut() -= 1;
-                        if *o.get() == 0 {
-                            o.remove();
-                        }
+                    if let Some(peer) = self.topology.get(&update.peer)
+                        && let Some(connection) = peer.get(&update.connection)
+                        && connection.contains_key(&update.protocol)
+                    {
+                    } else {
+                        update.event = Event::Closed;
+                        self.listeners.retain_mut(|l| l.sender.try_send(update.clone()).is_ok());
                     }
                 }
             }
+
+            while let std::task::Poll::Ready(Some(_)) = self.listener_tasks.poll_next_unpin(cx) {}
 
             std::task::Poll::Pending
         }
@@ -740,22 +755,20 @@ mod impls {
 #[cfg(not(feature = "disabled"))]
 mod impls {
     use {
-        crate::{ExtraEvent, ExtraEventAndMeta, PacketKind, PacketMeta, PeerIdWrapper},
         codec::Encode,
         libp2p::{
-            futures::{AsyncWrite, SinkExt},
+            futures::AsyncWrite,
             swarm::{
                 handler::{
                     DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
-                    InboundUpgradeSend, ListenUpgradeError, OutboundUpgradeSend, UpgradeInfoSend,
+                    InboundUpgradeSend, ListenUpgradeError, UpgradeInfoSend,
                 },
                 ConnectionHandler, ConnectionId, NetworkBehaviour,
             },
+            StreamProtocol,
         },
         std::{
             assert_matches::assert_matches,
-            collections::VecDeque,
-            mem,
             ops::{Deref, DerefMut},
             pin::Pin,
             task::Poll,
@@ -764,23 +777,17 @@ mod impls {
 
     #[derive(Clone)]
     pub struct EventSender {
-        pub(crate) events: libp2p::futures::channel::mpsc::Sender<ExtraEventAndMeta>,
-        pub(crate) packets: libp2p::futures::channel::mpsc::Sender<(PacketMeta, PacketKind)>,
+        pub(crate) events: libp2p::futures::channel::mpsc::Sender<crate::Update>,
     }
 
     pub struct EventReceiver {
-        pub(crate) events: libp2p::futures::channel::mpsc::Receiver<ExtraEventAndMeta>,
-        pub(crate) packets: libp2p::futures::channel::mpsc::Receiver<(PacketMeta, PacketKind)>,
+        pub(crate) events: libp2p::futures::channel::mpsc::Receiver<crate::Update>,
     }
 
     #[must_use]
     pub fn channel() -> (EventSender, EventReceiver) {
-        let (events_sender, events_receiver) = libp2p::futures::channel::mpsc::channel(30);
-        let (packets_sender, packets_receiver) = libp2p::futures::channel::mpsc::channel(30);
-        (EventSender { events: events_sender, packets: packets_sender }, EventReceiver {
-            events: events_receiver,
-            packets: packets_receiver,
-        })
+        let (events_sender, events_receiver) = libp2p::futures::channel::mpsc::channel(300);
+        (EventSender { events: events_sender }, EventReceiver { events: events_receiver })
     }
 
     pub fn new<T: NetworkBehaviour>(inner: T, sender: EventSender) -> Behaviour<T> {
@@ -789,21 +796,12 @@ mod impls {
 
     pub struct Behaviour<T: NetworkBehaviour> {
         inner: T,
-        extra_events: VecDeque<ExtraEventAndMeta>,
         sender: EventSender,
-        waker: Option<std::task::Waker>,
     }
 
     impl<T: NetworkBehaviour> Behaviour<T> {
         fn new(inner: T, sender: EventSender) -> Self {
-            Self { inner, sender, extra_events: VecDeque::new(), waker: None }
-        }
-
-        fn add_event(&mut self, event: ExtraEvent, peer: libp2p::PeerId, connection: ConnectionId) {
-            self.extra_events.push_back((event, PeerIdWrapper(peer), connection));
-            if let Some(waker) = mem::take(&mut self.waker) {
-                waker.wake();
-            }
+            Self { inner, sender }
         }
     }
 
@@ -820,7 +818,7 @@ mod impls {
         ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
             self.inner
                 .handle_established_inbound_connection(connection_id, peer, local_addr, remote_addr)
-                .map(|h| Handler::new(h, peer, connection_id))
+                .map(|h| Handler::new(h, peer, connection_id, self.sender.clone()))
         }
 
         fn handle_established_outbound_connection(
@@ -832,14 +830,10 @@ mod impls {
         ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
             self.inner
                 .handle_established_outbound_connection(connection_id, peer, addr, role_override)
-                .map(|h| Handler::new(h, peer, connection_id))
+                .map(|h| Handler::new(h, peer, connection_id, self.sender.clone()))
         }
 
         fn on_swarm_event(&mut self, event: libp2p::swarm::FromSwarm) {
-            if let libp2p::swarm::FromSwarm::ConnectionClosed(c) = &event {
-                self.add_event(ExtraEvent::Disconnected, c.peer_id, c.connection_id);
-            }
-
             self.inner.on_swarm_event(event);
         }
 
@@ -849,13 +843,6 @@ mod impls {
             connection_id: libp2p::swarm::ConnectionId,
             event: libp2p::swarm::THandlerOutEvent<Self>,
         ) {
-            let event = match event {
-                ToBehavior::Inner(i) => i,
-                ToBehavior::Extra(e) => {
-                    self.add_event(e, peer_id, connection_id);
-                    return;
-                }
-            };
             self.inner.on_connection_handler_event(peer_id, connection_id, event);
         }
 
@@ -865,15 +852,6 @@ mod impls {
         ) -> std::task::Poll<
             libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>,
         > {
-            self.waker = Some(cx.waker().clone());
-            while let Some(event) = self.extra_events.pop_front() {
-                if let Poll::Pending | Poll::Ready(Err(_)) = self.sender.events.poll_ready(cx) {
-                    self.extra_events.push_front(event);
-                    break;
-                }
-                _ = self.sender.events.start_send(event);
-            }
-            _ = self.sender.events.poll_flush_unpin(cx);
             self.inner.poll(cx)
         }
 
@@ -918,15 +896,19 @@ mod impls {
 
     pub struct Handler<T: ConnectionHandler> {
         inner: T,
-        extra_events: VecDeque<ExtraEvent>,
-        opened: bool,
         peer: libp2p::PeerId,
         connection: ConnectionId,
+        events: EventSender,
     }
 
     impl<T: ConnectionHandler> Handler<T> {
-        pub fn new(inner: T, peer: libp2p::PeerId, connection: ConnectionId) -> Self {
-            Self { inner, extra_events: VecDeque::new(), opened: true, peer, connection }
+        pub fn new(
+            inner: T,
+            peer: libp2p::PeerId,
+            connection: ConnectionId,
+            events: EventSender,
+        ) -> Self {
+            Self { inner, peer, connection, events }
         }
     }
 
@@ -935,8 +917,8 @@ mod impls {
         type InboundOpenInfo = T::InboundOpenInfo;
         type InboundProtocol = Protocol<T::InboundProtocol>;
         type OutboundOpenInfo = T::OutboundOpenInfo;
-        type OutboundProtocol = Protocol<T::OutboundProtocol>;
-        type ToBehaviour = ToBehavior<T>;
+        type OutboundProtocol = T::OutboundProtocol;
+        type ToBehaviour = T::ToBehaviour;
 
         fn listen_protocol(
             &self,
@@ -957,18 +939,7 @@ mod impls {
                 Self::ToBehaviour,
             >,
         > {
-            if let Some(event) = self.extra_events.pop_front() {
-                return std::task::Poll::Ready(
-                    libp2p::swarm::ConnectionHandlerEvent::NotifyBehaviour(ToBehavior::Extra(
-                        event,
-                    )),
-                );
-            }
-
-            self.inner.poll(cx).map(|e| {
-                e.map_custom(ToBehavior::Inner)
-                    .map_protocol(|p| Protocol::new(p, self.peer, self.connection))
-            })
+            self.inner.poll(cx)
         }
 
         fn on_behaviour_event(&mut self, event: Self::FromBehaviour) {
@@ -987,17 +958,25 @@ mod impls {
             use libp2p::swarm::handler::ConnectionEvent as CE;
             let event = match event {
                 CE::FullyNegotiatedInbound(i) => {
-                    self.extra_events
-                        .push_back(ExtraEvent::Stream(i.protocol.1.as_ref().to_string()));
+                    self.events
+                        .events
+                        .try_send(crate::Update {
+                            event: crate::Event::Stream,
+                            peer: self.peer,
+                            connection: self.connection,
+                            protocol: StreamProtocol::try_from_owned(
+                                i.protocol.1.as_ref().to_string(),
+                            )
+                            .unwrap(),
+                        })
+                        .unwrap();
                     libp2p::swarm::handler::ConnectionEvent::FullyNegotiatedInbound(
                         FullyNegotiatedInbound { protocol: i.protocol.0, info: i.info },
                     )
                 }
                 CE::FullyNegotiatedOutbound(o) => {
-                    self.extra_events
-                        .push_back(ExtraEvent::Stream(o.protocol.1.as_ref().to_string()));
                     CE::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
-                        protocol: o.protocol.0,
+                        protocol: o.protocol,
                         info: o.info,
                     })
                 }
@@ -1023,37 +1002,19 @@ mod impls {
             &mut self,
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Option<Self::ToBehaviour>> {
-            if self.opened {
-                self.opened = false;
-                return std::task::Poll::Ready(Some(ToBehavior::Extra(ExtraEvent::Disconnected)));
-            }
-            self.inner.poll_close(cx).map(|opt| opt.map(ToBehavior::Inner))
-        }
-    }
-
-    pub enum ToBehavior<C: ConnectionHandler> {
-        Inner(C::ToBehaviour),
-        Extra(ExtraEvent),
-    }
-
-    impl<C: ConnectionHandler> std::fmt::Debug for ToBehavior<C> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Inner(_) => write!(f, "ToBehavior::Inner"),
-                Self::Extra(_) => write!(f, "ToBehavior::Extra"),
-            }
+            self.inner.poll_close(cx)
         }
     }
 
     pub struct Protocol<T> {
         inner: T,
         peer: libp2p::PeerId,
-        connection: usize,
+        connection: ConnectionId,
     }
 
     impl<T> Protocol<T> {
         pub fn new(inner: T, peer: libp2p::PeerId, connection: ConnectionId) -> Self {
-            Self { inner, peer, connection: unsafe { mem::transmute(connection) } }
+            Self { inner, peer, connection }
         }
     }
 
@@ -1074,10 +1035,11 @@ mod impls {
 
         fn upgrade_inbound(self, mut socket: libp2p::Stream, info: Self::Info) -> Self::Future {
             async move {
-                let bytes = (
-                    crate::INIT_TAG,
-                    (PeerIdWrapper(self.peer), self.connection, info.as_ref().to_owned()),
-                )
+                let bytes = (crate::INIT_TAG, crate::PacketMeta {
+                    peer: self.peer,
+                    connection: self.connection,
+                    protocol: StreamProtocol::try_from_owned(info.as_ref().to_string()).unwrap(),
+                })
                     .to_bytes();
                 assert_matches!(
                     libp2p::futures::poll!(std::future::poll_fn(
@@ -1089,46 +1051,44 @@ mod impls {
             }
         }
     }
-
-    impl<T: OutboundUpgradeSend> OutboundUpgradeSend for Protocol<T> {
-        type Error = T::Error;
-        type Output = (T::Output, Self::Info);
-
-        type Future = impl std::future::Future<Output = Result<Self::Output, Self::Error>>;
-
-        fn upgrade_outbound(self, mut socket: libp2p::Stream, info: Self::Info) -> Self::Future {
-            async move {
-                let bytes = (
-                    crate::INIT_TAG,
-                    (PeerIdWrapper(self.peer), self.connection, info.as_ref().to_owned()),
-                )
-                    .to_bytes();
-                assert_matches!(
-                    libp2p::futures::poll!(std::future::poll_fn(
-                        |cx| Pin::new(&mut socket).poll_write(cx, &bytes)
-                    )),
-                    Poll::Ready(Ok(_))
-                );
-                self.inner.upgrade_outbound(socket, info.clone()).await.map(|o| (o, info))
-            }
-        }
-    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PeerIdWrapper(pub PeerId);
+mod peer_id_codec {
+    use super::*;
 
-impl<'a> Decode<'a> for PeerIdWrapper {
-    fn decode(buffer: &mut &'a [u8]) -> Option<Self> {
+    pub fn decode(buffer: &mut &[u8]) -> Option<PeerId> {
         let read = Multihash::<64>::read(buffer);
-        read.ok().and_then(|mh| PeerId::from_multihash(mh).ok()).map(Self)
+        read.ok().and_then(|mh| PeerId::from_multihash(mh).ok())
+    }
+
+    pub fn encode(peer: &PeerId, buffer: &mut impl Buffer) -> Option<()> {
+        let mh = Multihash::from(*peer);
+        mh.write(WritableBuffer { buffer }).ok().map(drop)
     }
 }
 
-impl Encode for PeerIdWrapper {
-    fn encode(&self, buffer: &mut impl Buffer) -> Option<()> {
-        let mh = Multihash::from(self.0);
-        mh.write(WritableBuffer { buffer }).ok()?;
-        Some(())
+mod connection_id_codec {
+    use {super::*, std::mem};
+
+    pub fn decode(buffer: &mut &[u8]) -> Option<ConnectionId> {
+        usize::decode(buffer).map(|i| unsafe { mem::transmute(i) })
+    }
+
+    pub fn encode(connection: &ConnectionId, buffer: &mut impl Buffer) -> Option<()> {
+        let i = unsafe { mem::transmute::<ConnectionId, usize>(*connection) };
+        i.encode(buffer)
+    }
+}
+
+mod stream_protocol_codec {
+    use super::*;
+
+    pub fn decode(buffer: &mut &[u8]) -> Option<StreamProtocol> {
+        let str = String::decode(buffer)?;
+        StreamProtocol::try_from_owned(str).ok()
+    }
+
+    pub fn encode(protocol: &StreamProtocol, buffer: &mut impl Buffer) -> Option<()> {
+        protocol.as_ref().encode(buffer)
     }
 }

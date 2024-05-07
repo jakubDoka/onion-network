@@ -201,21 +201,23 @@ impl Server {
         let stream_requests = mpsc::channel(100);
         let recycled_streams = mpsc::channel(100);
 
+        let context = Box::leak(Box::new(OwnedContext {
+            storage: Storage::new(config.data_dir),
+            not_found: Default::default(),
+            online: Default::default(),
+            chat_subs: Default::default(),
+            clients: Default::default(),
+            profile_subs: Default::default(),
+            ongoing_recovery: Default::default(),
+            stream_requests: stream_requests.0,
+            recycled_streams: recycled_streams.0,
+            stream_cache: StreamCache::default(),
+            local_peer_id: swarm.local_peer_id().to_hash(),
+            dht: swarm.behaviour_mut().dht.table,
+        }));
+
         Ok(Self {
-            context: Box::leak(Box::new(OwnedContext {
-                storage: Storage::new(config.data_dir),
-                not_found: Default::default(),
-                online: Default::default(),
-                chat_subs: Default::default(),
-                clients: Default::default(),
-                profile_subs: Default::default(),
-                ongoing_recovery: Default::default(),
-                stream_requests: stream_requests.0,
-                recycled_streams: recycled_streams.0,
-                stream_cache: StreamCache::default(),
-                local_peer_id: swarm.local_peer_id().to_hash(),
-                dht: swarm.behaviour_mut().dht.table,
-            })),
+            context,
             stream_pool: Default::default(),
             swarm,
             stake_events,

@@ -79,7 +79,6 @@ pub fn format_balance(amount: Balance) -> String {
 
 #[derive(Clone)]
 pub struct Client {
-    pub user: NodeIdentity,
     signer: Keypair,
     client: OnlineClient<Config>,
 }
@@ -87,17 +86,13 @@ pub struct Client {
 impl Client {
     pub async fn with_signer(url: &str, signer: Keypair) -> Result<Self> {
         let client = OnlineClient::<Config>::from_url(url).await?;
-        Ok(Self { signer, client, user: Default::default() })
+        Ok(Self { signer, client })
     }
 
     pub async fn without_signer(url: &str) -> Result<Self> {
         let client = OnlineClient::<Config>::from_url(url).await?;
         let signer = Keypair::from_seed(crypto::SharedSecret::default()).unwrap();
-        Ok(Self { signer, client, user: Default::default() })
-    }
-
-    pub fn with_user(self, user: NodeIdentity) -> Self {
-        Self { user, ..self }
+        Ok(Self { signer, client })
     }
 
     pub fn account_id(&self) -> AccountId {
@@ -125,14 +120,6 @@ impl Client {
         &self,
     ) -> Result<impl futures::Stream<Item = Result<SateliteStakeEvent>>> {
         self.node_event_stream("sateliteStaker", unwrap_satelite_staker).await
-    }
-
-    async fn handle(&self, call: impl TxPayload, nonce: Nonce) -> Result<()> {
-        let mut data = ParamsFor::<Config>::default();
-        data.2 .0 = Some(nonce);
-        let signed = self.client.tx().create_signed(&call, &self.signer, data).await?;
-        let progress = signed.submit_and_watch().await?;
-        wait_for_in_block(progress, false).await.map(drop)
     }
 
     async fn node_event_stream<E: 'static>(
@@ -252,6 +239,14 @@ impl Client {
         let latest = self.client.storage().at_latest().await?;
         let q = chain_types::storage().chat_staker().addresses(node_dientity);
         latest.fetch(&q).await.map(|o| o.is_some())
+    }
+
+    async fn handle(&self, call: impl TxPayload, nonce: Nonce) -> Result<()> {
+        let mut data = ParamsFor::<Config>::default();
+        data.2 .0 = Some(nonce);
+        let signed = self.client.tx().create_signed(&call, &self.signer, data).await?;
+        let progress = signed.submit_and_watch().await?;
+        wait_for_in_block(progress, false).await.map(drop)
     }
 }
 

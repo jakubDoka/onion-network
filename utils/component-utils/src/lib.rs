@@ -96,13 +96,11 @@ macro_rules! gen_unique_id {
     };
 }
 
-pub mod stream;
-
+pub use futures;
 use {
     core::task::Waker,
     futures::{stream::FuturesUnordered, Stream, StreamExt as _},
 };
-pub use {futures, stream::*};
 
 pub struct DropFn<F: FnOnce()>(Option<F>);
 

@@ -288,7 +288,7 @@ impl Sub<ChatName> {
 
 #[allow(async_fn_in_trait)]
 pub trait RequestContext: Sized {
-    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R;
+    fn update_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R;
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> R;
     fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> R;
     fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> R;
@@ -296,6 +296,10 @@ pub trait RequestContext: Sized {
         &self,
         topic: T,
     ) -> impl Future<Output = anyhow::Result<Sub<T>>>;
+
+    fn with_vault<R>(&self, action: impl FnOnce(&Vault) -> R) -> R {
+        self.update_vault(|v| action(v))
+    }
 
     fn set_chat_nonce(&self, chat: ChatName, nonce: Nonce) -> Option<()> {
         self.with_chat_and_keys_low(chat, |c, _| c.action_no = nonce)
@@ -305,25 +309,18 @@ pub trait RequestContext: Sized {
         self.with_chat_and_keys_low(chat, |c, _| c.secret)
     }
 
-    fn try_with_vault<R>(
-        &self,
-        action: impl FnOnce(&mut Vault) -> anyhow::Result<R>,
-    ) -> anyhow::Result<R> {
-        self.with_vault(|v| action(v))
-    }
-
     async fn profile_subscription(&self) -> anyhow::Result<Sub<Identity>> {
         self.subscription_for(self.with_keys(UserKeys::identity)).await
     }
 
     async fn set_theme(&self, theme: Theme) -> anyhow::Result<()> {
-        self.with_vault(|v| v.theme = theme);
+        self.update_vault(|v| v.theme = theme);
         self.save_vault_components([VaultKey::Theme]).await
     }
 
     async fn send_frined_message(&self, name: UserName, content: String) -> anyhow::Result<()> {
         let mut frined =
-            self.try_with_vault(|v| v.friends.get_mut(&name).cloned().context("friend not found"))?;
+            self.with_vault(|v| v.friends.get(&name).cloned()).context("friend not found")?;
 
         let session = frined.dr.sender_hash();
         let (header, ss) = frined.dr.send();
@@ -331,7 +328,7 @@ pub trait RequestContext: Sized {
         let content = Encrypted::new(message, ss);
         let mail = MailVariant::FriendMessage { header, session, content };
         self.subscription_for(frined.identity).await?.send_mail(mail).await?;
-        self.with_vault(|v| _ = v.friends.insert(name, frined));
+        self.update_vault(|v| _ = v.friends.insert(name, frined));
         self.save_vault_components([VaultKey::Friend(name)]).await?;
 
         Ok(())
@@ -371,7 +368,7 @@ pub trait RequestContext: Sized {
     ) -> anyhow::Result<()> {
         let chnages = {
             let key = self.with_keys(|k| k.vault);
-            self.with_vault(|v| {
+            self.update_vault(|v| {
                 id.into_iter().for_each(|id| _ = v.update(id, key));
                 v.changes(forced)
             })
@@ -384,7 +381,7 @@ pub trait RequestContext: Sized {
             self.with_vault_version(|nonce| Proof::new(&k.sign, nonce, total_hash, OsRng))
         });
         self.profile_subscription().await?.insert_to_vault(proof, chnages).await?;
-        self.with_vault(|v| v.clear_changes(proof.nonce + 1));
+        self.update_vault(|v| v.clear_changes(proof.nonce + 1));
 
         Ok(())
     }
@@ -392,7 +389,7 @@ pub trait RequestContext: Sized {
     async fn create_and_save_chat(&self, name: ChatName) -> anyhow::Result<()> {
         let my_id = self.with_keys(UserKeys::identity);
         self.subscription_for(name).await?.create_chat(my_id).await?;
-        self.with_vault(|v| v.chats.insert(name, ChatMeta::new()));
+        self.update_vault(|v| v.chats.insert(name, ChatMeta::new()));
         self.save_vault_components([VaultKey::Chats]).await.context("saving vault")?;
         Ok(())
     }
@@ -409,7 +406,7 @@ pub trait RequestContext: Sized {
         chat: ChatName,
         action: impl FnOnce(&mut ChatMeta, &UserKeys) -> R,
     ) -> Option<R> {
-        self.with_vault(|v| {
+        self.update_vault(|v| {
             let chat_meta = v.chats.get_mut(&chat)?;
             Some(self.with_keys(|keys| action(chat_meta, &keys)))
         })
@@ -472,8 +469,10 @@ pub trait RequestContext: Sized {
         them.send_mail(mail).await?;
 
         let friend = FriendMeta { dr, identity, id };
-        self.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), name));
-        self.with_vault(|v| v.friends.insert(name, friend));
+        self.update_vault(|v| {
+            v.friend_index.insert(friend.dr.receiver_hash(), name);
+            v.friends.insert(name, friend);
+        });
         self.save_vault_components([VaultKey::Friend(name), VaultKey::FriendNames]).await?;
 
         Ok(())
@@ -532,8 +531,8 @@ pub trait RequestContext: Sized {
 }
 
 impl<RC: RequestContext> RequestContext for &RC {
-    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R {
-        (*self).with_vault(action)
+    fn update_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R {
+        (*self).update_vault(action)
     }
 
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> R {
@@ -582,7 +581,7 @@ impl TrivialContext {
 }
 
 impl RequestContext for TrivialContext {
-    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R {
+    fn update_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R {
         action(&mut self.vault.borrow_mut())
     }
 
@@ -669,7 +668,7 @@ impl MailVariant {
                 let secret = ctx
                     .with_keys(|k| k.enc.decapsulate_choosen(&cp))
                     .context("failed to decapsulate invite")?;
-                ctx.with_vault(|v| v.chats.insert(chat, ChatMeta::from_secret(secret)));
+                ctx.update_vault(|v| v.chats.insert(chat, ChatMeta::from_secret(secret)));
                 updates.push(VaultKey::Chats);
                 None
             }
@@ -686,12 +685,14 @@ impl MailVariant {
                 updates.push(VaultKey::FriendNames);
 
                 let friend = FriendMeta { dr, identity, id };
-                ctx.with_vault(|v| v.friend_index.insert(friend.dr.receiver_hash(), username));
-                ctx.with_vault(|v| v.friends.insert(username, friend));
+                ctx.update_vault(|v| {
+                    v.friend_index.insert(friend.dr.receiver_hash(), username);
+                    v.friends.insert(username, friend);
+                });
                 None
             }
             MailVariant::FriendMessage { header, session, mut content } => {
-                let message @ (name, _) = ctx.try_with_vault(|v| {
+                let message @ (name, _) = ctx.update_vault(|v| {
                     let nm = *v.friend_index.get(&session).context("friend not found")?;
                     let friend = v.friends.get_mut(&nm).context("friend not found, wath?")?;
 
@@ -704,7 +705,7 @@ impl MailVariant {
                     v.friend_index.remove(&session);
                     v.friend_index.insert(friend.dr.receiver_hash(), nm);
 
-                    Ok((nm, message))
+                    anyhow::Ok((nm, message))
                 })?;
 
                 updates.push(VaultKey::Friend(name));

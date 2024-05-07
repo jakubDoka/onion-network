@@ -73,8 +73,12 @@ impl State {
 type Result<T, E = anyhow::Error> = std::result::Result<T, E>;
 
 impl RequestContext for State {
-    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R {
+    fn update_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R {
         self.vault.try_update(action).unwrap()
+    }
+
+    fn with_vault<R>(&self, action: impl FnOnce(&Vault) -> R) -> R {
+        self.vault.try_with(action).unwrap()
     }
 
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> R {

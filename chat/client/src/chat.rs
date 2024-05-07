@@ -15,7 +15,10 @@ use {
         *,
     },
     leptos_router::Redirect,
-    libp2p::futures::StreamExt,
+    libp2p::futures::{
+        stream::{AbortHandle, Abortable},
+        FutureExt, StreamExt,
+    },
     std::{
         future::Future,
         sync::atomic::{AtomicBool, Ordering},
@@ -58,6 +61,7 @@ pub fn Chat(state: ReadSignal<Option<crate::State>>) -> impl IntoView {
     let messages = create_node_ref::<leptos::html::Div>();
     let (cursor, set_cursor) = create_signal(Cursor::Normal(chat_spec::Cursor::MAX));
     let (red_all_messages, set_red_all_messages) = create_signal(false);
+    let sub_abort = store_value(None::<AbortHandle>);
 
     let hide_chat = move |_| set_show_chat(false);
     let message_view = move |username: UserName, content: MessageContent| {
@@ -176,37 +180,6 @@ pub fn Chat(state: ReadSignal<Option<crate::State>>) -> impl IntoView {
     };
 
     create_effect(move |_| {
-        let Some(chat) = current_chat() else {
-            messages.get_untracked().unwrap().set_inner_html("");
-            return;
-        };
-
-        if is_friend.get_untracked() {
-            return;
-        }
-
-        let Some(secret) = state.chat_secret(chat) else { return };
-
-        handled_spawn_local("reading chat messages", async move {
-            // FIXME: we might be leaking futures here
-            let mut sub = state
-                .subscription_for(chat)
-                .await?
-                .subscribe()
-                .await
-                .context("subscribint to chat")?;
-            log::info!("subscribed to chat: {:?}", chat);
-            while let Some(event) = sub.next().await
-                && current_chat.get_untracked() == Some(chat)
-            {
-                handle_event(event, secret);
-            }
-
-            Ok(())
-        });
-    });
-
-    create_effect(move |_| {
         state.friend_messages.track();
         let Some(Some((name, message))) = state.friend_messages.try_update_untracked(|m| m.take())
         else {
@@ -221,28 +194,27 @@ pub fn Chat(state: ReadSignal<Option<crate::State>>) -> impl IntoView {
         append_message(message.sender, message.content);
     });
 
-    let side_chat = move |chat: ChatName, if_friend: bool| {
+    let side_chat = move |chat: ChatName, secret, if_friend: bool| {
         let select_chat = handled_async_callback("switching chat", move |_| async move {
+            let mut chat_sub = state.subscription_for(chat).await?;
+            let mut sub = chat_sub.subscribe().await.context("subscribint to chat")?;
+
             let my_user = if if_friend {
                 Member::best()
             } else {
-                let m = state
-                    .subscription_for(chat)
-                    .await?
-                    .fetch_my_member(my_id)
-                    .await
-                    .inspect_err(|e| {
-                        if !matches!(
-                            e.root_cause().downcast_ref(),
-                            Some(ChatError::NotFound | ChatError::NotMember)
-                        ) {
-                            return;
+                match chat_sub.fetch_my_member(my_id).await {
+                    Ok(m) => {
+                        state.set_chat_nonce(chat, m.action + 1);
+                        m
+                    }
+                    Err(e) => {
+                        let root = e.root_cause().downcast_ref();
+                        if matches!(root, Some(ChatError::NotFound | ChatError::NotMember)) {
+                            state.vault.update(|v| _ = v.chats.remove(&chat));
                         }
-                        state.vault.update(|v| _ = v.chats.remove(&chat));
-                    })
-                    .context("fetching our member")?;
-                state.set_chat_nonce(chat, m.action + 1);
-                m
+                        return Err(e).context("fetching our member");
+                    }
+                }
             };
 
             set_current_member(my_user);
@@ -252,9 +224,17 @@ pub fn Chat(state: ReadSignal<Option<crate::State>>) -> impl IntoView {
             set_is_friend(if_friend);
             current_chat.set(Some(chat));
             crate::navigate_to(format_args!("/chat/{chat}"));
-            let messages = messages.get_untracked().expect("universe to work");
-            messages.set_inner_html("");
+            messages.get_untracked().expect("universe to work").set_inner_html("");
             fetch_messages();
+
+            let (handle, registration) = AbortHandle::new_pair();
+            sub_abort.update_value(|prev| _ = prev.replace(handle).map(|prev| prev.abort()));
+            let task = async move {
+                while let Some(event) = sub.next().await {
+                    handle_event(event, secret);
+                }
+            };
+            spawn_local(Abortable::new(task, registration).map(drop));
 
             Ok(())
         });
@@ -410,10 +390,14 @@ pub fn Chat(state: ReadSignal<Option<crate::State>>) -> impl IntoView {
     };
 
     let normal_chats_view = move || {
-        state.vault.with(|v| v.chats.keys().map(|&chat| side_chat(chat, false)).collect_view())
+        state.vault.with(|v| {
+            v.chats.iter().map(|(&chat, meta)| side_chat(chat, meta.secret, false)).collect_view()
+        })
     };
     let friends_view = move || {
-        state.vault.with(|v| v.friends.keys().map(|&name| side_chat(name, true)).collect_view())
+        state.vault.with(|v| {
+            v.friends.keys().map(|&name| side_chat(name, Default::default(), true)).collect_view()
+        })
     };
     let normal_chats_are_empty = move || state.vault.with(|v| v.chats.is_empty());
     let hardened_chats_are_empty = move || state.vault.with(|v| v.friends.is_empty());

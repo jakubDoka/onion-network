@@ -33,16 +33,17 @@ fn is_at_bottom(messages_div: HtmlElement<leptos::html::AnyElement>) -> bool {
 }
 
 #[leptos::component]
-pub fn Chat(state: crate::State) -> impl IntoView {
-    let Some(keys) = state.keys.get_untracked() else {
+pub fn Chat(state: ReadSignal<Option<crate::State>>) -> impl IntoView {
+    let Some(state) = state.get_untracked() else {
         return view! { <Redirect path="/login"/> }.into_view();
     };
+    let keys = state.keys.get_untracked();
 
     let my_name = keys.name;
     let my_id = keys.identity();
     let selected: Option<ChatName> = leptos_router::use_query_map()
         .with_untracked(|m| m.get("id").and_then(|v| v.as_str().try_into().ok()))
-        .filter(|v| state.vault.with_untracked(|vl| vl.chats.contains_key(v)));
+        .filter(|v| state.with_vault(|vl| vl.chats.contains_key(v)));
 
     #[derive(Clone)]
     enum Cursor {
@@ -137,7 +138,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
             handled_spawn_local("appending message", async move {
                 let message = chain_api::decrypt(message, secret)?;
                 let msg = String::from_utf8(message)?;
-                let client = state.with_keys(UserKeys::chain_client)?.await?;
+                let client = state.with_keys(UserKeys::chain_client).await?;
                 append_message(client.fetch_username(sender).await?, msg);
                 Ok(())
             });
@@ -149,7 +150,7 @@ pub fn Chat(state: crate::State) -> impl IntoView {
 
             handled_spawn_local("updating member", async move {
                 let mname =
-                    state.with_keys(UserKeys::chain_client)?.await?.fetch_username(identiy).await?;
+                    state.with_keys(UserKeys::chain_client).await?.fetch_username(identiy).await?;
                 let elem = member_view(state, identiy, mname, member, current_member, current_chat);
                 if let Some(member_elem) = document().get_element_by_id(&hex::encode(identiy)) {
                     member_elem.replace_with_with_node_1(&elem).unwrap();
@@ -496,7 +497,7 @@ fn member_list_poppup(
             fetched_members.iter().skip((last_identity != Identity::default()) as usize)
         {
             let Ok(mname) =
-                state.with_keys(UserKeys::chain_client)?.await?.fetch_username(identity).await
+                state.with_keys(UserKeys::chain_client).await?.fetch_username(identity).await
             else {
                 continue;
             };
@@ -551,7 +552,7 @@ fn member_view(
     me: ReadSignal<Member>,
     name: RwSignal<Option<ChatName>>,
 ) -> HtmlElement<html::Tr> {
-    let my_id = state.keys.get_untracked().unwrap().identity();
+    let my_id = state.keys.get_untracked().identity();
     let can_modify = me.get_untracked().rank < m.rank || my_id == identity;
     let root = create_node_ref::<html::Tr>();
     let start_edit = handled_callback("opening member edit", move |_| {
@@ -592,7 +593,7 @@ fn editable_member(
     let root = create_node_ref::<html::Tbody>();
 
     let ctx = "commiting member changes";
-    let is_me = state.keys.get_untracked().unwrap().identity() == identity;
+    let is_me = state.keys.with(UserKeys::identity) == identity;
     let kick_label = if is_me { "leave" } else { "kick" };
     let kick_ctx = if is_me { "leaving chat" } else { "kicking member" };
 

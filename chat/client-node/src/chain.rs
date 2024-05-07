@@ -17,7 +17,7 @@ pub trait ChainClientExt {
 
 impl ChainClientExt for Client {
     async fn fetch_profile(&self, name: UserName) -> Result<Profile, anyhow::Error> {
-        match Storage::get_or_insert_opt(username_to_raw(name), |name| {
+        match Storage::get_or_insert_opt(username_to_raw(name), self.user, |name| {
             self.get_profile_by_name(name).map_err(anyhow::Error::from)
         })
         .await
@@ -29,7 +29,7 @@ impl ChainClientExt for Client {
     }
 
     async fn fetch_username(&self, id: Identity) -> Result<UserName, anyhow::Error> {
-        match Storage::get_or_insert_opt(id, |id| {
+        match Storage::get_or_insert_opt(id, self.user, |id| {
             self.get_username(id).map_err(anyhow::Error::from)
         })
         .await
@@ -51,7 +51,6 @@ pub trait StorageBackend: Send + Sync {
 }
 
 pub struct Storage {
-    id: Identity,
     hot_entries: BTreeMap<crypto::Hash, Vec<u8>>,
     backend: Option<Box<dyn StorageBackend>>,
 }
@@ -59,27 +58,20 @@ pub struct Storage {
 fn with_instance<T>(f: impl FnOnce(&mut Storage) -> T) -> T {
     static INSTANCE: Mutex<Option<Storage>> = Mutex::new(None);
     let mut r = INSTANCE.lock().unwrap();
-    f(r.get_or_insert(Storage {
-        id: Identity::default(),
-        hot_entries: BTreeMap::new(),
-        backend: None,
-    }))
+    f(r.get_or_insert(Storage { hot_entries: BTreeMap::new(), backend: None }))
 }
 
 impl Storage {
-    pub fn set_id(id: Identity) {
-        with_instance(|i| i.id = id);
-    }
-
     pub fn set_backend(impl_: impl StorageBackend + 'static) {
         with_instance(|i| i.backend = Some(Box::new(impl_)));
     }
 
     pub async fn get_or_insert<K: AsRef<[u8]>, T: Cached, F: Future<Output = anyhow::Result<T>>>(
         key: K,
+        user: Identity,
         or_compute: impl FnOnce(K) -> F,
     ) -> anyhow::Result<T> {
-        let hash = Self::compute_key::<T>(&key);
+        let hash = Self::compute_key::<T>(&key, user);
 
         if let Some(res) = Self::get_low::<T>(hash) {
             return Ok(res);
@@ -96,9 +88,10 @@ impl Storage {
         F: Future<Output = anyhow::Result<Option<T>>>,
     >(
         key: K,
+        user: Identity,
         or_compute: impl FnOnce(K) -> F,
     ) -> anyhow::Result<Option<T>> {
-        let hash = Self::compute_key::<T>(&key);
+        let hash = Self::compute_key::<T>(&key, user);
 
         if let Some(res) = Self::get_low::<T>(hash) {
             return Ok(Some(res));
@@ -111,8 +104,8 @@ impl Storage {
         Ok(res)
     }
 
-    pub fn ensure<T: Cached>(friends: impl AsRef<[u8]>, key: &T) -> bool {
-        let hash = Self::compute_key::<T>(friends);
+    pub fn ensure<T: Cached>(friends: impl AsRef<[u8]>, user: Identity, key: &T) -> bool {
+        let hash = Self::compute_key::<T>(friends, user);
         if Self::get_low::<T>(hash).is_none() {
             Self::insert_low(hash, key);
             true
@@ -121,16 +114,20 @@ impl Storage {
         }
     }
 
-    pub fn get<T: Cached>(key: impl AsRef<[u8]>) -> Option<T> {
-        Self::get_low::<T>(Self::compute_key::<T>(key))
+    pub fn get<T: Cached>(key: impl AsRef<[u8]>, user: Identity) -> Option<T> {
+        Self::get_low::<T>(Self::compute_key::<T>(key, user))
     }
 
-    pub fn insert<T: Cached>(key: impl AsRef<[u8]>, value: &T) {
-        Self::insert_low(Self::compute_key::<T>(key), value);
+    pub fn insert<T: Cached>(key: impl AsRef<[u8]>, user: Identity, value: &T) {
+        Self::insert_low(Self::compute_key::<T>(key, user), value);
     }
 
-    pub fn update<T: Cached + Default>(key: impl AsRef<[u8]>, f: impl FnOnce(&mut T)) {
-        let hash = Self::compute_key::<T>(key);
+    pub fn update<T: Cached + Default>(
+        key: impl AsRef<[u8]>,
+        user: Identity,
+        f: impl FnOnce(&mut T),
+    ) {
+        let hash = Self::compute_key::<T>(key, user);
         let mut current: T = Self::get_low(hash).unwrap_or_default();
         let bytes = current.to_bytes();
         f(&mut current);
@@ -139,10 +136,7 @@ impl Storage {
         }
     }
 
-    fn compute_key<T: Cached>(key: impl AsRef<[u8]>) -> crypto::Hash {
-        let id = with_instance(|i| i.id);
-        debug_assert_ne!(id, Identity::default());
-
+    fn compute_key<T: Cached>(key: impl AsRef<[u8]>, id: Identity) -> crypto::Hash {
         crypto::xor_secrets(crypto::hash::with_nonce(key.as_ref(), T::NONCE), id)
     }
 

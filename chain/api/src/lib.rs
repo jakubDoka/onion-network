@@ -79,6 +79,7 @@ pub fn format_balance(amount: Balance) -> String {
 
 #[derive(Clone)]
 pub struct Client {
+    pub user: NodeIdentity,
     signer: Keypair,
     client: OnlineClient<Config>,
 }
@@ -86,12 +87,17 @@ pub struct Client {
 impl Client {
     pub async fn with_signer(url: &str, signer: Keypair) -> Result<Self> {
         let client = OnlineClient::<Config>::from_url(url).await?;
-        Ok(Self { signer, client })
+        Ok(Self { signer, client, user: Default::default() })
     }
 
     pub async fn without_signer(url: &str) -> Result<Self> {
         let client = OnlineClient::<Config>::from_url(url).await?;
-        Ok(Self { signer: Keypair::from_seed(crypto::SharedSecret::default()).unwrap(), client })
+        let signer = Keypair::from_seed(crypto::SharedSecret::default()).unwrap();
+        Ok(Self { signer, client, user: Default::default() })
+    }
+
+    pub fn with_user(self, user: NodeIdentity) -> Self {
+        Self { user, ..self }
     }
 
     pub fn account_id(&self) -> AccountId {

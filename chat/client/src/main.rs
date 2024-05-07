@@ -16,21 +16,17 @@ use {
     anyhow::Context,
     chain_api::Nonce,
     chat_client_node::{
-        encode_direct_chat_name, BootPhase, FriendMessage, MailVariants, Node, NodeHandle,
-        RequestContext, Sub, UserKeys, Vault,
+        encode_direct_chat_name, BootPhase, FriendMessage, Node, NodeHandle, RequestContext, Sub,
+        UserKeys, Vault,
     },
-    chat_spec::{ChatName, Topic},
-    codec::{Decode, ReminderOwned},
+    chat_spec::{ChatName, Topic, UserName},
     leptos::*,
     leptos_router::{Route, Router, Routes, A},
     libp2p::{
         futures::{FutureExt, StreamExt},
         Multiaddr,
     },
-    std::{
-        cmp::Ordering, convert::identity, fmt::Display, future::Future, net::SocketAddr,
-        time::Duration,
-    },
+    std::{cmp::Ordering, fmt::Display, future::Future, net::SocketAddr, time::Duration},
     web_sys::wasm_bindgen::JsValue,
 };
 
@@ -54,164 +50,136 @@ pub fn main() {
     mount_to_body(App)
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct State {
-    keys: RwSignal<Option<UserKeys>>,
-    requests: StoredValue<Option<NodeHandle>>,
+    keys: RwSignal<UserKeys>,
+    requests: StoredValue<NodeHandle>,
     vault: RwSignal<Vault>,
     vault_version: StoredValue<Nonce>,
     mail_action: StoredValue<Nonce>,
     friend_messages: RwSignal<Option<(ChatName, db::Message)>>,
 }
+impl State {
+    fn dispose(&self) {
+        self.keys.dispose();
+        self.requests.dispose();
+        self.vault.dispose();
+        self.vault_version.dispose();
+        self.mail_action.dispose();
+        self.friend_messages.dispose();
+    }
+}
 
 type Result<T, E = anyhow::Error> = std::result::Result<T, E>;
 
-fn rc_error(name: &'static str) -> impl FnOnce() -> String {
-    move || format!("{name} not available, might need to reload")
-}
-
 impl RequestContext for State {
-    fn try_with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> Result<R>) -> Result<R> {
-        self.vault.try_update(action).with_context(rc_error("vault")).and_then(identity)
+    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> R {
+        self.vault.try_update(action).unwrap()
     }
 
-    fn with_vault<R>(&self, action: impl FnOnce(&mut Vault) -> R) -> Result<R> {
-        self.vault.try_update(action).with_context(rc_error("vault"))
+    fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> R {
+        self.keys.try_with_untracked(action).unwrap()
     }
 
-    fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> Result<R> {
-        self.keys
-            .try_with_untracked(|keys| keys.as_ref().map(action))
-            .flatten()
-            .with_context(rc_error("keys"))
+    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> R {
+        self.vault_version.try_update_value(action).unwrap()
     }
 
-    fn with_vault_version<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
-        self.vault_version.try_update_value(action).with_context(rc_error("vault version"))
-    }
-
-    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> Result<R> {
-        self.mail_action.try_update_value(action).with_context(rc_error("mail action"))
+    fn with_mail_action<R>(&self, action: impl FnOnce(&mut Nonce) -> R) -> R {
+        self.mail_action.try_update_value(action).unwrap()
     }
 
     fn subscription_for<T: Into<Topic> + Clone>(
         &self,
         t: T,
     ) -> impl Future<Output = Result<Sub<T>>> {
-        let fut = self
-            .requests
-            .try_with_value(|r| r.as_ref().map(|r| r.subscription_for(t)))
-            .flatten()
-            .context("dispatch closed");
+        let fut =
+            self.requests.try_with_value(|r| r.subscription_for(t)).context("dispatch closed");
         async { fut?.await.map_err(Into::into) }
     }
 }
 
-impl State {
-    fn set_chat_nonce(&self, chat: ChatName, nonce: Nonce) {
-        self.vault.update(|v| {
-            let chat = v.chats.get_mut(&chat).expect("chat not found");
-            chat.action_no = nonce;
-        });
-    }
-
-    fn chat_secret(self, chat_name: ChatName) -> Option<crypto::SharedSecret> {
-        self.vault.with_untracked(|vault| vault.chats.get(&chat_name).map(|c| c.secret))
-    }
-}
-
-fn App() -> impl IntoView {
-    let (rboot_phase, wboot_phase) = create_signal(None::<BootPhase>);
-    let (errors, set_errors) = create_signal(None::<anyhow::Error>);
-    provide_context(Errors(set_errors));
-    let state = State::default();
-
-    async fn handle_mail(
-        mail: MailVariants,
-        new_messages: &mut Vec<db::Message>,
+async fn init_state(
+    keys: UserKeys,
+    wboot_phase: WriteSignal<Option<BootPhase>>,
+    set_state: WriteSignal<Option<State>>,
+) -> anyhow::Result<()> {
+    async fn handle_msgs(
         state: State,
-    ) -> Result<()> {
-        if let Some((sender, FriendMessage::DirectMessage { content })) =
-            mail.handle(&state).await?
-        {
+        msgs: impl IntoIterator<Item = (UserName, FriendMessage)>,
+    ) -> anyhow::Result<()> {
+        let mut new_messages = Vec::new();
+        for (sender, FriendMessage::DirectMessage { content }) in msgs {
             let message = db::Message {
                 sender,
-                owner: state.with_keys(|k| k.name)?,
+                owner: state.with_keys(|k| k.name),
                 content,
                 chat: encode_direct_chat_name(sender),
             };
             new_messages.push(message.clone());
             state.friend_messages.set(Some((sender, message)));
         }
-        Ok(())
+
+        db::save_messages(&new_messages).await
     }
 
-    fn translate_addr(addr: SocketAddr) -> Multiaddr {
-        let addr = chain_api::unpack_addr_offset(addr, 1);
-        addr.with(libp2p::multiaddr::Protocol::Ws("/".into()))
-    }
+    let identity = keys.identity();
+    navigate_to("/");
+    let (node, vault, dispatch, vault_version, mail_action) =
+        Node::new(keys.clone(), |s| wboot_phase(Some(s)), translate_addr)
+            .await
+            .inspect_err(|_| navigate_to("/login"))?;
 
-    create_effect(move |_| {
-        let Some(keys) = state.keys.get() else {
-            return;
-        };
+    let state = State {
+        keys: create_rw_signal(keys),
+        requests: store_value(dispatch),
+        vault: create_rw_signal(vault),
+        vault_version: store_value(vault_version),
+        mail_action: store_value(mail_action),
+        friend_messages: create_rw_signal(None),
+    };
 
-        handled_spawn_local("initializing node", async move {
-            let identity = keys.identity();
-            navigate_to("/");
-            let (node, vault, dispatch, vault_version, mail_action) =
-                Node::new(keys, |s| wboot_phase(Some(s)), translate_addr)
-                    .await
-                    .inspect_err(|_| navigate_to("/login"))?;
+    set_state(Some(state));
 
-            let listen = async move {
-                let mut new_messages = Vec::new();
-                loop {
-                    let read_mail = async {
-                        let ReminderOwned(list) = state.read_mail().await?;
-                        log::info!("new mail: {list:?}");
-                        for mail in chat_spec::unpack_mail(&list) {
-                            let mail = MailVariants::decode_exact(mail)
-                                .with_context(|| format!("cant decode mail: {mail:?}"))?;
-                            handle_error(handle_mail(mail, &mut new_messages, state).await);
-                        }
-                        db::save_messages(&new_messages).await
-                    };
-                    handle_error(read_mail.await);
+    navigate_to("/chat");
 
-                    let mut profile_sub = state.subscription_for(identity).await?;
-                    let mut account =
-                        profile_sub.subscribe().await.context("subscribin to account")?;
-                    while let Some(mail) = account.next().await {
-                        let task = async {
-                            handle_mail(mail, &mut new_messages, state).await?;
-                            db::save_messages(&new_messages).await
-                        };
-                        handle_error(task.await);
-                        new_messages.clear();
-                    }
-                }
-            };
+    let listen = async move {
+        loop {
+            let read_mail = async { handle_msgs(state, state.read_mail().await?).await };
+            handle_error(read_mail.await);
 
-            state.requests.set_value(Some(dispatch));
-            state.vault.set_untracked(vault);
-            state.vault_version.set_value(vault_version);
-            state.mail_action.set_value(mail_action);
-            navigate_to("/chat");
+            let mut profile_sub = state.subscription_for(identity).await?;
+            let mut account = profile_sub.subscribe().await.context("subscribin to account")?;
+            while let Some(mail) = account.next().await {
+                let task = async { handle_msgs(state, mail.handle(&state).await?).await };
+                handle_error(task.await);
+            }
+        }
+    };
 
-            let res = libp2p::futures::select! {
-                _ = node.fuse() => return Ok(()),
-                e = listen.fuse() => e,
-            };
-            navigate_to("/login");
-            res
-        });
-    });
+    let res = libp2p::futures::select! {
+        _ = node.fuse() => return Ok(()),
+        e = listen.fuse() => e,
+    };
+    navigate_to("/login");
+    res
+}
+
+fn translate_addr(addr: SocketAddr) -> Multiaddr {
+    let addr = chain_api::unpack_addr_offset(addr, 1);
+    addr.with(libp2p::multiaddr::Protocol::Ws("/".into()))
+}
+
+fn App() -> impl IntoView {
+    let (rboot_phase, wboot_phase) = create_signal(None::<BootPhase>);
+    let (errors, set_errors) = create_signal(None::<anyhow::Error>);
+    provide_context(Errors(set_errors));
+    let (state, set_state) = create_signal(None::<State>);
 
     let chat = move || view! { <Chat state/> };
     let profile = move || view! { <Profile state/> };
-    let login = move || view! { <Login state/> };
-    let register = move || view! { <Register state/> };
+    let login = move || view! { <Login set_state wboot_phase/> };
+    let register = move || view! { <Register set_state wboot_phase/> };
     let boot = move || view! { <Boot rboot_phase/> };
 
     view! {
@@ -301,7 +269,7 @@ fn Boot(rboot_phase: ReadSignal<Option<BootPhase>>) -> impl IntoView {
 }
 
 #[component]
-fn Nav(keys: RwSignal<Option<UserKeys>>) -> impl IntoView {
+fn Nav(keys: RwSignal<UserKeys>) -> impl IntoView {
     let menu = create_node_ref::<html::Div>();
     let balance = create_rw_signal(0u128);
 
@@ -310,15 +278,14 @@ fn Nav(keys: RwSignal<Option<UserKeys>>) -> impl IntoView {
         menu.set_hidden(!menu.hidden());
     };
     let reload_balance = handled_async_closure("reloading balance", move || async move {
-        let keys = keys.get_untracked().context("no keys")?;
-        let b = keys.chain_client().await?.get_balance().await?;
+        let b = keys.with(UserKeys::chain_client).await?.get_balance().await?;
         balance.set(b);
         Ok(())
     });
 
     reload_balance();
 
-    let uname = move || keys.get_untracked().as_ref().map_or("", |k| &k.name).to_owned();
+    let uname = move || keys.with(|k| k.name.to_string());
     let balance = move || chain_api::format_balance(balance());
 
     Some(view! {

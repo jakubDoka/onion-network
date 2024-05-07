@@ -1,10 +1,15 @@
 use {
     chat_client_node::{RequestContext, Theme},
     leptos::*,
+    leptos_router::Redirect,
 };
 
 #[component]
-pub fn Profile(state: crate::State) -> impl IntoView {
+pub fn Profile(state: ReadSignal<Option<crate::State>>) -> impl IntoView {
+    let Some(state) = state.get_untracked() else {
+        return view! { <Redirect path="/login"/> }.into_view();
+    };
+
     let colors = Theme::KEYS;
     let style = web_sys::window()
         .unwrap()

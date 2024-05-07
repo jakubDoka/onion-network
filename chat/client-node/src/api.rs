@@ -3,7 +3,7 @@
 #![allow(non_snake_case)]
 
 use {
-    crate::{requests::MailVariants, ChainClientExt, RawChatMessage, RequestContext},
+    crate::{requests::MailVariant, ChainClientExt, RawChatMessage, RequestContext},
     anyhow::Context as _,
     chat_spec::{ChatName, Identity, UserName},
     codec::ReminderOwned,
@@ -199,7 +199,7 @@ struct ChatEvent {
 
 #[wasm_bindgen]
 struct ProfileSubscription {
-    stream: mpsc::Receiver<MailVariants>,
+    stream: mpsc::Receiver<MailVariant>,
     cx: Context,
 }
 
@@ -211,6 +211,18 @@ impl ProfileSubscription {
         let stream =
             cx.profile_subscription().await?.subscribe().await.context("failed to subscribe")?;
         Ok(ProfileSubscription { stream, cx })
+    }
+
+    /// @throw
+    /// call this first before calling `next`
+    #[wasm_bindgen]
+    pub async fn read_mail(&self) -> Result<FriendMessages, Error> {
+        let mail = self.cx.read_mail().await?;
+        let map = |(username, crate::FriendMessage::DirectMessage { content })| FriendMessage {
+            sender: ToString::to_string(&username),
+            content,
+        };
+        Ok(FriendMessages { list: mail.into_iter().map(map).collect() })
     }
 
     /// @throw
@@ -228,7 +240,14 @@ impl ProfileSubscription {
     }
 }
 
+#[wasm_bindgen]
+struct FriendMessages {
+    #[wasm_bindgen(getter_with_clone)]
+    pub list: Vec<FriendMessage>,
+}
+
 #[wasm_bindgen(getter_with_clone)]
+#[derive(Clone)]
 struct FriendMessage {
     pub sender: String,
     pub content: String,

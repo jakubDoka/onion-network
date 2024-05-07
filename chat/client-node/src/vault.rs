@@ -31,21 +31,9 @@ pub struct Vault {
     pub friend_index: HashMap<crypto::Hash, UserName>,
     pub friends: HashMap<UserName, FriendMeta>,
     pub theme: Theme,
+    user: Identity,
     last_update: instant::Instant,
     change_count: usize,
-}
-
-impl Default for Vault {
-    fn default() -> Self {
-        Self {
-            chats: Default::default(),
-            friend_index: Default::default(),
-            friends: Default::default(),
-            theme: Default::default(),
-            last_update: instant::Instant::now(),
-            change_count: Default::default(),
-        }
-    }
 }
 
 fn constant_key(name: &str) -> SharedSecret {
@@ -66,75 +54,91 @@ fn friends() -> SharedSecret {
 
 fn get_encrypted<T: DecodeOwned>(
     key: crypto::Hash,
+    user: Identity,
     decryption_key: SharedSecret,
 ) -> anyhow::Result<T> {
-    let VaultValue(v) = Storage::get(key).context("not found")?;
+    let VaultValue(v) = Storage::get(key, user).context("not found")?;
     let v = chain_api::decrypt(v, decryption_key).context("decryption failed")?;
     Decode::decode_exact(&v).context("invalid encoding")
 }
 
-fn get_plain<T: DecodeOwned>(key: crypto::Hash) -> anyhow::Result<T> {
-    let VaultValue(v) = Storage::get(key).context("not found")?;
+fn get_plain<T: DecodeOwned>(key: crypto::Hash, user: Identity) -> anyhow::Result<T> {
+    let VaultValue(v) = Storage::get(key, user).context("not found")?;
     Decode::decode_exact(&v).context("invalid encoding")
 }
 
 impl Vault {
-    pub fn new(key: SharedSecret) -> Self {
-        Self::repair(key);
-        Self::default()
+    fn new_low(user: Identity) -> Self {
+        Self {
+            chats: Default::default(),
+            friend_index: Default::default(),
+            friends: Default::default(),
+            theme: Default::default(),
+            user,
+            last_update: instant::Instant::now(),
+            change_count: Default::default(),
+        }
     }
 
-    pub fn repair(key: SharedSecret) {
-        fn ensure(key: SharedSecret, id: VaultKey, value: Vec<u8>) {
-            if Storage::ensure(key, &VaultValue(value)) {
-                Storage::update([], |VaultKeys(keys)| _ = keys.insert(id));
-                Storage::update([], |VaultChanges(changes)| _ = changes.insert(id));
+    pub fn new(key: SharedSecret, user: Identity) -> Self {
+        Self::repair(key, user);
+        Self::new_low(user)
+    }
+
+    pub fn repair(key: SharedSecret, user: Identity) {
+        fn ensure(key: SharedSecret, user: Identity, id: VaultKey, value: Vec<u8>) {
+            if Storage::ensure(key, user, &VaultValue(value)) {
+                Storage::update([], user, |VaultKeys(keys)| _ = keys.insert(id));
+                Storage::update([], user, |VaultChanges(changes)| _ = changes.insert(id));
             }
         }
 
-        ensure(chats(), VaultKey::Chats, encrypt(vec![0], key));
-        ensure(theme(), VaultKey::Theme, Theme::default().to_bytes());
-        ensure(friends(), VaultKey::FriendNames, encrypt(vec![0], key));
+        ensure(chats(), user, VaultKey::Chats, encrypt(vec![0], key));
+        ensure(theme(), user, VaultKey::Theme, Theme::default().to_bytes());
+        ensure(friends(), user, VaultKey::FriendNames, encrypt(vec![0], key));
     }
 
-    pub fn from_storage(key: SharedSecret) -> anyhow::Result<Self> {
-        let friends = get_encrypted::<Vec<(UserName, FriendId)>>(friends(), key)
+    pub fn from_storage(key: SharedSecret, user: Identity) -> anyhow::Result<Self> {
+        let friends = get_encrypted::<Vec<(UserName, FriendId)>>(friends(), user, key)
             .context("loading friends")?
             .into_iter()
             .map(|(name, id)| {
-                get_encrypted(id, key)
+                get_encrypted(id, user, key)
                     .map(|pk| (name, FriendMeta { id, ..pk }))
                     .with_context(|| format!("loading friend'{name}'"))
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
         Ok(Self {
-            chats: get_encrypted(chats(), key).context("loading chats")?,
-            theme: get_plain(theme()).context("loading theme")?,
+            chats: get_encrypted(chats(), user, key).context("loading chats")?,
+            theme: get_plain(theme(), user).context("loading theme")?,
             friend_index: friends.iter().map(|(&n, f)| (f.dr.receiver_hash(), n)).collect(),
             friends,
+            user,
             last_update: instant::Instant::now(),
             change_count: 0,
         })
     }
 
-    pub fn needs_refresh(for_version: Nonce) -> bool {
-        Storage::get([]).map_or(true, |VaultVersion(v)| v < for_version)
+    pub fn needs_refresh(for_version: Nonce, user: Identity) -> bool {
+        Storage::get([], user).map_or(true, |VaultVersion(v)| v < for_version)
     }
 
-    pub fn refresh(values: Vec<(crypto::Hash, Vec<u8>)>) {
+    pub fn refresh(values: Vec<(crypto::Hash, Vec<u8>)>, user: Identity) {
         for (key, value) in values {
-            Storage::insert(key, &VaultValue(value));
+            Storage::insert(key, user, &VaultValue(value));
         }
     }
 
     pub fn merkle_hash(&self) -> crypto::Hash {
-        let VaultKeys(keys) = Storage::get([]).unwrap_or_default();
+        let VaultKeys(keys) = Storage::get([], self.user).unwrap_or_default();
 
         let mut hashes = keys
             .iter()
             .filter_map(|k| self.get_key(*k))
-            .filter_map(|k| Storage::get(k).map(|VaultValue(v)| crypto::hash::kv(&k, &v)))
+            .filter_map(|k| {
+                Storage::get(k, self.user).map(|VaultValue(v)| crypto::hash::kv(&k, &v))
+            })
             .collect::<Vec<_>>();
         hashes.sort_unstable();
 
@@ -142,7 +146,7 @@ impl Vault {
     }
 
     pub fn changes(&mut self, forced: bool) -> Vec<(crypto::Hash, Vec<u8>)> {
-        let VaultChanges(changes) = Storage::get([]).unwrap_or_default();
+        let VaultChanges(changes) = Storage::get([], self.user).unwrap_or_default();
         if self.change_count > 40
             || self.last_update.elapsed() > instant::Duration::from_secs(60)
             || changes.len() > 10
@@ -151,7 +155,7 @@ impl Vault {
             changes
                 .into_iter()
                 .filter_map(|k| self.get_key(k))
-                .filter_map(|k| Some((k, Storage::get::<VaultValue>(k)?.0)))
+                .filter_map(|k| Some((k, Storage::get::<VaultValue>(k, self.user)?.0)))
                 .collect()
         } else {
             Vec::new()
@@ -161,8 +165,8 @@ impl Vault {
     pub fn clear_changes(&mut self, version: Nonce) {
         self.change_count = 0;
         self.last_update = instant::Instant::now();
-        Storage::insert([], &VaultChanges::default());
-        Storage::insert([], &VaultVersion(version));
+        Storage::insert([], self.user, &VaultChanges::default());
+        Storage::insert([], self.user, &VaultVersion(version));
     }
 
     pub fn get_repr(&self, id: VaultKey, key: SharedSecret) -> Option<Vec<u8>> {
@@ -200,14 +204,14 @@ impl Vault {
         let value = VaultValue(self.get_repr(id, key)?);
         let key = self.get_key(id)?;
 
-        let current: Option<VaultValue> = Storage::get(key);
+        let current: Option<VaultValue> = Storage::get(key, self.user);
         if current.as_ref() == Some(&value) {
             return None;
         }
 
-        Storage::insert(key, &value);
-        Storage::update([], |VaultKeys(keys)| _ = keys.insert(id));
-        Storage::update([], |VaultChanges(changes)| _ = changes.insert(id));
+        Storage::insert(key, self.user, &value);
+        Storage::update([], self.user, |VaultKeys(keys)| _ = keys.insert(id));
+        Storage::update([], self.user, |VaultChanges(changes)| _ = changes.insert(id));
         self.change_count += 1;
 
         Some(())

@@ -1,5 +1,5 @@
 use {
-    crate::{min_nodes, MailVariants, RawResponse, Storage, UserKeys, Vault},
+    crate::{min_nodes, MailVariant, RawResponse, Storage, UserKeys, Vault},
     anyhow::Context,
     chain_api::NodeIdentity,
     chat_spec::*,
@@ -64,8 +64,6 @@ impl Node {
 
         set_state!(FetchNodesAndProfile);
 
-        Storage::set_id(keys.identity());
-
         wasm_if! {
             let transport = websocket_websys::Transport::default(),
             let transport = libp2p::tcp::tokio::Transport::default()
@@ -96,9 +94,11 @@ impl Node {
             config.with_idle_connection_timeout(std::time::Duration::from_secs(10)),
         );
 
+        let profile = keys.to_identity();
         let (commands_rx, requests) = mpsc::channel(10);
         let subs = Arc::new(Subs::default());
-        let handle = NodeHandle::new(commands_rx, &subs, swarm.behaviour_mut().chat_dht.table);
+        let handle =
+            NodeHandle::new(commands_rx, &subs, swarm.behaviour_mut().chat_dht.table, profile.sign);
         let chain_api = keys.chain_client().await?;
         let node_request = chain_api.list_chat_nodes();
         let satelite_request = chain_api.list_satelite_nodes();
@@ -106,7 +106,6 @@ impl Node {
         let (node_data, satelite_data, profile_hash) =
             futures::try_join!(node_request, satelite_request, profile_request)?;
         let profile_hash = profile_hash.context("profile not found")?;
-        let profile = keys.to_identity();
 
         anyhow::ensure!(
             profile_hash.sign == profile.sign && profile_hash.enc == profile.enc,
@@ -125,7 +124,9 @@ impl Node {
 
         let routes = swarm.behaviour_mut().chat_dht.table.read();
         for route in { routes }.iter() {
-            if let Some(keys) = Storage::get::<enc::PublicKey>(NodeIdentity::from(route.id)) {
+            if let Some(keys) =
+                Storage::get::<enc::PublicKey>(NodeIdentity::from(route.id), profile.sign)
+            {
                 swarm.behaviour_mut().key_share.keys.insert(route.peer_id(), keys);
                 reminimg -= 1;
                 continue;
@@ -139,7 +140,7 @@ impl Node {
                     SwarmEvent::Behaviour(BehaviourEvent::KeyShare((peer, key))) => {
                         reminimg -= 1;
                         set_state!(CollecringKeys(reminimg));
-                        Storage::insert(peer.to_hash(), &key);
+                        Storage::insert(peer.to_hash(), profile.sign, &key);
                     }
                     SwarmEvent::OutgoingConnectionError { .. } => {
                         reminimg -= 1;
@@ -205,10 +206,10 @@ impl Node {
             .await
             .context("creating account")?;
 
-            Vault::new(keys.vault)
+            Vault::new(keys.vault, profile.sign)
         } else {
-            if !Vault::needs_refresh(vault_nonce)
-                && let Ok(vault) = Vault::from_storage(keys.vault)
+            if !Vault::needs_refresh(vault_nonce, profile.sign)
+                && let Ok(vault) = Vault::from_storage(keys.vault, profile.sign)
             {
                 vault
             } else {
@@ -220,9 +221,10 @@ impl Node {
                 )
                 .await
                 .context("fetching vault")
-                .map(|ReminderVec(v)| Vault::refresh(v))?;
-                Vault::repair(keys.vault);
-                Vault::from_storage(keys.vault).context("welp, your account is fucked")?
+                .map(|ReminderVec(v)| Vault::refresh(v, profile.sign))?;
+                Vault::repair(keys.vault, profile.sign);
+                Vault::from_storage(keys.vault, profile.sign)
+                    .context("welp, your account is fucked")?
             }
         };
 
@@ -325,8 +327,8 @@ enum RegisteredCall {
     ChatSub(ChatName, mpsc::Sender<ChatEvent>),
     NewChatSub(ChatName, mpsc::Sender<ChatEvent>),
     Request(oneshot::Sender<RawResponse>),
-    ProfileSub(Identity, mpsc::Sender<MailVariants>),
-    NewProfileSub(Identity, mpsc::Sender<MailVariants>),
+    ProfileSub(Identity, mpsc::Sender<MailVariant>),
+    NewProfileSub(Identity, mpsc::Sender<MailVariant>),
 }
 
 pub enum NodeRequest {
@@ -337,6 +339,7 @@ pub struct NodeHandle {
     subs: sync::Weak<Subs>,
     requests: mpsc::Sender<NodeRequest>,
     dht: dht::SharedRoutingTable,
+    user: Identity,
 }
 
 impl NodeHandle {
@@ -344,8 +347,9 @@ impl NodeHandle {
         requests: mpsc::Sender<NodeRequest>,
         subs: &Arc<Subs>,
         dht: dht::SharedRoutingTable,
+        user: Identity,
     ) -> Self {
-        Self { requests, subs: Arc::downgrade(subs), dht }
+        Self { requests, subs: Arc::downgrade(subs), dht, user }
     }
 
     fn upgrade(&self) -> io::Result<Arc<RwLock<HashMap<NodeIdentity, RawSub>>>> {
@@ -356,6 +360,7 @@ impl NodeHandle {
         &self,
         topic: T,
     ) -> impl Future<Output = io::Result<Sub<T>>> {
+        let user = self.user;
         let subs = self.upgrade();
         let mut rqs = self.requests.clone();
         let raw_topic = topic.clone().into();
@@ -367,7 +372,7 @@ impl NodeHandle {
 
             for repl in replicatios.clone() {
                 if let Some(sub) = subs.read().unwrap().get(&NodeIdentity::from(repl)) {
-                    return Ok(Sub { topic, sub: sub.clone() });
+                    return Ok(Sub { topic, sub: sub.clone(), user });
                 }
             }
 
@@ -379,7 +384,7 @@ impl NodeHandle {
             debug_assert!(replicatios.contains(&node.into()));
             let sub = RawSub::new(stream, Arc::downgrade(&subs), node);
             subs.write().unwrap().insert(node, sub.clone());
-            Ok(Sub { topic, sub })
+            Ok(Sub { topic, sub, user })
         }
     }
 }
@@ -395,6 +400,7 @@ impl Drop for NodeHandle {
 
 #[derive(Clone)]
 pub struct Sub<T> {
+    pub(crate) user: NodeIdentity,
     pub(crate) topic: T,
     pub(crate) sub: RawSub,
 }
@@ -417,7 +423,7 @@ impl Sub<ChatName> {
 }
 
 impl Sub<Identity> {
-    pub async fn subscribe(&mut self) -> Option<mpsc::Receiver<MailVariants>> {
+    pub async fn subscribe(&mut self) -> Option<mpsc::Receiver<MailVariant>> {
         let (tx, rx) = mpsc::channel(10);
         self.subscribe_low(RegisteredCall::NewProfileSub(self.topic, tx)).await?;
         Some(rx)
@@ -593,7 +599,7 @@ impl RawSub {
                     }
                 }
                 &mut RegisteredCall::ProfileSub(id, ref mut ch) => 'a: {
-                    let Some(ev) = MailVariants::decode_exact(&data) else {
+                    let Some(ev) = MailVariant::decode_exact(&data) else {
                         log::error!("invalid chat event received");
                         break 'a;
                     };

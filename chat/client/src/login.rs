@@ -1,6 +1,7 @@
 use {
     crate::{handled_async_callback, State, UserKeys},
     anyhow::Context,
+    chat_client_node::BootPhase,
     chat_spec::UserName,
     leptos::{
         html::{Div, Input},
@@ -11,17 +12,31 @@ use {
 };
 
 #[component]
-pub fn Register(state: State) -> impl IntoView {
-    form(state, true)
+pub fn Register(
+    set_state: WriteSignal<Option<State>>,
+    wboot_phase: WriteSignal<Option<BootPhase>>,
+) -> impl IntoView {
+    form(set_state, wboot_phase, true)
 }
 
 #[component]
-pub fn Login(state: State) -> impl IntoView {
-    form(state, false)
+pub fn Login(
+    set_state: WriteSignal<Option<State>>,
+    wboot_phase: WriteSignal<Option<BootPhase>>,
+) -> impl IntoView {
+    form(set_state, wboot_phase, false)
 }
 
-fn form(state: State, register: bool) -> impl IntoView {
-    state.requests.set_value(None);
+fn form(
+    state: WriteSignal<Option<State>>,
+    wboot_phase: WriteSignal<Option<BootPhase>>,
+    register: bool,
+) -> impl IntoView {
+    state.update_untracked(|state| {
+        if let Some(state) = state.take() {
+            state.dispose();
+        }
+    });
 
     let action = if register { "register" } else { "login" };
 
@@ -56,7 +71,8 @@ fn form(state: State, register: bool) -> impl IntoView {
             keys.register().await?;
         }
 
-        state.keys.set(Some(keys));
+        crate::init_state(keys, wboot_phase, state).await?;
+
         Ok(())
     });
 

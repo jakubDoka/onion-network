@@ -98,7 +98,7 @@ build_chain() { (cd chain/substrate-tests && cargo build --release); }
 build_client() { # rebuild the client, if `run_wasm` is called, it will trigger hotreload
 	creq trunk
 	ensure_dir $CLIENT_DIST
-	(cd chat/client && trunk build $WASM_FLAGS --features building -d $CLIENT_DIST || exit 1)
+	(cd chat/client && trunk build $WASM_FLAGS -d $CLIENT_DIST || exit 1)
 }
 build_all() { build_native; build_client; }
 

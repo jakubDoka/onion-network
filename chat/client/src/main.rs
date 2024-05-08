@@ -78,7 +78,7 @@ impl RequestContext for State {
     }
 
     fn with_vault<R>(&self, action: impl FnOnce(&Vault) -> R) -> R {
-        self.vault.try_with(action).unwrap()
+        self.vault.try_with_untracked(action).unwrap()
     }
 
     fn with_keys<R>(&self, action: impl FnOnce(&UserKeys) -> R) -> R {
@@ -282,8 +282,8 @@ fn Nav(keys: RwSignal<UserKeys>) -> impl IntoView {
         menu.set_hidden(!menu.hidden());
     };
     let reload_balance = handled_async_closure("reloading balance", move || async move {
-        let b = keys.with(UserKeys::chain_client).await?.get_balance().await?;
-        balance.set(b);
+        let b = keys.with_untracked(UserKeys::chain_client).await?.get_balance().await?;
+        balance.set(b.context("balance not found, chain deleted us")?);
         Ok(())
     });
 

@@ -29,6 +29,7 @@ storage-spec.workspace = true
 streaming.workspace = true
 opfusk = { workspace = true }
 merkle-tree = { workspace = true }
+rand_chacha = "0.3.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 chain-api = { workspace = true, features = ["native"], default-features = false }
@@ -67,5 +68,4 @@ workspace = true
 
 [features]
 default = []
-building = []
 api = []

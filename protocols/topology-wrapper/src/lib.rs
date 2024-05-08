@@ -68,7 +68,7 @@ pub mod collector {
         std::{convert::Infallible, marker::PhantomData},
     };
 
-    pub fn new<W: World>(_: PeerId, _: W) -> Behaviour<W> {
+    pub fn new<W: World>(_: W) -> Behaviour<W> {
         Behaviour { world: PhantomData }
     }
 
@@ -149,8 +149,8 @@ pub mod collector {
         std::convert::Infallible,
     };
 
-    pub fn new<W: World>(peer_id: PeerId, world: W) -> Behaviour<W> {
-        Behaviour::new(peer_id, world)
+    pub fn new<W: World>(world: W) -> Behaviour<W> {
+        Behaviour::new(world)
     }
 
     mod foo {
@@ -160,35 +160,31 @@ pub mod collector {
             impl libp2p::futures::Stream<Item = (io::Result<Update>, PeerId)> + Unpin;
 
         pub fn update_stream(stream: libp2p::Stream, peer_id: PeerId) -> UpdateStream {
-            Box::pin(libp2p::futures::stream::unfold(stream, move |mut stream| async move {
+            Box::pin(libp2p::futures::stream::unfold(Some(stream), move |mut stream| async move {
                 let mut buffer = [0u8; 1024];
                 let mut len = [0u8; 2];
+                let str = stream.as_mut()?;
                 let res = async {
-                    stream.read_exact(&mut len).await?;
+                    str.read_exact(&mut len).await?;
                     let len = u16::from_be_bytes(len) as usize;
-                    stream.read_exact(&mut buffer[..len]).await?;
+                    debug_assert!(len != 0);
+                    str.read_exact(&mut buffer[..len]).await?;
                     Update::decode_exact(&buffer[..len]).ok_or(io::ErrorKind::InvalidData.into())
                 };
-                Some(((res.await, peer_id), stream))
+                Some(((res.await.inspect_err(|_| _ = stream.take()), peer_id), stream))
             }))
         }
     }
 
     pub struct Behaviour<W: World> {
-        peer_id: PeerId,
         world: W,
         listeners: SelectAll<foo::UpdateStream>,
         pending_connections: Vec<PeerId>,
     }
 
     impl<W: World> Behaviour<W> {
-        pub fn new(peer_id: PeerId, world: W) -> Self {
-            Self {
-                peer_id,
-                world,
-                listeners: Default::default(),
-                pending_connections: Default::default(),
-            }
+        pub fn new(world: W) -> Self {
+            Self { world, listeners: Default::default(), pending_connections: Default::default() }
         }
 
         pub fn world_mut(&mut self) -> &mut W {
@@ -211,7 +207,7 @@ pub mod collector {
             _local_addr: &libp2p::Multiaddr,
             _remote_addr: &libp2p::Multiaddr,
         ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-            Ok(crate::report::Handler::connecting())
+            Ok(crate::report::Handler::default())
         }
 
         fn handle_established_outbound_connection(
@@ -258,9 +254,7 @@ pub mod collector {
                     continue;
                 };
 
-                if update.peer != self.peer_id {
-                    self.world.handle_update(peer, update);
-                }
+                self.world.handle_update(peer, update);
             }
         }
     }
@@ -585,7 +579,14 @@ pub mod report {
             Ok(Handler::default())
         }
 
-        fn on_swarm_event(&mut self, _event: libp2p::swarm::FromSwarm) {}
+        fn on_swarm_event(&mut self, event: libp2p::swarm::FromSwarm) {
+            match event {
+                libp2p::swarm::FromSwarm::ConnectionClosed(c) => {
+                    self.listeners.retain(|l| l.peer != c.peer_id);
+                }
+                _ => {}
+            }
+        }
 
         fn on_connection_handler_event(
             &mut self,
@@ -631,7 +632,10 @@ pub mod report {
                 };
 
                 if should_update {
-                    self.listeners.retain_mut(|l| l.sender.try_send(update.clone()).is_ok());
+                    self.listeners.retain_mut(|l| {
+                        _ = l.sender.try_send(update.clone()).is_ok();
+                        true
+                    });
 
                     if let Some(peer) = self.topology.get(&update.peer)
                         && let Some(connection) = peer.get(&update.connection)
@@ -639,7 +643,10 @@ pub mod report {
                     {
                     } else {
                         update.event = Event::Closed;
-                        self.listeners.retain_mut(|l| l.sender.try_send(update.clone()).is_ok());
+                        self.listeners.retain_mut(|l| {
+                            _ = l.sender.try_send(update.clone()).is_ok();
+                            true
+                        });
                     }
                 }
             }
@@ -657,7 +664,6 @@ pub mod report {
     }
 
     impl Handler {
-        #[must_use]
         pub fn connecting() -> Self {
             Self { connected: None, connect: true }
         }

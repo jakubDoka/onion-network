@@ -1,0 +1,19 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+component-utils = { workspace = true }
+libp2p = { workspace = true }
+log = { workspace = true }
+lru = "0.12.3"
+void = "1.0.2"
+
+[lints]
+workspace = true

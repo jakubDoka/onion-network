@@ -23,10 +23,10 @@ use {
     chain_api::{Nonce, Profile},
     chat_spec::*,
     codec::{DecodeOwned, Encode},
-    crypto::{enc, sign},
+    crypto::{enc, rand_core::CryptoRngCore, sign},
     libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    rand::{CryptoRng, RngCore},
-    std::{future::Future, io, sync::Arc, time::Duration},
+    rand::SeedableRng,
+    std::{array, future::Future, io, sync::Arc, time::Duration},
     storage_spec::ClientError,
 };
 pub use {
@@ -113,45 +113,32 @@ pub struct UserKeys {
 
 impl UserKeys {
     pub fn new(name: UserName, password: &str, chain_url: &str) -> Self {
-        struct Entropy<'a>(&'a [u8]);
+        let mut bytes = [0; 32];
 
-        impl RngCore for Entropy<'_> {
-            fn next_u32(&mut self) -> u32 {
-                unimplemented!()
-            }
-
-            fn next_u64(&mut self) -> u64 {
-                unimplemented!()
-            }
-
-            fn fill_bytes(&mut self, dest: &mut [u8]) {
-                let data = (&mut self.0).take(..dest.len()).expect("not enough entropy");
-                dest.copy_from_slice(data);
-            }
-
-            fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> std::result::Result<(), rand::Error> {
-                self.fill_bytes(bytes);
-                Ok(())
-            }
-        }
-
-        impl CryptoRng for Entropy<'_> {}
-
-        const VALUT: usize = 32;
-        const ENC: usize = 64 + 32;
-        const SIGN: usize = 32 + 48;
-        const HOT: usize = 32;
-        let mut bytes = [0; VALUT + ENC + SIGN + HOT];
         Argon2::default()
             .hash_password_into(password.as_bytes(), &username_to_raw(name), &mut bytes)
             .unwrap();
+        let mut entropy = rand_chacha::ChaChaRng::from_seed(bytes);
 
-        let mut entropy = Entropy(&bytes);
+        Self::new_from_entropy(name, &mut entropy, chain_url)
+    }
 
-        let sign = sign::Keypair::new(&mut entropy);
-        let enc = enc::Keypair::new(&mut entropy);
-        let vault = crypto::new_secret(&mut entropy);
-        let hot_wallet = crypto::new_secret(&mut entropy);
+    pub fn from_mnemonic(name: UserName, mnemonic: chain_api::Mnemonic, chain_url: &str) -> Self {
+        let seed = mnemonic.to_seed("");
+        let seed = array::from_fn(|i| seed[i] ^ seed[i + 32]);
+        let mut entropy = rand_chacha::ChaChaRng::from_seed(seed);
+        Self::new_from_entropy(name, &mut entropy, chain_url)
+    }
+
+    pub fn new_from_entropy(
+        name: UserName,
+        entropy: &mut impl CryptoRngCore,
+        chain_url: &str,
+    ) -> Self {
+        let sign = sign::Keypair::new(&mut *entropy);
+        let enc = enc::Keypair::new(&mut *entropy);
+        let vault = crypto::new_secret(&mut *entropy);
+        let hot_wallet = crypto::new_secret(&mut *entropy);
         Self { name, sign, enc, vault, hot_wallet, chain_url: chain_url.into() }
     }
 

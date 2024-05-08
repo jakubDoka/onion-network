@@ -1,4 +1,5 @@
 use {
+    chat_spec::UserName,
     crypto::rand_core::OsRng,
     dht::Route,
     libp2p::{
@@ -6,7 +7,7 @@ use {
         futures::StreamExt,
         multiaddr,
         swarm::{ConnectionId, NetworkBehaviour},
-        PeerId, Transport,
+        PeerId, StreamProtocol, Transport,
     },
     macroquad::prelude::*,
     opfusk::ToPeerId as _,
@@ -51,10 +52,6 @@ impl Nodes {
     fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut Node)> + '_ {
         self.inner.iter_mut().enumerate().filter_map(|(i, node)| Some((i, node.as_mut()?)))
     }
-
-    // fn len(&self) -> usize {
-    //     self.inner.len()
-    // }
 
     fn retain(&mut self, mut keep: impl FnMut(&mut Node) -> bool) {
         for (i, node) in self.inner.iter_mut().enumerate() {
@@ -160,7 +157,7 @@ impl Node {
 
 #[derive(Debug)]
 struct Protocol {
-    name: String,
+    name: StreamProtocol,
     color: Color,
 }
 
@@ -189,10 +186,16 @@ impl Default for World {
             servers: HashSet::new(),
             edges: BTreeMap::new(),
             protocols: vec![
-                Protocol { name: "/onion/rot/0.1.0".into(), color: Color::from_hex(0x0066_00cc) },
-                Protocol { name: "/onion/ksr/0.1.0".into(), color: Color::from_hex(0x00cc_ccff) },
                 Protocol {
-                    name: "/streaming/streaming/0.1.0".into(),
+                    name: StreamProtocol::new("/onion/rot/0.1.0"),
+                    color: Color::from_hex(0x0066_00cc),
+                },
+                Protocol {
+                    name: StreamProtocol::new("/onion/ksr/0.1.0"),
+                    color: Color::from_hex(0x00cc_ccff),
+                },
+                Protocol {
+                    name: StreamProtocol::new("/orion-den/chat/0.1.0"),
                     color: Color::from_hex(0x0000_ffff),
                 },
             ],
@@ -207,15 +210,14 @@ impl World {
         self.nodes.push(node)
     }
 
-    fn add_protocol(&mut self, protocol: &str) -> usize {
+    fn add_protocol(&mut self, protocol: StreamProtocol) -> usize {
         if let Some(index) = self.protocols.iter().position(|p| p.name == protocol) {
             return index;
         }
 
         let index = self.protocols.len();
         let rand_config = rand::gen_range(u32::MIN, u32::MAX);
-        self.protocols
-            .push(Protocol { name: protocol.to_owned(), color: Color::from_hex(rand_config) });
+        self.protocols.push(Protocol { name: protocol, color: Color::from_hex(rand_config) });
         index
     }
 
@@ -287,7 +289,7 @@ impl World {
         let mut cursor = 30.0;
 
         for protocol in &self.protocols {
-            draw_text(&protocol.name, 10.0, cursor, 30.0, protocol.color);
+            draw_text(protocol.name.as_ref(), 10.0, cursor, 30.0, protocol.color);
             cursor += 30.0;
         }
     }
@@ -321,38 +323,26 @@ impl topology_wrapper::World for WorldRc {
             return;
         }
 
+        let (start, end) = (index.min(other), index.max(other));
+
         use topology_wrapper::Event as E;
+        let protocol = s.add_protocol(update.protocol);
         let brightness = match update.event {
             E::Stream => 0.5,
             E::Packet => 1.0,
             E::Closed => {
-                let protocol = s.add_protocol(update.protocol.as_ref());
-                s.edges.retain(|edge, _| {
-                    (edge.start != index || edge.end != other)
-                        && (edge.start != other || edge.end != index)
-                        || edge.connection != update.connection
-                        || edge.protocol != protocol
-                });
+                s.edges.remove(&Edge { start, end, protocol, connection: update.connection });
                 return;
             }
         };
 
-        let protocol = s.add_protocol(update.protocol.as_ref());
         if let Some(node) = s.nodes.get_mut(index) {
             node.brightness = 1.0;
         }
         if let Some(node) = s.nodes.get_mut(other) {
             node.brightness = 1.0;
         }
-        s.add_edge(
-            Edge {
-                start: index.max(other),
-                end: index.min(other),
-                protocol,
-                connection: update.connection,
-            },
-            brightness,
-        );
+        s.add_edge(Edge { start, end, protocol, connection: update.connection }, brightness);
     }
 }
 
@@ -362,27 +352,34 @@ struct Behaviour {
     dht: dht::Behaviour,
 }
 
-fn chain_node() -> String {
-    // TODO: handle multiple nodes
-    component_utils::build_env!(pub CHAIN_NODES);
-    CHAIN_NODES.to_string()
-}
-
 #[macroquad::main("Topology-Vis")]
 async fn main() {
+    let chain_node = option_env!("CHAIN_NODES").unwrap_or("ws://localhost:9944");
+
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Info).unwrap();
 
-    let kp = crypto::sign::Keypair::new(OsRng);
-    let peer_id = kp.to_peer_id();
+    use web_sys::wasm_bindgen::JsCast as _;
+
+    let doc = web_sys::window().unwrap().document().unwrap();
+    let get_input = |id| {
+        doc.get_element_by_id(id).unwrap().dyn_into::<web_sys::HtmlInputElement>().unwrap().value()
+    };
+    let name = get_input("name");
+    let password = get_input("password");
+
+    let keys =
+        chat_client_node::UserKeys::new(UserName::from(&name).unwrap(), &password, chain_node);
+
+    let peer_id = keys.sign.to_peer_id();
     let transport = websocket_websys::Transport::default()
         .upgrade(Version::V1)
-        .authenticate(opfusk::Config::new(OsRng, kp))
+        .authenticate(opfusk::Config::new(OsRng, keys.sign))
         .multiplex(libp2p::yamux::Config::default())
         .boxed();
     let world = WorldRc::default();
     let behaviour = Behaviour {
-        collector: topology_wrapper::collector::Behaviour::new(peer_id, world),
+        collector: topology_wrapper::collector::Behaviour::new(world),
         dht: dht::Behaviour::default(),
     };
     let mut swarm = libp2p::Swarm::new(
@@ -393,7 +390,9 @@ async fn main() {
     );
 
     spawn_local(async move {
-        let nodes = chain_api::Client::without_signer(&chain_node())
+        let chain_node = option_env!("CHAIN_NODES").unwrap_or("ws://localhost:9944");
+
+        let nodes = chain_api::Client::without_signer(chain_node)
             .await
             .unwrap()
             .list_chat_nodes()
@@ -402,7 +401,6 @@ async fn main() {
         for (id, addr) in nodes {
             let addr =
                 chain_api::unpack_addr_offset(addr, 1).with(multiaddr::Protocol::Ws("/".into()));
-            log::info!("dialing node: {:?} at {:?}", id, addr);
             let route = Route::new(id, addr);
             let peer_id = route.peer_id();
             swarm.behaviour_mut().dht.table.write().insert(route);

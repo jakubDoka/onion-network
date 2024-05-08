@@ -1,5 +1,6 @@
 pub use {
     chain_types::runtime_types::{
+        pallet_chat_subs::pallet::Subscription,
         pallet_node_staker::pallet::{
             Event as ChatStakeEvent, Event2 as SateliteStakeEvent, NodeAddress, Stake as ChatStake,
             Stake2 as SateliteStake,
@@ -51,6 +52,12 @@ pub type NodeIdentity = crypto::Hash;
 pub type NodeVec = Vec<(NodeIdentity, SocketAddr)>;
 
 pub const USER_NAME_CAP: usize = 32;
+pub const SUBSCRIPTION_TIMEOUT: u64 = 60 * 60 * 24 * 31;
+pub const MIN_SUB_FUNDS: Balance = 1_000_000_000;
+
+pub fn is_valid_sub(sub: &Subscription, now: u64) -> bool {
+    sub.funds >= MIN_SUB_FUNDS && sub.created_at + SUBSCRIPTION_TIMEOUT >= now
+}
 
 pub async fn wait_for_in_block(
     mut progress: TxProgress<Config, OnlineClient<Config>>,
@@ -99,10 +106,19 @@ impl Client {
         self.signer.public_key().to_account_id()
     }
 
-    pub async fn get_balance(&self) -> Result<Balance> {
+    pub async fn subscribe(&self, identity: NodeIdentity, amount: Balance) -> Result<()> {
+        let call = polkadot::tx().chat_subs().subscribe(identity, amount);
+        self.handle(call, self.get_nonce().await?).await
+    }
+
+    pub async fn get_subscription(&self, identity: NodeIdentity) -> Result<Option<Subscription>> {
+        let q = chain_types::storage().chat_subs().subscriptions(identity);
+        self.client.storage().at_latest().await?.fetch(&q).await
+    }
+
+    pub async fn get_balance(&self) -> Result<Option<Balance>> {
         let q = chain_types::storage().system().account(self.account_id());
-        let fetched = self.client.storage().at_latest().await?.fetch(&q).await?;
-        fetched.ok_or_else(|| Error::Other("not found".to_string())).map(|b| b.data.free)
+        Ok(self.client.storage().at_latest().await?.fetch(&q).await?.map(|b| b.data.free))
     }
 
     pub async fn get_nonce(&self) -> Result<u64> {
@@ -246,7 +262,7 @@ impl Client {
         data.2 .0 = Some(nonce);
         let signed = self.client.tx().create_signed(&call, &self.signer, data).await?;
         let progress = signed.submit_and_watch().await?;
-        wait_for_in_block(progress, false).await.map(drop)
+        wait_for_in_block(progress, true).await.map(drop)
     }
 }
 

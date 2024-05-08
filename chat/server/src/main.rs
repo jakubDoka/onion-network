@@ -31,14 +31,14 @@ use {
     dht::{Route, SharedRoutingTable},
     handlers::CallId,
     libp2p::{
-        core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version},
+        core::{multiaddr, muxing::StreamMuxerBox, upgrade::Version, ConnectedPoint},
         futures::{
             channel::{mpsc, oneshot},
             future::{Either, JoinAll, TryJoinAll},
             stream::FuturesUnordered,
             AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt, TryFutureExt,
         },
-        swarm::{NetworkBehaviour, SwarmEvent},
+        swarm::{ListenError, NetworkBehaviour, SwarmEvent},
         Multiaddr, PeerId,
     },
     onion::{key_share, EncryptedStream, PathId},
@@ -46,13 +46,14 @@ use {
     rand_core::OsRng,
     std::{
         collections::HashMap,
+        error::Error,
         future::Future,
         io,
         net::Ipv4Addr,
         ops::DerefMut,
         path::PathBuf,
         task::Poll,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime},
     },
     storage::Storage,
     topology_wrapper::BuildWrapped,
@@ -66,6 +67,7 @@ mod storage;
 mod tests;
 
 const STREAM_POOL_STREAM_LIFETIME: Duration = Duration::from_secs(5);
+pub const BAN_TIMEOUT: u64 = 60 * 3;
 
 type Context = &'static OwnedContext;
 type SE = libp2p::swarm::SwarmEvent<<Behaviour as NetworkBehaviour>::ToSwarm>;
@@ -171,6 +173,10 @@ impl Server {
                 report: topology_wrapper::report::new(receiver),
                 streaming: streaming::Behaviour::new(|| chat_spec::PROTO_NAME)
                     .include_in_vis(sender),
+                gateway: gateway::Behaviour::new(Auth {
+                    client: config.chain.client().await?,
+                    allowed_port: port,
+                }),
             },
             keys.sign.to_peer_id(),
             libp2p::swarm::Config::with_tokio_executor()
@@ -274,6 +280,28 @@ impl Server {
                 });
             }
             SwarmEvent::Behaviour(_ev) => {}
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                connection_id,
+                endpoint: ConnectedPoint::Listener { send_back_addr, .. },
+                num_established,
+                cause: Some(cause),
+            } => {
+                log::warn!(
+                    "connection with {peer_id} closed, id: {connection_id}, endpoint: {send_back_addr}, established: {num_established}, cause: {cause}"
+                );
+            }
+            SwarmEvent::IncomingConnectionError {
+                connection_id,
+                local_addr,
+                send_back_addr,
+                error: ListenError::Denied { cause },
+            } => {
+                let error = cause.source().unwrap();
+                log::warn!(
+                    "incoming connection failed, id: {connection_id}, local: {local_addr}, send_back: {send_back_addr}, error: {error:#}"
+                );
+            }
             e => log::debug!("{e:?}"),
         }
     }
@@ -378,12 +406,13 @@ impl AsMut<dht::Behaviour> for Server {
 }
 
 #[derive(NetworkBehaviour)]
-pub struct Behaviour {
+struct Behaviour {
     onion: topology_wrapper::Behaviour<onion::Behaviour>,
     dht: dht::Behaviour,
     report: topology_wrapper::report::Behaviour,
     key_share: topology_wrapper::Behaviour<key_share::Behaviour>,
     streaming: topology_wrapper::Behaviour<streaming::Behaviour>,
+    gateway: gateway::Behaviour<Auth>,
 }
 
 pub enum ClientEvent {
@@ -490,6 +519,51 @@ async fn run_client(
 pub enum OnlineLocation {
     Local(PathId),
     Remote(NodeIdentity),
+}
+
+#[derive(Clone)]
+struct Auth {
+    client: chain_api::Client,
+    allowed_port: u16,
+}
+
+impl gateway::Auth for Auth {
+    type Future = impl Future<Output = Result<gateway::Validity, gateway::Validity>>;
+
+    fn should_validate(&mut self, _remote: &libp2p::Multiaddr, local: &libp2p::Multiaddr) -> bool {
+        !local
+            .iter()
+            .any(|addr| matches!(addr, libp2p::multiaddr::Protocol::Udp(port) | libp2p::multiaddr::Protocol::Tcp(port) if port == self.allowed_port))
+    }
+
+    fn translate_peer_id(&mut self, pid: libp2p::PeerId) -> Option<gateway::NodeId> {
+        pid.try_to_hash()
+    }
+
+    fn translate_node_id(&mut self, node_id: gateway::NodeId) -> libp2p::PeerId {
+        node_id.to_peer_id()
+    }
+
+    fn auth(&mut self, node_id: gateway::NodeId) -> Self::Future {
+        let s = self.clone();
+        let now = now();
+        async move {
+            match s.client.get_subscription(node_id).await {
+                Ok(Some(sub)) if chain_api::is_valid_sub(&sub, now) => {
+                    Ok(sub.created_at + chain_api::SUBSCRIPTION_TIMEOUT)
+                }
+                Ok(_) => Err(now + BAN_TIMEOUT),
+                Err(e) => {
+                    log::error!("auth: failed to get subscription: {e}");
+                    Err(now + BAN_TIMEOUT)
+                }
+            }
+        }
+    }
+}
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::MAX).as_secs()
 }
 
 const STREAM_CACHE_SIZE: usize = 10;

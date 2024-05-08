@@ -37,6 +37,7 @@ lmdb-zero = "0.4.4"
 lru = { version = "0.12.3", features = ["nightly"] }
 base64 = "0.22.1"
 merkle-tree = { version = "0.1.0", path = "../../crypto/merkle-tree" }
+gateway = { version = "0.1.0", path = "../../protocols/gateway" }
 
 [lints]
 workspace = true

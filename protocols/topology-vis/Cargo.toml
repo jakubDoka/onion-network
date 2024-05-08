@@ -25,6 +25,9 @@ topology-wrapper = { workspace = true }
 crypto.workspace = true
 opfusk.workspace = true
 websocket-websys = { version = "0.1.0", path = "../../utils/websocket-websys" }
+chat-client-node.workspace = true
+web-sys = "0.3.69"
+chat-spec.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.chain-api]
 workspace = true
@@ -35,9 +38,6 @@ default-features = false
 workspace = true
 features = ["web"]
 default-features = false 
-
-[features]
-building = []
 
 [lints]
 workspace = true

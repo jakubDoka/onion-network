@@ -16,16 +16,6 @@ macro_rules! field {
 }
 
 #[macro_export]
-macro_rules! build_env {
-    ($vis:vis $name:ident) => {
-        #[cfg(feature = "building")]
-        $vis const $name: &str = env!(stringify!($name));
-        #[cfg(not(feature = "building"))]
-        $vis const $name: &str = "";
-    };
-}
-
-#[macro_export]
 macro_rules! decl_stream_protocol {
     ($decl_name:ident = $name:literal) => {
         pub const $decl_name: libp2p::StreamProtocol = libp2p::StreamProtocol::new(concat!(
